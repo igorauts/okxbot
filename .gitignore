@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+config.json
+state/
+logs/
+.venv/
+__pycache__/
+*.pyc
+*.jsonl
+*.log
+*.zip
