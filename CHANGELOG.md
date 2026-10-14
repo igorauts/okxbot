@@ -1,64 +1,128 @@
-## v0.7.3 — 2026-10-14
+# OKX Grid Bot — полная история версий
 
-- One BTC/ETH/SOL-USDT-SWAP LONG grid engine, from ETH/SOL live-tested v0.7.3 code.
-- Independently configurable BUY target (1–25), temporary BUY buffer (0–5), near-BID protection (0–10 grid steps), SELL TP base (1–25), temporary SELL TP buffer (0–30).
-- BUY following, TP 1500ms grace, one-at-a-time cleanup (>=100ms), virtual TP and aggregate reduce-only market exits.
-- Instance wizard and manager select one universal engine. Optional read-only Burst and Execution monitors selectable per instance (off by default).
-- Offline tests across BTC/ETH/SOL. No automatic LIVE upgrades or trading restarts.
+История разработки начиная с **v0.5.9 — первого подтверждённого запуска торгового ETH-бота на реальном OKX**. Включены публичные релизы GitHub, промежуточные LIVE-версии и внутренние сборки. Это история разработки продукта, **не история сделок, счёта или конфигураций конкретных пользователей**.
 
-## v0.7.2 — 2026-10-14
+> **О статусах.** «GitHub Release» означает подтверждённую публикацию тега и страницы релиза. «Внутренняя/LIVE» означает, что версия использовалась на реальном боте, но отдельный публичный релиз для неё не подтверждён. «Внутренняя» означает задокументированный этап разработки; без утверждения о публикации или LIVE. Ранняя история v0.5.9–v0.6.4 восстановлена ретроспективно из журналов разработки; точные даты отдельных промежуточных сборок не установлены. Запись в CHANGELOG **не создаёт задним числом Git-тег или исходный архив**.
 
-- ETH BUY Grid Following: protect near-BID entries during 25→30→25 buffer cleanup.
-- Prefer canceling farthest obsolete BUY; recheck BID before cancel.
-- Bidirectional 1.5s cleanup cooldown, deferred placement if no safe slot.
-- Retain previous real/virtual TP, aggregate MARKET logic, PnL and ETH state.
-- 61 offline tests, including 11 ETH regression tests; ETH LIVE migration completed.
-- No changes to SOL v0.6.10.
+| Версия | Статус | Основной этап |
+|---|---|---|
+| **v0.7.3** | GitHub Release · 14.10.2026 | Универсальный BTC/ETH/SOL, SELL TP 25+30, выборочные мониторы |
+| **v0.7.2** | GitHub Release · 14.10.2026 | Защита ближайших BUY при Grid Following |
+| **v0.7.1** | Внутренняя/LIVE · 14.10.2026 | Быстрое сопровождение BUY, агрегированный MARKET для виртуальных TP |
+| **v0.7.0** | Внутренняя/LIVE · 14.10.2026 | Профилирование задержек сверки; наблюдение бурстов |
+| **v0.6.10** | GitHub Release · 14.10.2026 | `expTime`, безопасное восстановление POST, Telegram |
+| **v0.6.9** | GitHub Release · 14.10.2026 | Реакция на ошибки OKX, общий AUTO SOFT STOP |
+| **v0.6.8** | GitHub Release · 14.10.2026 | SQLite, PnL, надёжность, лимит 99 заявок |
+| **v0.6.7** | Внутренняя | Максимальная просадка PnL отдельного бота |
+| **v0.6.6** | Внутренняя | Завершение устаревшего частичного BUY |
+| **v0.6.5** | Внутренняя | Сверка частичных исполнений и TP |
+| **v0.6.4** | Внутренняя | Pause/Soft/Hard/Panic и подтверждения действий |
+| **v0.6.3** | Внутренняя | Интерактивные статистика и LIVE-журналы |
+| **v0.6.2** | Внутренняя | `stats.json` без запуска второго движка |
+| **v0.6.1** | Внутренняя | Именованные экземпляры и CLI-менеджер |
+| **v0.6.0** | Внутренняя/LIVE | Выбор BTC/ETH/SOL, запуск LIVE SOL |
+| **v0.5.9** | Внутренняя/LIVE | Первый подтверждённый LIVE ETH |
 
-# Changelog
+## v0.7.3 — 2026-10-14 — [GitHub Release](https://github.com/igorauts/okxbot/releases/tag/v0.7.3)
 
-## v0.6.10 — POST expiry, isolated TP recovery, Telegram monitoring
+- Объединённый LONG/CROSS-движок `okx_bot073.py` для `BTC-USDT-SWAP`, `ETH-USDT-SWAP` и `SOL-USDT-SWAP`; до объединения отдельные адаптации v0.7.3 работали на ETH и SOL.
+- Настраиваемые **независимо для каждого экземпляра**: целевые BUY (1–25), временный BUY-буфер (0–5), защита от отмены около BID (0–10 шагов сетки), базовые реальные SELL TP (1–25), временный буфер TP (0–30).
+- SELL TP: 25 базовых + максимум 30 временных, 1500 мс тихого периода, последовательная отмена самых дальних не чаще одной за 100 мс. Биржа может кратковременно создать attached TP сверх программного порога; очистка выполняется после сверки.
+- Сохранены виртуальные TP, агрегированный reduce-only MARKET, безопасное восстановление неизвестных POST и учёт фактических комиссий/PnL.
+- Мастер и менеджер создают экземпляры из универсального движка; Burst Monitor и Execution Monitor можно включать **для выбранного бота**, по умолчанию выключены.
+- Пройдены 104 офлайн-теста (74 регрессии и 30 проверок универсальности/наблюдателей/интеграции). **BTC не заявлен как LIVE-протестированный**, универсальный файл проверен офлайн. Публикация GitHub не обновляет запущенных ботов.
 
-- Added OKX REST `expTime` header to BUY and virtual TP placement; deadlines are persisted before HTTP transmission.
-- If placement ACK is lost, reconcile by exact client ID. Only new deadline-protected intents may be automatically resolved after three independent, complete negative history checks and a 120-second grace period; legacy unknown orders remain fail-closed.
-- An uncertain SELL reserves its own quantity but no longer stops unrelated, separately covered virtual TP from being restored.
-- Added optional external Telegram monitor with critical event notifications, service health checks, daily 09:00 Santiago-time digest, and read-only `/status` command.
-- Updated manager engine discovery and systemd drop-in handling (applied to repository clone by `prepare_repository_v0610.py`).
-- Updated main engine tests for the new version while keeping v0.6.8 historical regression tests.
-- Removed obsolete references to unrelated exchanges from the engine code and renamed the OKX report formatter without changing the report output.
-- State v0.6.9 migrates with a durable backup; existing SQLite tables, trading settings and LIVE modes remain unchanged.
+## v0.7.2 — 2026-10-14 — [GitHub Release](https://github.com/igorauts/okxbot/releases/tag/v0.7.2)
 
+- Исправлена ошибка ETH v0.7.1: при BID около 2430.00 бот мог отменить ближайший BUY 2430.00, поставив далёкий 2417.50.
+- В очистке BUY-буфера 25→30→25 защищены заявки в пределах **трёх шагов GRID_STEP** от текущего BID (при ETH step $0.50 — ±$1.50). Буфер +5 — **количество** дополнительных BUY, защита 3 шага — **расстояние** до BID; это разные параметры.
+- Отмена выбирает самый дальний устаревший BUY, повторно проверяет BID непосредственно перед отменой; 1500-мс cooldown учитывает движение сетки **в обе стороны**. Если все 30 мест заняты и безопасной отмены нет, размещение откладывается.
+- Лог `BUY_CANCEL_PROTECTED`, миграция ETH с сохранением циклов/TP/PnL. 61 офлайн-тест; SOL при этом оставался на v0.6.10.
 
-## v0.6.9 — Safety Fixes
+## v0.7.1 — 2026-10-14 — внутренняя LIVE-версия ETH, без отдельного GitHub Release
 
-- Fixed explicit OKX BUY/TP rejection handling.
-- Added account-wide persistent AUTO SOFT STOP on margin rejection.
-- Both bots enter SOFT together; manual resume required.
-- Improved uncertain-order reconciliation without duplicate POST.
-- Prevented unresolved BUY from blocking unrelated TP tracking.
-- Added handling for rejected cancellations and TP recovery.
-- Added 18 automated safety tests.
-- Preserved trading strategy, state and SQLite databases.
+- Быстрое сопровождение BUY: 25 штатных LIMIT + буфер до 30 при движении рынка; новый BUY ставится прежде отмены устаревшего, когда есть свободное место.
+- Пробуждение торгового цикла по публичному WebSocket BID с ограничением частоты price-only сигнала (500 мс); секундный периодический цикл сохранён.
+- Цель 25 реальных SELL TP; остальные сопровождаются как виртуальные. При полном исчерпании реальных SELL и ранее зафиксированном пересечении виртуальных TP допускается **один агрегированный reduce-only MARKET SELL** с подтверждённым объёмом, а не отдельный MARKET на каждый цикл.
+- Защита от повторных POST, частичных исполнений, дублирования PnL и комиссий; распределение fills одного MARKET между родительскими BUY по FIFO. Исправлены внутренние кандидаты r2 (лимит 30 BUY), r3 (24h PnL агрегированного SELL), r4 (фиксация пересечения TP при последующем откате BID).
+- В ходе LIVE была обнаружена ошибка отмены BUY возле BID; исправлена в v0.7.2.
 
+## v0.7.0 — 2026-10-14 — внутренняя LIVE-версия ETH, без отдельного GitHub Release
 
-## v0.6.8 — Reliability & performance
-- Introduced durable SQLite archive of verified exchange fills and completed PnL.
-- One-time verified migration of previous fill history; fetch only missing order executions afterward.
-- Reworked per-bot maximum drawdown sampling using reconciled state snapshots.
-- Added retry for safe GET errors; uncertain POST outcomes and position mismatch now enter safe reconciliation wait.
-- Added per-thread HTTPS keep-alive.
-- Capped combined active BUY + real TP orders at 99 (25 BUY + 74 real TP).
-- Fixed 24-hour profit after completed cycles are archived in SQLite.
-- Fixed drawdown worker retry failures caused by five-element snapshots.
-- Both fixes validated on running ETH and SOL bots.
-- Trading strategy, minimum TP, funding exclusion and partial-BUY cleanup stay unchanged.
+- Инструменты профилирования задержек REST и сверки: `pending`, `register_attached`, `track`, `positions`, `retry_sleep`, `state_save`, `rest_governor`, `rest_http`.
+- Профиль `logs/reconcile_profile_v070.jsonl` фиксирует медленные проходы и повторные сверки; построен внешний read-only Burst Observer для наблюдения за восстановлением BUY после массовых исполнений.
+- Сохраняется консервативная сверка позиции, attached TP и исполнений OKX; ранний development checkpoint был *только* инструментированием, без изменения торговой стратегии. Позже версия запускалась LIVE на ETH.
 
-## v0.6.7 — Hotfix
-- Added persistent per-bot maximum negative total PnL tracking; removed account-level equity monitoring.
+## v0.6.10 — 2026-10-14 — [GitHub Release](https://github.com/igorauts/okxbot/releases/tag/v0.6.10)
 
-## v0.6.6 — Trading update
-- Added stale partially filled BUY cleanup and reduce-only market exit after attached TP cancellation.
-- Added separate realized PnL for partial-market exits; confirmation commands standardized in English.
+- Добавлен OKX REST `expTime` для размещения BUY и виртуальных TP: срок приёма заявки записывается **до** HTTP POST (не означает срок жизни LIMIT после принятия).
+- При потерянном ACK восстановление только по точному `clOrdId`. Для новых намерений с deadline: ожидание ≥120 с и три независимые полные отрицательные проверки истории; старые неизвестные ордера продолжают блокироваться безопасным режимом.
+- Неопределённый SELL резервирует собственный объём, но не мешает сопровождать другие виртуальные TP, покрытие которых доказано отдельно.
+- Опциональный внешний Telegram-монитор: критические события, состояние сервисов, сводка в 09:00 по Santiago и read-only `/status`.
+- Обновлены обнаружение движка и systemd drop-in в менеджере; подготовка репозитория и тесты. Миграция v0.6.9 с резервной копией без сброса SQLite или торгового режима.
 
-## v0.6.5 — Hotfix
-- Reconciled partially filled BUY exposure and TP state; added tests for fill/cancel transitions.
+## v0.6.9 — 2026-10-14 — [GitHub Release](https://github.com/igorauts/okxbot/releases/tag/v0.6.9)
+
+- Обработка окончательных отказов OKX при BUY, TP и отменах с проверкой идентичности заявки.
+- Общий для ботов одного аккаунта **AUTO SOFT STOP** при проблеме недостаточной маржи. Блокировка переживает перезапуски, возвращение в RUN только вручную.
+- Сверка неопределённых POST по исходным идентификаторам, без слепой повторной отправки; неподтверждённый BUY не должен блокировать независимые TP.
+- Восстановление отклонённых TP и отмен с backoff; предупреждения при длительном рассогласовании. Добавлены специальные тесты безопасности. Состояние и SQLite сохраняются.
+
+## v0.6.8 — 2026-10-14 — [GitHub Release](https://github.com/igorauts/okxbot/releases/tag/v0.6.8)
+
+- Долговременный архив подтверждённых исполнений `fills_v068.sqlite`, закрытых циклов `cycles_v068.sqlite`, реализованного PnL `pnl_v068.sqlite`.
+- Проверенный однократный перенос прежней истории. После миграции догружаются только недостающие исполнения, а не вся история OKX при каждом расчёте.
+- Просадка отдельного бота рассчитывается по согласованным снимкам; исправлены ошибки worker retry с пятиэлементным снимком и расчёта прибыли за 24 часа после переноса завершённых циклов.
+- Безопасные повторы GET и HTTPS keep-alive. При неопределённом POST или расхождении позиции — ожидание подтверждённой сверки, без слепой заявки.
+- Историческое ограничение: суммарно 99 активных BUY + реальных SELL TP, при 25 BUY — максимум 74 реальные TP (не актуальная схема 25+30 из v0.7.3).
+- Сохранены стратегия, правила частичных BUY, минимальный TP, отсутствие учёта funding.
+
+## v0.6.7 — внутренняя версия, точная дата не установлена
+
+- Постоянное отслеживание **максимального отрицательного итогового PnL отдельного бота**; отказ от некорректной привязки к equity всего аккаунта.
+- Историческая метрика — максимум `max(0, -total_PnL)` с момента начала замеров, **не** классическая просадка equity «от пика до впадины»; funding не включён.
+
+## v0.6.6 — внутренняя версия, точная дата не установлена
+
+- Механика освобождения «застоявшегося» частично исполненного BUY: ожидание заданного времени и достаточного роста BID над уровнем.
+- Подтверждённая отмена остатка BUY, сопоставление появившегося attached TP, затем при необходимости отдельный reduce-only MARKET на доказанный остаток. Никакого повторного MARKET при неизвестном результате.
+- PnL таких частичных выходов считается отдельно от обычной GRID-прибыли. Стандартизованы английские подтверждения управляющих команд.
+
+## v0.6.5 — внутренняя версия, точная дата не установлена
+
+- Исправление согласованности частично исполненных BUY, остаточного объёма и прикреплённых TP.
+- Дополнительные тесты состояний fill/cancel/TP, чтобы не потерять позицию и не создать дублирующий SELL.
+
+## v0.6.4 — внутренняя версия, точная дата не установлена
+
+- В управлении экземплярами появились **Pause**, **Soft Stop**, **Hard Stop**, **Panic Sell** с разной семантикой новых BUY, существующих ордеров и позиции.
+- Добавлены явные подтверждения рискованных действий. Hard оставляет позицию открытой без TP; Panic предполагает MARKET-выход. Эти функции требовали отдельной проверки безопасности и не должны автоматически переноситься на старые движки.
+- Улучшался интерактивный интерфейс менеджера, в том числе управление отображением LIVE-журнала.
+
+## v0.6.3 — внутренняя версия, точная дата не установлена
+
+- Интерактивные экраны `stats` и `logs` для именованных экземпляров; просмотр статистики и LIVE-журнала без запуска ещё одного торгового бота.
+
+## v0.6.2 — внутренняя версия, точная дата не установлена
+
+- Универсальный `stats.json` как снимок статистики экземпляра; менеджер быстро читает состояние **без второго торгового процесса**.
+
+## v0.6.1 — внутренняя версия, точная дата не установлена
+
+- Имена и независимое управление экземплярами; CLI `okxbot` с командами `start`, `stop`, `stats`, `logs`, `list`.
+- Действующие экземпляры могли быть зарегистрированы в менеджере без замены кода LIVE-движка.
+
+## v0.6.0 — внутренняя/LIVE, точная дата не установлена
+
+- Универсальный выбор инструмента из **BTC / ETH / SOL**, динамические параметры сетки и инструмента, верхняя граница торгового диапазона, мастер настройки.
+- Запущен подтверждённый **LIVE-бот SOL-USDT-SWAP**; существующий ETH v0.5.9 продолжал работать.
+
+## v0.5.9 — первая подтверждённая LIVE-версия ETH, точная дата не установлена
+
+- Запущен ETH-USDT-SWAP LONG Grid Bot как отдельный systemd-процесс на реальном счёте OKX.
+- Из ранних журналов подтверждены 25 активных BUY и до 75 реальных attached SELL TP, исполнение торговых циклов и расчёт комиссий/PnL.
+- Это отправная точка истории **работающего OKX Grid Bot**; более ранние эксперименты не включены в этот перечень.
+
+---
+
+**Правило ведения истории:** добавлять каждую следующую версию сразу при разработке, даже если она останется внутренней; после GitHub-публикации добавлять ссылку на релиз. Ретроспективные исправления документации не требуют изменения прежних Git-тегов или архивов.

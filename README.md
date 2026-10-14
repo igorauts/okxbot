@@ -6,25 +6,19 @@
 
 ---
 
-# OKX Grid Bot — current ETH release v0.7.2
+## Версии и история изменений
 
-**Latest release: [v0.7.2](https://github.com/igorauts/okxbot/releases/tag/v0.7.2)** — fixes near-BID BUY cancellation in Grid Following. Live on ETH-USDT-SWAP. SOL runs an independent older engine.
+**Текущая версия: [v0.7.3](https://github.com/igorauts/okxbot/releases/tag/v0.7.3)** — единый LONG Grid Bot для BTC, ETH и SOL, менеджер экземпляров и опциональные мониторы по каждому боту. Новая публикация **не обновляет** работающие экземпляры на VPS.
 
-Documentation: [v0.7.2 (RU)](README_v072_RU.md) · [Release notes](RELEASE_NOTES_v072.md)
+**[Полный CHANGELOG от v0.5.9 до v0.7.3](CHANGELOG.md)** — включая внутренние сборки без GitHub Release, первый LIVE ETH, запуск SOL и все промежуточные версии.
 
-**Safety:** 61 offline tests passed; full live behavior remains under observation. Never commit private keys, config, state, or logs.
+Предыдущие публичные релизы: [v0.7.2](https://github.com/igorauts/okxbot/releases/tag/v0.7.2) · [v0.6.10](https://github.com/igorauts/okxbot/releases/tag/v0.6.10) · [v0.6.9](https://github.com/igorauts/okxbot/releases/tag/v0.6.9) · [v0.6.8](https://github.com/igorauts/okxbot/releases/tag/v0.6.8).
 
 ---
 
-**Previous release: [v0.6.10](https://github.com/igorauts/okxbot/releases/tag/v0.6.10)** — POST expiry, safer TP recovery, Telegram monitoring, manager updates.
+## Архив: документация v0.6.8 (историческая, не текущая конфигурация)
 
-See [v0.6.10 documentation](README_v0610_RU.md) and [release notes](RELEASE_NOTES_v0610.md).
-
-**Previous release: [v0.6.9](https://github.com/igorauts/okxbot/releases/tag/v0.6.9)** — safety fixes, account-wide AUTO SOFT STOP, improved order reconciliation.
-
-See [v0.6.9 documentation](README_v069_RU.md). Earlier documentation below is retained for reference.
-
-# OKX Grid Bot v0.6.8 — универсальное управление экземплярами
+> **Внимание:** всё ниже описывает поведение и команды **v0.6.8**, а не актуальные лимиты, версию движка или порядок установки v0.7.3. Для новой установки используйте [документацию v0.7.3](README_v073_UNIVERSAL_RU.md). В частности, исторический лимит 74 real TP был заменён новой схемой 25+30.
 
 Движок сохраняет торговую стратегию LONG/CROSS и работу с виртуальными TP. **Суммарный лимит — 99 биржевых заявок:** при 25 BUY допускается максимум **74 реальных TP** (включая принудительное ограничение ранее созданных экземпляров, у которых в `config.json` указано 75). Алгоритм размещения BUY и минимальный TP +20% не менялись.
 
