@@ -1,3 +1,7 @@
+**Latest release: [v0.6.9](https://github.com/igorauts/okxbot/releases/tag/v0.6.9)** — safety fixes, account-wide AUTO SOFT STOP, improved order reconciliation.
+
+See [v0.6.9 documentation](README_v069_RU.md). Earlier documentation below is retained for reference.
+
 # OKX Grid Bot v0.6.8 — универсальное управление экземплярами
 
 Движок сохраняет торговую стратегию LONG/CROSS и работу с виртуальными TP. **Суммарный лимит — 99 биржевых заявок:** при 25 BUY допускается максимум **74 реальных TP** (включая принудительное ограничение ранее созданных экземпляров, у которых в `config.json` указано 75). Алгоритм размещения BUY и минимальный TP +20% не менялись.

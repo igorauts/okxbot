@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.6.9 — Safety Fixes
+
+- Fixed explicit OKX BUY/TP rejection handling.
+- Added account-wide persistent AUTO SOFT STOP on margin rejection.
+- Both bots enter SOFT together; manual resume required.
+- Improved uncertain-order reconciliation without duplicate POST.
+- Prevented unresolved BUY from blocking unrelated TP tracking.
+- Added handling for rejected cancellations and TP recovery.
+- Added 18 automated safety tests.
+- Preserved trading strategy, state and SQLite databases.
+
+
 ## v0.6.8 — Reliability & performance
 - Introduced durable SQLite archive of verified exchange fills and completed PnL.
 - One-time verified migration of previous fill history; fetch only missing order executions afterward.
