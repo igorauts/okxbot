@@ -23,7 +23,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-import okx_setup065 as wizard
+import okx_setup067 as wizard
 
 BASE = Path(os.environ.get('OKXBOT_BASE_DIR', '/root/okx')).resolve()
 REGISTRY = Path(os.environ.get('OKXBOT_REGISTRY', str(BASE / '.okxbot_registry.json')))
@@ -95,7 +95,7 @@ def bot_path(entry):
 
 
 def engine_file(path):
-    for name in ('okx_bot065.py', 'okx_bot064.py', 'okx_bot062.py', 'okx_bot061.py', 'okx_bot060.py', 'okx_bot059.py'):
+    for name in ('okx_bot067.py', 'okx_bot066.py', 'okx_bot065.py', 'okx_bot064.py', 'okx_bot062.py', 'okx_bot061.py', 'okx_bot060.py', 'okx_bot059.py'):
         if (path / name).is_file():
             return name
     raise RuntimeError('Не найден исполняемый Python-файл бота')
@@ -188,7 +188,7 @@ def cmd_new(env_file):
     print(f'\nБот «{name}» создан. Торговля пока выключена.')
     print(f'Управление: okxbot start "{name}" | okxbot stats "{name}" | okxbot stop "{name}"')
     if sys.stdin.isatty():
-        if input('\nЗапустить реальные торги сейчас? (да/нет): ').strip().casefold() == 'да':
+        if input('\nЗапустить реальные торги сейчас? (yes/no): ').strip().casefold() == 'yes':
             cmd_start(name)
 
 
@@ -270,7 +270,7 @@ def control_supported(entry):
     if not unit.is_file():return False
     match=re.search(r'^ExecStart=(.+)$',unit.read_text(encoding='utf-8'),re.M)
     return bool(match and any((path/name).is_file() and str(path/name) in match.group(1).split()
-                              for name in ('okx_bot065.py','okx_bot064.py')))
+                              for name in ('okx_bot067.py','okx_bot066.py','okx_bot065.py','okx_bot064.py')))
 
 
 def read_control(entry):
@@ -427,7 +427,7 @@ def cmd_clone(source_name, new_name):
     ref=upper if upper else px
     if ref-Decimal(str(cfg['grid_step']))*(int(cfg['max_grids'])-1)<=0:
         raise RuntimeError('Новая цена несовместима с выбранным диапазоном гридов')
-    cfg.update(version='0.6.5',name=new_name,created_at=time.time(),
+    cfg.update(version='0.6.7',name=new_name,created_at=time.time(),
                live_trading=False,price_at_setup=str(px),
                capital_reference_price=str(ref),cloned_from=old)
     print(f'Клон «{new_name}» из «{old}» | {cfg["instrument"]} | текущий BID {px}')
@@ -437,7 +437,7 @@ def cmd_clone(source_name, new_name):
     dest.mkdir(mode=0o700)
     (dest/'state').mkdir(mode=0o700)
     (dest/'logs').mkdir(mode=0o700)
-    for f in ('okx_bot065.py','requirements.txt'):
+    for f in ('okx_bot067.py','requirements.txt'):
         shutil.copy2(SOURCE/f,dest/f)
     (dest/'.env').write_bytes((source/'.env').read_bytes())
     os.chmod(dest/'.env',0o600)
@@ -446,7 +446,7 @@ def cmd_clone(source_name, new_name):
     run([sys.executable,'-m','venv',str(dest/'.venv')])
     run([str(dest/'.venv/bin/pip'),'install','-r',str(dest/'requirements.txt')])
     service=f'okx-grid-{slug}'
-    (SYSTEMD_DIR/f'{service}.service').write_text(unit_text(dest,'okx_bot065.py',new_name))
+    (SYSTEMD_DIR/f'{service}.service').write_text(unit_text(dest,'okx_bot067.py',new_name))
     run(['systemctl','daemon-reload'])
     entries[new_name]={'slug':slug,'path':str(dest),'service':service}
     save_registry(entries)
@@ -511,6 +511,46 @@ def read_legacy_journal(unit, instrument):
     return journal_last_complete_report(proc.stdout,instrument)
 
 
+def with_latest_bot_dd(report, path, expected_instrument):
+    """Overlay latest local 5-second drawdown sample on 10-minute cached report.
+
+    This is read-only and does not load the engine, keys, or contact OKX.
+    """
+    file=path/'state'/'bot_drawdown_v067.json'
+    if not file.is_file():
+        return report
+    try:
+        from decimal import Decimal
+        dd=json.loads(file.read_text(encoding='utf-8'))
+        if dd.get('schema')!=1 or dd.get('instrument')!=expected_instrument:
+            return report
+        max_dd=Decimal(str(dd['max_drawdown_usdt']))
+        if not max_dd.is_finite() or max_dd<0:
+            return report
+        at=datetime.fromtimestamp(float(dd['max_drawdown_at']),timezone.utc)
+        sampled=datetime.fromtimestamp(float(dd['last_at']),timezone.utc)
+        if sampled.timestamp()>time.time()+60:
+            return report
+        lines=[line for line in report.splitlines()
+               if not line.startswith(('МАКС. ПРОСАДКА БОТА:', '  Зафиксирована:', '  Последний замер DD:'))]
+        pos=next((i for i,line in enumerate(lines) if _STATS_DONE in line),len(lines))
+        # Percentage uses the same 1x capital as the bot's main report.
+        capital_line=next((x for x in lines if x.startswith('Расчётный капитал для 1x:')),None)
+        pct=''
+        if capital_line:
+            m=re.search(r'\$([0-9,]+\.[0-9]+)',capital_line)
+            if m:
+                capital=Decimal(m.group(1).replace(',',''))
+                if capital>0:
+                    pct=f' (−{max_dd/capital*100:.4f}% от 1x)'
+        latest=[f'МАКС. ПРОСАДКА БОТА:      −${max_dd:,.8f}'+pct,
+                '  Зафиксирована:          '+at.strftime('%d.%m.%Y %H:%M:%S UTC'),
+                '  Последний замер DD:     '+sampled.strftime('%d.%m.%Y %H:%M:%S UTC')]
+        return '\n'.join(lines[:pos]+latest+lines[pos:])
+    except (OSError,ValueError,TypeError,KeyError,OverflowError):
+        return report
+
+
 def stats_text(name):
     """Render the same universal report for CLI and the interactive viewer."""
     name, entry = find_entry(name)
@@ -527,6 +567,7 @@ def stats_text(name):
         raise RuntimeError(f'Ошибка снимка статистики: {e}') from e
     if snapshot is not None:
         report, ts = snapshot
+        report = with_latest_bot_dd(report, path, instrument)
         age = max(0, int(time.time() - ts))
         freshness = 'АКТУАЛЬНА' if age <= _STATS_MAX_AGE else 'УСТАРЕЛА'
         status = 'работает' if service_running(unit) else 'остановлен'

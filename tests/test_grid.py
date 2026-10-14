@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 SRC=Path(__file__).resolve().parents[1]
-spec=importlib.util.spec_from_file_location('wizard060',SRC/'okx_setup065.py')
+spec=importlib.util.spec_from_file_location('wizard060',SRC/'okx_setup067.py')
 wizard=importlib.util.module_from_spec(spec)
 spec.loader.exec_module(wizard)
 
@@ -103,7 +103,7 @@ class EngineTests(unittest.TestCase):
     def make_engine(self,coin='BTC',price='83200',upper='80000',step='10',tp='50',qty='0.0001',cap=500):
         td=tempfile.TemporaryDirectory()
         root=Path(td.name)
-        shutil.copy2(SRC/'okx_bot065.py',root/'okx_bot065.py')
+        shutil.copy2(SRC/'okx_bot067.py',root/'okx_bot067.py')
         ct={'BTC':'0.01','ETH':'0.1','SOL':'1'}[coin]
         min_quantity={'BTC':'0.0001','ETH':'0.001','SOL':'0.01'}[coin]
         min_contract=Decimal(min_quantity)/Decimal(ct)
@@ -119,7 +119,7 @@ class EngineTests(unittest.TestCase):
         (root/'config.json').write_text(json.dumps(cfg))
         (root/'.env').write_text('OKX_API_KEY=dev\nOKX_API_SECRET=dev\nOKX_API_PASSPHRASE=dev\nOKX_DEMO=0\n')
         (root/'state').mkdir();(root/'logs').mkdir()
-        spec=importlib.util.spec_from_file_location('engine060_test',root/'okx_bot065.py')
+        spec=importlib.util.spec_from_file_location('engine060_test',root/'okx_bot067.py')
         engine=importlib.util.module_from_spec(spec)
         spec.loader.exec_module(engine)
         return td,engine
@@ -170,7 +170,7 @@ class EngineTests(unittest.TestCase):
         try:
             st={'instrument':'SOL-USDT-SWAP','cycles':{},'archived_cycles':[]}
             e.DATA.write_text(json.dumps(st))
-            fake={'complete':True}
+            fake={'complete':True,'total_gain':Decimal('0'),'open_contracts':Decimal('0')}
             with patch.object(e,'LIVE',True), \
                  patch.object(e.A,'ticker',return_value=Decimal('106')), \
                  patch.object(e,'stats_exchange_fills',return_value=[]), \
@@ -180,7 +180,7 @@ class EngineTests(unittest.TestCase):
             obj=json.loads(e.STATS_FILE.read_text())
             self.assertEqual(obj['schema_version'],1)
             self.assertEqual(obj['instrument'],'SOL-USDT-SWAP')
-            self.assertEqual(obj['bot_version'],'0.6.5')
+            self.assertEqual(obj['bot_version'],'0.6.7')
             self.assertTrue(obj['complete'])
             self.assertTrue(obj['generated_at_unix']>0)
             self.assertIn('SOL GRID STATISTICS',obj['report'])

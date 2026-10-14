@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OKX v0.6.5 first-run terminal wizard. NO TRADING API WRITES.
+"""OKX v0.6.7 first-run terminal wizard. NO TRADING API WRITES.
 
 Creates a NEW, separate bot directory. All prompts require explicit input;
 no empty-Enter defaults. Existing bot directories are never overwritten.
@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP
 from pathlib import Path
 
-VER='0.6.5'
+VER='0.6.7'
 BASE=Path(__file__).resolve().parent
 ASSETS={'Bitcoin':'BTC','Ethereum':'ETH','Solana':'SOL'}
 
@@ -447,6 +447,8 @@ def persist(ctx,out,env_raw):
         'price_at_setup':as_string(ctx['price']),
         'maker_fee_at_setup':as_string(ctx['maker']),
         'taker_fee_at_setup':as_string(ctx['taker']),
+        'partial_buy_timeout_sec':60,
+        'partial_buy_distance_steps':5,
         'created_at':time.time(),'live_trading':False}
     cfg_path=out/'config.json'
     fd=os.open(cfg_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
@@ -454,13 +456,13 @@ def persist(ctx,out,env_raw):
     secret_path=out/'.env'
     fd=os.open(secret_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
     with os.fdopen(fd,'w') as f:f.write(env_raw)
-    shutil.copy2(BASE/'okx_bot065.py',out/'okx_bot065.py')
+    shutil.copy2(BASE/'okx_bot067.py',out/'okx_bot067.py')
     shutil.copy2(BASE/'requirements.txt',out/'requirements.txt')
     return out
 
 
 def main():
-    parser=argparse.ArgumentParser(description='Create a NEW v0.6.5 OKX bot directory; never sends orders.')
+    parser=argparse.ArgumentParser(description='Create a NEW v0.6.7 OKX bot directory; never sends orders.')
     parser.add_argument('--output',required=True,help='NEW empty bot directory, e.g. /root/okx/btc01')
     parser.add_argument('--env-file',required=True,help='Existing local OKX API .env')
     args=parser.parse_args()

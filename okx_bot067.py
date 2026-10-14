@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OKX multi-asset LONG grid v0.6.5: BTC, ETH, SOL, bounded BUY and virtual TP.
+"""OKX multi-asset LONG grid v0.6.7: BTC, ETH, SOL, bounded BUY and virtual TP.
 
 Never assumes a TP has completed without a terminal filled SELL order that can
 be linked to its attached algo client ID. Unknown states fail closed.
@@ -38,7 +38,7 @@ STEP, TP, QTY = (Decimal(str(CFG.get(k,0))) for k in
 TARGET, CAP, EX_CAP = (int(CFG.get(k,0)) for k in
                        ('active_buy_orders','max_grids','max_exchange_orders'))
 INTERVAL = 1.0  # main safety loop; BID updates independently via public WS
-VER = '0.6.5'
+VER = '0.6.7'
 REAL_TP_TARGET = int(CFG.get('active_tp_orders',0))
 REDUCE_ONLY_HARD_CAP = 150
 TP_ACTIONS_PER_PASS = 5
@@ -52,6 +52,16 @@ MAKER_COST = Decimal(str(CFG.get('maker_fee_at_setup',0)))
 UPPER = Decimal(str(CFG.get('upper_price',0)))
 CAPITAL_REFERENCE = Decimal(str(CFG.get('capital_reference_price',0)))
 USDT_QUANT = Decimal('0.000001')
+# These are operator-configurable only for new bots; old instances preserve
+# their existing trading parameters with these defaults during migration.
+PARTIAL_AGE = int(CFG.get('partial_buy_timeout_sec',60))
+PARTIAL_STEPS = Decimal(str(CFG.get('partial_buy_distance_steps',5)))
+BOT_DD_DATA = ROOT / 'state' / 'bot_drawdown_v067.json'
+BOT_DD_ANCHOR = ROOT / 'state' / 'bot_drawdown_anchor_v067.json'
+BOT_DD_SAMPLE_INTERVAL = 5  # seconds; refreshed via live public WS BID, no account API
+BOT_DD_LOCK = threading.Lock()
+if not (30 <= PARTIAL_AGE <= 3600 and 1 <= PARTIAL_STEPS <= 100):
+    die('Invalid partial BUY cleanup thresholds')
 
 def die(s):
     raise RuntimeError(s)
@@ -75,7 +85,7 @@ if (COIN not in ALLOWED or INST != f'{COIN}-USDT-SWAP'
             and 1<=REAL_TP_TARGET<=75) or EX_CAP != 500
     or D(CFG.get('buy_base_qty'))!=QTY*CONTRACT_VALUE
     or (UPPER and UPPER!=CAPITAL_REFERENCE)):
-    die('Invalid v0.6.5 configuration. Refusing to start.')
+    die('Invalid v0.6.7 configuration. Refusing to start.')
 
 ENV = {}
 for line in (ROOT / '.env').read_text().splitlines():
@@ -139,6 +149,69 @@ def log(event, **details):
         print(f"✅ Позиция синхронизирована: {details['exchange']}",flush=True)
     else:
         print(f"[{t}] {event}",details,flush=True)
+
+def financial_signature(st):
+    """Fingerprint accounting-relevant cycle changes; unfilled BUY moves are PnL-neutral.
+
+    A cached fill-ledger PnL may be marked to BID only while this fingerprint
+    is unchanged. After a fill or TP settlement, wait for authoritative stats.
+    """
+    rows=[]
+    cycles=list(st.get('cycles',{}).values())+list(st.get('archived_cycles',[]))
+    for c in cycles:
+        buy=D(c.get('filledBuy')); sell=D(c.get('filledTP'))
+        if not buy and not sell and c.get('state') not in ('CLOSED','EXITED'):
+            continue
+        rows.append([str(c.get('cycleId') or c.get('ordId') or c.get('clOrdId') or ''),
+            str(c.get('ordId') or ''),c.get('state'),str(buy),str(sell),
+            [[str(r.get('ordId') or ''),str(D(r.get('filled')))]
+             for r in c.get('tpOrders',[])]])
+    raw=json.dumps(sorted(rows,key=lambda r:tuple(str(x) for x in r[:2])),
+                   separators=(',',':'),ensure_ascii=True)
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+def record_bot_drawdown(total_pnl, now=None, source='fills', bid=None):
+    """Most negative *total bot PnL* since monitoring began, not account equity.
+
+    Intentionally measures max loss versus zero (user's definition), NOT
+    conventional peak-to-trough drawdown. No exchange writes or account reads.
+    """
+    now=time.time() if now is None else float(now)
+    total_pnl=D(total_pnl)
+    if not total_pnl.is_finite():raise ValueError('Non-finite bot PnL sample')
+    with BOT_DD_LOCK:
+        old=json.loads(BOT_DD_DATA.read_text()) if BOT_DD_DATA.exists() else {}
+        if old and (old.get('schema')!=1 or old.get('instrument')!=INST):
+            raise ValueError('Bot drawdown file instrument/schema mismatch')
+        worst=min(Decimal(0),D(old.get('worst_total_pnl_usdt','0')),total_pnl)
+        prior=D(old.get('worst_total_pnl_usdt','0'))
+        when=(now if not old or worst<prior else old.get('max_drawdown_at',now))
+        payload={'schema':1,'instrument':INST,'bot':CFG.get('name',''),
+                 'first_at':old.get('first_at',now),'last_at':now,
+                 'samples':int(old.get('samples',0))+1,
+                 'latest_total_pnl_usdt':str(total_pnl),
+                 'current_drawdown_usdt':str(max(Decimal(0),-total_pnl)),
+                 'worst_total_pnl_usdt':str(worst),
+                 'max_drawdown_usdt':str(-worst),'max_drawdown_at':when,
+                 'last_source':source,'last_bid':str(bid) if bid is not None else None}
+        atomic_json(BOT_DD_DATA,payload)
+        return payload
+
+
+def bot_dd_mark(anchor, st, bid):
+    """Fast exact BID adjustment to a previously verified fill-based baseline.
+
+    Do not extrapolate after a trade until history fetches all actual fills.
+    """
+    if (anchor.get('schema')!=1 or anchor.get('instrument')!=INST
+        or anchor.get('signature')!=financial_signature(st)):
+        return None
+    bid=D(bid)
+    if bid<=0 or not bid.is_finite():return None
+    return (D(anchor['total_pnl_usdt']) + D(anchor['open_contracts']) *
+            CONTRACT_VALUE * (bid-D(anchor['bid'])))
+
 
 class RateLimitedError(RuntimeError):
     """OKX 429/50011 persisted after safe GET-only retries."""
@@ -540,14 +613,14 @@ def cancel_buys_for_soft_stop(st, resolved):
 
 
 def count(state):
-    return sum(x['state'] not in ('CLOSED','CANCELED') for x in state['cycles'].values())
+    return sum(x['state'] not in ('CLOSED','CANCELED','EXITED') for x in state['cycles'].values())
 
 def active_buy(state):
     return [x for x in state['cycles'].values() if x['state'] in ('BUY_LIVE','BUY_PARTIAL','PLACING')]
 
 def level_free(state,price):
     key=fmt(price)
-    return key not in state['cycles'] or state['cycles'][key]['state'] in ('CLOSED','CANCELED')
+    return key not in state['cycles'] or state['cycles'][key]['state'] in ('CLOSED','CANCELED','EXITED')
 
 def money(value, places=6):
     x=Decimal(str(value)).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
@@ -586,7 +659,8 @@ class PnLLedger:
 
     def total(self):
         with self.lock:
-            return sum((D(p['net']) for p in self.data['accounted'].values()),Decimal(0))
+            return sum((D(p['net']) for p in self.data['accounted'].values()
+                    if p.get('kind','CLOSED')=='CLOSED'),Decimal(0))
 
     def recorded(self, cycle):
         with self.lock:
@@ -608,7 +682,7 @@ class PnLLedger:
         # archived by place() so their realized PnL must never disappear.
         previous=list(st.get('archived_cycles',[]))
         current=list(st['cycles'].values())
-        return [x for x in previous+current if x.get('state')=='CLOSED']
+        return [x for x in previous+current if x.get('state') in ('CLOSED','EXITED')]
 
     @staticmethod
     def aggregate(fills, oid, size, side):
@@ -665,6 +739,7 @@ class PnLLedger:
                 'gross':str(gross),'planned_gross':str(plan),
                 'execution':str(execution),'fees':str(fees),'net':str(net),
                 'buy_liquidity':b['liquidity'],'sell_liquidity':'/'.join(sorted(liq)),
+                'kind':cycle.get('state','CLOSED'),
                 'accounted_at':datetime.now(timezone.utc).isoformat()}
 
     def print_closed(self, result, historical=False):
@@ -674,6 +749,10 @@ class PnLLedger:
         earned=bold(money_usdt(result['net']))
         overall=bold(money_usdt(total))
         note=' | история' if historical else ''
+        if result.get('kind')=='EXITED':
+            print(f"🧹 PARTIAL MARKET EXIT {buy:.2f} → {sell:.2f} | "
+                  f"realized {money_usdt(result['net'])} | not a GRID TP",flush=True)
+            return
         print(f"💰 TP {buy:.2f} → {sell:.2f} | {money(steps,2)} шага "
               f"| в копилку {earned} | всего {overall}{note}",flush=True)
         print(f"   факт {money(result['gross'])} "
@@ -845,7 +924,7 @@ def unprotected_partial_buy(st):
     """
     return sum((D(c.get('filledBuy'))-D(c.get('filledTP'))
                 for c in st['cycles'].values()
-                if c.get('state') in ('BUY_LIVE','BUY_PARTIAL','CANCELING')),
+                if c.get('state') in ('BUY_LIVE','BUY_PARTIAL','CANCELING') and not tp_records(c)),
                Decimal('0'))
 
 
@@ -866,6 +945,9 @@ def migrate_cycle_records(st):
                 c['cycleId']='pending-'+str(c.get('clOrdId') or secrets.token_hex(8))
             else:
                 c['cycleId']=COIN.lower()+'-'+str(c.get('ordId') or c.get('clOrdId'))
+            changed=True
+        if c.get('state')=='BUY_PARTIAL' and D(c.get('filledBuy'))>0 and not c.get('partial_since'):
+            c['partial_since']=time.time()
             changed=True
         if 'tpOrders' in c:continue
         orders=[]
@@ -896,6 +978,63 @@ def paged_order(cid, pages=12):
         if not after or after in seen:die('History paging stalled')
         seen.add(after)
     return None  # Not enough information: do NOT assume cancellation.
+
+def register_cancel_attached(st,pending):
+    """OKX since Jul 2026: canceling a partial BUY creates attached TP.
+
+    Bind by the original, unique attachAlgoClOrdId BEFORE the generic
+    unknown-order guard. Never associate by price or approximate size.
+    """
+    for c in st['cycles'].values():
+        if c.get('state') not in ('CANCELING','BUY_PARTIAL','BUY_LIVE','VIRTUAL_TP'):
+            continue
+        cid=c.get('tpClOrdId')
+        if not cid or tp_records(c):continue
+        for o in pending:
+            if o.get('clOrdId')!=cid:continue
+            if (o.get('instId')!=INST or o.get('side')!='sell'
+                or D(o.get('px'))!=D(c['tpPx'])
+                or o.get('reduceOnly') not in (None,'','true',True)
+                or D(o.get('sz'))<=0 or D(o.get('sz'))>D(c['sz'])):
+                die('Attached partial TP identity/size/side/price mismatch')
+            if c.get('state')=='VIRTUAL_TP':
+                # Migration of a v0.6.5 canceled-partial BUY: old engine
+                # wrongly assumed the attached TP would never materialize.
+                # Exact clOrdId proves this live SELL belongs to that cycle.
+                c['state']='TP_WAIT'
+                log('MIGRATED_PARTIAL_ATTACHED_TP',price=c['buyPx'],
+                    ordId=o.get('ordId',''))
+            tp_records(c).append({'clOrdId':cid,'ordId':o.get('ordId',''),
+                'sz':str(D(o['sz'])),'filled':'0','phase':'PENDING',
+                'source':'attached','placedAt':time.time()})
+            save(st)
+            log('PARTIAL_ATTACHED_TP_DISCOVERED',price=c['buyPx'],
+                ordId=o.get('ordId'),sz=o['sz'])
+            break
+
+
+def resolve_partial_cancel(st,c,filled):
+    """Don't guess that the attached TP vanished on a partial cancellation.
+
+    A 2026 OKX change generates the TP for the executed part. If it is
+    delayed, reserve the full position and keep waiting (no duplicate SELL).
+    """
+    if filled<=0:
+        c['state']='CANCELED';save(st)
+        return
+    c['filledBuy']=str(filled)
+    if not tp_records(c):
+        tp_records(c).append({'clOrdId':c['tpClOrdId'],'ordId':'',
+            'sz':str(filled),'filled':'0','phase':'PENDING',
+            'source':'attached','placedAt':time.time()})
+    else:
+        for rec in tp_records(c):
+            if rec['source']=='attached' and D(rec['sz'])!=filled:
+                die('Attached partial TP size mismatches canceled BUY')
+    c['state']='TP_WAIT';save(st)
+    log('BUY_PARTIAL_CANCELED_TP_PENDING',price=c['buyPx'],
+        qty=str(filled),cleanup=bool(c.get('partial_cleanup')))
+
 
 def verify_existing(st,pending):
     known={c.get('ordId') for c in st['cycles'].values()}
@@ -929,7 +1068,13 @@ def tp_record_update(st, c, rec, order):
         die('TP order ID mismatch '+c['cycleId'])
     if not order.get('ordId'):die('TP lacks ordId '+c['cycleId'])
     if D(order.get('sz'))!=D(rec['sz']):die('TP size changed externally '+c['cycleId'])
-    if D(order.get('px'))!=D(c['tpPx']):die('TP price changed externally '+c['cycleId'])
+    if rec.get('source')=='partial_exit':
+        if order.get('ordType')!='market':
+            die('Partial exit order not MARKET '+c['cycleId'])
+        if order.get('reduceOnly') not in ('true',True):
+            die('Partial exit order not reduceOnly '+c['cycleId'])
+    elif D(order.get('px'))!=D(c['tpPx']):
+        die('TP price changed externally '+c['cycleId'])
     if order.get('reduceOnly') not in (None,'','true',True):
         die('TP not reduce-only: '+c['cycleId'])
     filled=D(order.get('accFillSz'))
@@ -973,7 +1118,7 @@ def track(st,pending):
     bycid={o.get('clOrdId'):o for o in pending}
     for key,c in list(st['cycles'].items()):
         status=c['state']
-        if status in ('CLOSED','CANCELED'):continue
+        if status in ('CLOSED','CANCELED','EXITED'):continue
         if status=='PLACING':
             o=A.order(cid=c['clOrdId'])
             if not o:die('Uncertain BUY placement '+c['clOrdId'])
@@ -995,33 +1140,22 @@ def track(st,pending):
             if filled < D(c.get('filledBuy')) or filled > D(c['sz']):
                 die('Nonmonotonic BUY cancel fill '+key)
             if state in ('canceled','mmp_canceled'):
-                if filled:
-                    # Parent was canceled after partial execution. OKX won't
-                    # generate its attached TP. Reserve the actually bought
-                    # quantity as a VIRTUAL_TP under the SAME CycleID. Restore
-                    # an exchange reduce-only LIMIT TP when lot rules permit.
-                    # Never release the grid or round SELL size upward.
-                    if tp_records(c):
-                        die('Partial canceled BUY has unexpected TP records '+key)
-                    c['filledBuy']=str(filled)
-                    c['state']='VIRTUAL_TP'
-                    save(st)
-                    log('BUY_PARTIAL_CANCELED',price=key,qty=str(filled),
-                        ordId=c['ordId'],tp=c['tpPx'])
-                    if not tp_quantity_placeable(filled):
-                        log('TP_VIRTUAL_UNPLACEABLE',price=key,qty=str(filled),
-                            minSz=str(CONTRACT_MIN),lotSz=str(CONTRACT_LOT))
+                resolve_partial_cancel(st,c,filled)
+                if not filled:
+                    log('BUY_CANCEL_CONFIRMED',price=key,ordId=c['ordId'])
                     continue
-                c['state']='CANCELED';save(st)
-                log('BUY_CANCEL_CONFIRMED',price=key,ordId=c['ordId'])
-                continue
-            if state=='filled':
+                status='TP_WAIT'
+            elif state=='filled':
                 # Cancel lost the race. Keep SAME cycle ID, linked attached TP.
+                if c.pop('partial_cleanup',None):
+                    log('PARTIAL_EXIT_ABORTED_FULL_BUY',price=key)
                 c['state']='BUY_LIVE';save(st)
                 log('BUY_FILLED_DURING_CANCEL',price=key,ordId=c['ordId'])
                 status='BUY_LIVE'
             elif state in ('live','partially_filled'):
                 if filled != D(c.get('filledBuy')):
+                    if filled and not c.get('partial_since'):
+                        c['partial_since']=time.time()
                     c['filledBuy']=str(filled);save(st)
                 all_resolved=False
                 started=D(c.get('cancelAt'))
@@ -1054,26 +1188,18 @@ def track(st,pending):
                 if filled<D(c.get('filledBuy')) or filled>D(c['sz']):
                     die('Nonmonotonic BUY partial fill '+key)
                 if c['state']!=target or D(c.get('filledBuy'))!=filled:
+                    if filled and not D(c.get('filledBuy')):
+                        c.setdefault('partial_since',time.time())
+                    elif filled and not c.get('partial_since'):
+                        # Migration of an already partially-filled v0.6.5 BUY.
+                        c['partial_since']=time.time()
                     c['state']=target;c['filledBuy']=str(filled);save(st)
                     if filled:
                         log('BUY_PARTIAL',price=key,filled=str(filled),
                             total=c['sz'],remaining=str(D(c['sz'])-filled))
             elif state in ('canceled','mmp_canceled'):
-                if filled:
-                    # A partial fill with canceled remainder is a POSITION,
-                    # not a canceled grid. Convert to recoverable virtual TP.
-                    if tp_records(c):
-                        die('Partial canceled BUY has unexpected TP records '+key)
-                    c['filledBuy']=str(filled)
-                    c['state']='VIRTUAL_TP';save(st)
-                    log('BUY_PARTIAL_CANCELED',price=key,qty=str(filled),
-                        ordId=c['ordId'],tp=c['tpPx'])
-                    if not tp_quantity_placeable(filled):
-                        log('TP_VIRTUAL_UNPLACEABLE',price=key,qty=str(filled),
-                            minSz=str(CONTRACT_MIN),lotSz=str(CONTRACT_LOT))
-                else:
-                    c['state']='CANCELED';save(st)
-                continue
+                resolve_partial_cancel(st,c,filled)
+                if not filled:continue
             else:die('Unknown BUY status '+str(state))
         if c['state'] not in ('TP_WAIT','TP_PARTIAL','VIRTUAL_TP'):
             continue
@@ -1099,6 +1225,12 @@ def track(st,pending):
                     continue
                 if rec['phase']=='PLACING' and time.time()-rec.get('placedAt',0)>60:
                     die('TP POST unresolved after 60s '+c['cycleId'])
+                if (rec.get('source')=='attached' and c.get('partial_cleanup')
+                    and time.time()-rec.get('placedAt',time.time())>30
+                    and time.time()-rec.get('lastWaitNotice',0)>60):
+                    rec['lastWaitNotice']=time.time();save(st)
+                    log('PARTIAL_ATTACHED_TP_DELAYED',price=key,
+                        message='No MARKET until attached TP is positively resolved')
                 all_resolved=False
                 continue
             tp_record_update(st,c,rec,o)
@@ -1111,9 +1243,15 @@ def track(st,pending):
         if filled==bought and bought>0:
             # Every TP leg must have terminated: no dangling reduce-only SELL.
             if active: die('Filled cycle still has live SELL '+c['cycleId'])
-            if c['state']!='CLOSED':
-                c['state']='CLOSED';st['completed']+=1;save(st)
-                log('TP_FILLED',price=key,tpId=tp_records(c)[-1].get('ordId',''))
+            if c['state'] not in ('CLOSED','EXITED'):
+                if c.get('partial_cleanup'):
+                    c['state']='EXITED';st['partial_exits']=st.get('partial_exits',0)+1
+                    save(st)
+                    log('PARTIAL_EXIT_DONE',price=key,
+                        qty=str(bought),lastSell=tp_records(c)[-1].get('ordId',''))
+                else:
+                    c['state']='CLOSED';st['completed']+=1;save(st)
+                    log('TP_FILLED',price=key,tpId=tp_records(c)[-1].get('ordId',''))
         elif active:
             if any(r['phase'] in ('PENDING','PLACING','CANCELING') for r in active):
                 all_resolved=False
@@ -1200,6 +1338,82 @@ def place_virtual_tp(st,c):
     return True
 
 
+def partial_cleanup_due(c,bid,now=None):
+    """Only upward moves; don't market dump partially-filled BUYs in a fall."""
+    now=time.time() if now is None else float(now)
+    if c.get('state')!='BUY_PARTIAL' or not D(c.get('filledBuy')):
+        return False
+    first=float(c.get('partial_since') or now)
+    return now-first>=PARTIAL_AGE and bid-D(c['buyPx'])>=PARTIAL_STEPS*STEP
+
+
+def market_exit_partial(st,c,qty):
+    """One durable, reduce-only MARKET SELL; recovery by clOrdId, no blind POST retry."""
+    if c.get('state')!='VIRTUAL_TP' or not c.get('partial_cleanup'):
+        die('Partial exit requires a canceled and reconciled attached TP')
+    if active_tp_records(c):
+        die('Cannot market exit while SELL TP is active or unresolved')
+    if not tp_quantity_placeable(qty):
+        log('PARTIAL_EXIT_DUST',price=c['buyPx'],qty=str(qty),
+            message='Exact market SELL below OKX lot/min; no rounding')
+        return False
+    cid=newid('E')
+    rec={'clOrdId':cid,'ordId':'','sz':str(qty),'filled':'0',
+         'phase':'PLACING','source':'partial_exit','placedAt':time.time()}
+    tp_records(c).append(rec);c['state']='TP_WAIT';save(st)
+    log('PARTIAL_EXIT_INTENT',price=c['buyPx'],qty=str(qty),clOrdId=cid)
+    data=A.req('POST','/api/v5/trade/order',body={
+        'instId':INST,'tdMode':'cross','side':'sell','posSide':'net',
+        'reduceOnly':True,'ordType':'market','sz':str(qty),'clOrdId':cid})
+    if len(data)!=1 or data[0].get('sCode')!='0':
+        die('Partial exit MARKET rejected/unknown; durable intent exists, no blind retry: '+str(data))
+    if not data[0].get('ordId'):
+        die('Partial exit MARKET missing order ID; reconcile client ID')
+    rec['ordId']=data[0]['ordId'];save(st)
+    log('PARTIAL_EXIT_MARKET_ACK',price=c['buyPx'],qty=str(qty),ordId=rec['ordId'])
+    return True
+
+
+def partial_cleanup_action(st,bid,actual,mode):
+    """Invoked only AFTER resolved order/position reconciliation.
+
+    Actions deliberately run before normal virtual TP rearming. One exchange
+    mutation per pass, then caller must reconcile from scratch.
+    """
+    if mode!='RUN':return 'NONE'
+    # Prefer completing already requested cleanups over initiating new ones.
+    for c in st['cycles'].values():
+        if not c.get('partial_cleanup'):continue
+        if c['state'] in ('BUY_PARTIAL','CANCELING','BUY_LIVE'):
+            return 'WAIT'
+        if c['state'] in ('CLOSED','EXITED','CANCELED'):
+            continue
+        for rec in active_tp_records(c):
+            if rec['phase']=='ACTIVE':
+                cancel_tp(st,c,rec)
+                log('PARTIAL_EXIT_TP_CANCEL_REQUESTED',price=c['buyPx'],ordId=rec['ordId'])
+                return 'ACTION'
+            return 'WAIT'
+        if c['state']=='VIRTUAL_TP':
+            qty=remaining_tp(c)
+            if qty>actual:die('Partial cleanup volume exceeds reconciled net position')
+            if market_exit_partial(st,c,qty):return 'ACTION'
+            return 'WAIT'
+        return 'WAIT'
+    for c in st['cycles'].values():
+        if partial_cleanup_due(c,bid):
+            c['partial_cleanup']=True
+            c['partial_cleanup_at']=time.time()
+            save(st)
+            log('PARTIAL_EXIT_TRIGGER',price=c['buyPx'],
+                filled=c['filledBuy'],bid=str(bid),
+                age=int(time.time()-float(c.get('partial_since') or time.time())),
+                threshold_steps=str(PARTIAL_STEPS))
+            cancel_lowest_specific(st,c)
+            return 'ACTION'
+    return 'NONE'
+
+
 def maintain_virtual_tp(st,pending,position):
     real,_,_=coverage_audit(st,pending,position)
     if real>REAL_TP_TARGET:
@@ -1211,7 +1425,8 @@ def maintain_virtual_tp(st,pending,position):
     # At the target choose the nearest virtual TP only if it is closer
     # than the farthest currently live SELL. This avoids needless churn.
     virtual=sorted((item for item in virtual_cycles(st)
-                    if tp_quantity_placeable(remaining_tp(item[1]))),
+                    if not item[1].get('partial_cleanup')
+                    and tp_quantity_placeable(remaining_tp(item[1]))),
                    key=lambda y:D(y[1]['tpPx']))
     if not virtual:return 'NONE'
     active=real_tp_active(st)
@@ -1232,7 +1447,7 @@ def place(st,px):
     k=fmt(px); tp=fmt(px+TP)
     previous=st['cycles'].get(k)
     if previous:
-        if previous['state'] not in ('CLOSED','CANCELED'):
+        if previous['state'] not in ('CLOSED','CANCELED','EXITED'):
             die('Level already occupied: '+k)
         st.setdefault('archived_cycles',[]).append({'level':k,**previous})
         save(st)
@@ -1397,6 +1612,13 @@ class PublicBidWatcher(threading.Thread):
                     try: ws.close()
                     except Exception: pass
 
+    def cached_bid(self):
+        """Fresh WS quote ONLY. Never initiate a REST call for monitoring."""
+        with self._lock:
+            if self.connected and self._bid is not None and time.monotonic()-self._updated<=3.0:
+                return self._bid
+        return None
+
     def get_bid(self):
         with self._lock:
             cached=self._bid
@@ -1444,7 +1666,7 @@ class PnLWorker(threading.Thread):
     def submit(self,st):
         # Main thread alone owns/mutates trading state; the copy is immutable
         # to the worker and skips a file write if there are no closed cycles.
-        if not any(x.get('state')=='CLOSED'
+        if not any(x.get('state') in ('CLOSED','EXITED')
                    for x in list(st['cycles'].values())+st.get('archived_cycles',[])):
             return
         try: self.jobs.put_nowait(copy.deepcopy(st))
@@ -1477,7 +1699,7 @@ def ensure_state():
         st=json.loads(DATA.read_text())
         if st.get('instrument') != INST: die('Wrong state instrument')
         previous_version=st.get('version')
-        if previous_version in ('0.4.1','0.5.0','0.5.1','0.5.2','0.5.3','0.5.4','0.5.5','0.5.6','0.5.7','0.5.8','0.5.9','0.6.0','0.6.1','0.6.2','0.6.3','0.6.4'):
+        if previous_version in ('0.6.6','0.6.5','0.4.1','0.5.0','0.5.1','0.5.2','0.5.3','0.5.4','0.5.5','0.5.6','0.5.7','0.5.8','0.5.9','0.6.0','0.6.1','0.6.2','0.6.3','0.6.4'):
             backup=DATA.with_name('bot04_state_before_v060.json')
             if not backup.exists():
                 shutil.copy2(DATA,backup)
@@ -1510,6 +1732,7 @@ def reconcile_position(st, timeout=30, pause=1):
     previous=None
     while True:
         pending=A.pending()
+        register_cancel_attached(st,pending)
         resolved=track(st,pending)
         # Market exits are only used by the PANIC state machine; they must be
         # reconciled BEFORE net-position equality is checked.
@@ -1558,7 +1781,7 @@ def audit_once(st):
     print('TP links resolved:',resolved,flush=True)
     if not resolved:
         die('Some TP identities unknown. No trading until fully reconciled.')
-    print('✅ V065 AUDIT CONSISTENT — NO ORDERS SUBMITTED OR CANCELED',flush=True)
+    print('✅ V067 AUDIT CONSISTENT — NO ORDERS SUBMITTED OR CANCELED',flush=True)
     print('⚠️ Virtual TP positions are UNPROTECTED while bot is offline.',flush=True)
 
 def live_loop(st,watcher,market,pnl,pnl_worker):
@@ -1621,6 +1844,10 @@ def live_loop(st,watcher,market,pnl,pnl_worker):
         # TP lifecycle takes precedence over all new BUY placements.
         # Any cancel/restore requires a full new REST reconciliation.
         bid=market.get_bid()
+        partial_action=partial_cleanup_action(st,bid,actual,mode)
+        if partial_action!='NONE':
+            watcher.wake.wait(0.15);watcher.wake.clear()
+            continue
         tp_action=maintain_virtual_tp(st,pending,actual)
         if tp_action!='NONE':
             # No BUY until we have re-read the resulting SELL/position state.
@@ -1818,6 +2045,8 @@ def full_stats_snapshot(state, fills, bid, contract_value):
     closed_buy_nominal=Decimal(0)
     open_gain=Decimal(0)
     open_buy_nominal=Decimal(0)
+    exit_gain=Decimal(0)
+    exit_count=0
     expected={}
     known_orders=set()
     for c in cycles:
@@ -1873,6 +2102,10 @@ def full_stats_snapshot(state, fills, bid, contract_value):
             closed_count+=1
             closed_gain += sell_nominal-b['notional']+b['fee']+sell_fee
             closed_buy_nominal+=b['notional']
+        elif c.get('state')=='EXITED':
+            if remaining:raise ValueError('EXITED partial cycle still has position')
+            exit_count+=1
+            exit_gain+=sell_nominal-b['notional']+b['fee']+sell_fee
         else:
             # Open-cycle mark-to-market, including realized portion of PARTIAL
             # TP and commissions already paid. Funding excluded.
@@ -1883,13 +2116,14 @@ def full_stats_snapshot(state, fills, bid, contract_value):
 
     volume=maker_volume+taker_volume
     total_fees=maker_fee+taker_fee
-    total_gain=closed_gain+open_gain
+    total_gain=closed_gain+open_gain+exit_gain
     total_buy=closed_buy_nominal+open_buy_nominal
     active_buys=sum(c.get('state') in ('BUY_LIVE','BUY_PARTIAL','PLACING') for c in state.get('cycles',{}).values())
     tps=sum(c.get('state') in ('TP_WAIT','TP_PARTIAL') for c in state.get('cycles',{}).values())
     open_contracts=sum((D(c.get('filledBuy'))-D(c.get('filledTP'))
                         for c in state.get('cycles',{}).values()),Decimal(0))
     return dict(complete=True,bid=bid,closed_count=closed_count,
+                partial_exit_count=exit_count,partial_exit_net=exit_gain,
                 active_buys=active_buys,tps=tps,grid_gain=closed_gain,
                 grid_pct=stats_pct(closed_gain,closed_buy_nominal),
                 open_gain=open_gain,open_pct=stats_pct(open_gain,open_buy_nominal),
@@ -2105,6 +2339,8 @@ def format_weex_report(st,fills,stats,now=None):
         f'  ждут TP:                 {real}',
         f'  виртуальных TP:          {virtual}',
         f'GRID PROFIT:               {plus(stats["grid_gain"],8)}',
+        f'Частичных выходов MARKET:  {stats["partial_exit_count"]}',
+        f'PnL частичных выходов:     {plus(stats["partial_exit_net"],8)}',
         f'Прибыль за последние 24ч: {plus(past24)}   ({rate(past24)})',
         'Средний темп:',
         f'  сутки:                   {plus(perday)}   ({rate(perday)})',
@@ -2125,6 +2361,18 @@ def format_weex_report(st,fills,stats,now=None):
         '--------------------------------------------',
         '✅ Все закрытые циклы сопоставлены.',
     ]
+    if BOT_DD_DATA.exists():
+        try:
+            dd=json.loads(BOT_DD_DATA.read_text())
+            if dd.get('schema')==1 and dd.get('instrument')==INST:
+                worst=-D(dd['max_drawdown_usdt'])
+                at=datetime.fromtimestamp(float(dd['max_drawdown_at']),timezone.utc).strftime('%d.%m.%Y %H:%M:%S UTC')
+                items[-1:-1] = [
+                    f'МАКС. ПРОСАДКА БОТА:      {plus(worst,8)} ({rate(worst)})',
+                    f'  Зафиксирована:          {at}',
+                ]
+        except (OSError,ValueError,KeyError,TypeError):
+            pass
     return '\n'.join(items)
 
 
@@ -2152,10 +2400,22 @@ def print_full_stats(pnl=None):
         print('Примеры расхождений:',d['missing'],flush=True)
         print('Финансовые суммы не выводятся.',flush=True)
         return
+    # A fill may have arrived while background history was paginating.
+    # Never persist a false drawdown from an outdated open-position inventory.
+    if LIVE and financial_signature(json.loads(DATA.read_text()))!=financial_signature(st):
+        print('⏳ Статистика: исполнение изменилось во время REST-сверки; ждём нового полного снимка',flush=True)
+        return
     # Publish a complete, immutable-format report for the external manager.
     # Crucially, only the active trading process publishes the snapshot.
     # AUDIT / STATS_ONLY never overwrite a live bot's snapshot.
     now=time.time()
+    if LIVE:
+        # Existing complete PnL uses authoritative BUY/SELL fills and fees.
+        # Only the running engine changes the monitoring baseline.
+        record_bot_drawdown(d['total_gain'],now=now,source='full_fills',bid=bid)
+        atomic_json(BOT_DD_ANCHOR, {'schema':1,'instrument':INST,
+            'signature':financial_signature(st),'total_pnl_usdt':str(d['total_gain']),
+            'open_contracts':str(d['open_contracts']),'bid':str(bid),'at':now})
     report=format_weex_report(st,fills,d,now=now)
     if LIVE:
         atomic_json(STATS_FILE, {
@@ -2170,17 +2430,52 @@ def print_full_stats(pnl=None):
     print('\n'+report+'\n',flush=True)
 
 
+class BotDrawdownWorker(threading.Thread):
+    """Frequent non-trading mark-to-market drawdown from verified fill baseline.
+
+    No new REST calls: only fresh public WebSocket BID. If accounting-relevant
+    state changes, skip approximation until full fills re-anchor the number.
+    """
+    def __init__(self, market):
+        super().__init__(daemon=True)
+        self.market=market
+
+    def run(self):
+        while True:
+            try:
+                if DATA.exists() and BOT_DD_ANCHOR.exists():
+                    bid=self.market.cached_bid()
+                    if bid is not None:
+                        st=json.loads(DATA.read_text())
+                        anchor=json.loads(BOT_DD_ANCHOR.read_text())
+                        p=bot_dd_mark(anchor,st,bid)
+                        if p is not None:
+                            record_bot_drawdown(p,source='live_bid',bid=bid)
+            except Exception as exc:
+                log('BOT_DRAWDOWN_SAMPLE_FAILED',error=f'{type(exc).__name__}: {str(exc)[:140]}')
+            time.sleep(BOT_DD_SAMPLE_INTERVAL)
+
+
 class StatsWorker(threading.Thread):
-    """Independent read-only stats. Never blocks or modifies order management."""
+    """Background verified fills; refresh promptly after executions, not every tick."""
     def __init__(self,pnl):
         super().__init__(daemon=True)
         self.pnl=pnl
 
     def run(self):
+        last=0.0
         while True:
-            delay=STATS_INTERVAL
+            delay=5
+            now=time.monotonic()
             try:
-                print_full_stats(self.pnl)
+                due=(not last or now-last>=STATS_INTERVAL)
+                if not due and now-last>=60 and DATA.exists() and BOT_DD_ANCHOR.exists():
+                    current=json.loads(DATA.read_text())
+                    anchor=json.loads(BOT_DD_ANCHOR.read_text())
+                    due=financial_signature(current)!=anchor.get('signature')
+                if due:
+                    last=now
+                    print_full_stats(self.pnl)
             except RateLimitedError:
                 delay=60
                 print('⏳ OKX ограничил историю сделок; статистика повторится через 60с',flush=True)
@@ -2223,6 +2518,7 @@ def main():
         market=PublicBidWatcher();market.start()
         pnl_worker=PnLWorker(pnl);pnl_worker.start()
         stats_worker=StatsWorker(pnl);stats_worker.start()
+        BotDrawdownWorker(market).start()
         live_loop(st,watcher,market,pnl,pnl_worker)
     finally:
         os.close(lock)

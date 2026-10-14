@@ -64,45 +64,36 @@ class PartialBuyTests(unittest.TestCase):
         self.assertEqual(self.cycle['state'],'CLOSED')
         self.e.coverage_audit(self.st,[],Decimal('0'))
 
-    def test_partial_buy_cancel_creates_virtual_then_standalone_limit_tp(self):
+    def test_partial_cancel_adopts_exchange_attached_tp_instead_of_second_sell(self):
         self.partial('.01')
         with patch.object(self.e.A,'req',return_value=[{'sCode':'0'}]):
             self.assertTrue(self.e.cancel_lowest_specific(self.st,self.cycle))
-        self.assertEqual(self.cycle['state'],'CANCELING')
         self.buy.update(state='canceled',accFillSz='0.01')
-        with patch.object(self.e.A,'order',side_effect=self.fake_order):
-            self.assertTrue(self.e.track(self.st,[]))
-        self.assertEqual(self.cycle['state'],'VIRTUAL_TP')
-        self.assertEqual(self.cycle['filledBuy'],'0.01')
-        self.e.coverage_audit(self.st,[],Decimal('.01'))
-        placed=[]
-        def req(method,path,body=None,**kw):
-            placed.append((method,path,body))
-            return [{'ordId':'S2','sCode':'0'}]
-        with patch.object(self.e.A,'req',side_effect=req):
-            self.assertEqual(self.e.maintain_virtual_tp(self.st,[],Decimal('.01')),'RESTORE')
-        self.assertEqual(len(placed),1)
-        self.assertEqual(placed[0][2]['sz'],'0.01')
-        self.assertEqual(placed[0][2]['ordType'],'limit')
-        self.assertIs(placed[0][2]['reduceOnly'],True)
+        attached=dict(self.sell,sz='0.01')
+        # Exchange opens the TP during the BUY cancel acknowledgement race.
+        self.e.register_cancel_attached(self.st,[attached])
+        with patch.object(self.e.A,'order',side_effect=lambda oid='',cid='':self.buy if oid=='B1' else attached):
+            self.assertTrue(self.e.track(self.st,[attached]))
         self.assertEqual(self.cycle['state'],'TP_WAIT')
-        self.assertEqual(self.cycle['tpOrders'][0]['ordId'],'S2')
-        # REST is ultimate authority: a recognized new TP reconciles and covers the position.
-        restored=dict(self.sell,ordId='S2',clOrdId=self.cycle['tpOrders'][0]['clOrdId'],sz='0.01')
-        with patch.object(self.e.A,'order',return_value=restored):
-            self.assertTrue(self.e.track(self.st,[restored]))
-        self.e.coverage_audit(self.st,[restored],Decimal('.01'))
+        self.assertEqual(self.cycle['filledBuy'],'0.01')
+        self.assertEqual(self.cycle['tpOrders'][0]['ordId'],'S1')
+        self.e.coverage_audit(self.st,[attached],Decimal('.01'))
+        with patch.object(self.e.A,'req',side_effect=AssertionError('Never duplicate auto-attached TP')):
+            self.assertEqual(self.e.maintain_virtual_tp(self.st,[attached],Decimal('.01')),'NONE')
 
-    def test_sub_lot_partial_cancel_never_rounded_or_crashes(self):
+    def test_sub_lot_partial_cancel_waits_for_attached_resolution(self):
         self.partial('.005')
         self.buy.update(state='canceled',accFillSz='.005')
-        with patch.object(self.e.A,'order',side_effect=self.fake_order):
-            self.assertTrue(self.e.track(self.st,[]))
-        self.assertEqual(self.cycle['state'],'VIRTUAL_TP')
-        self.e.coverage_audit(self.st,[],Decimal('.005'))
-        self.assertEqual(len(self.e.unplaceable_virtual_tp(self.st)),1)
-        with patch.object(self.e.A,'req',side_effect=AssertionError('TP cannot be posted')):
-            self.assertEqual(self.e.maintain_virtual_tp(self.st,[],Decimal('.005')),'NONE')
+        with patch.object(self.e.A,'order',side_effect=lambda oid='',cid='':self.buy if oid=='B1' else None), \
+             patch.object(self.e,'paged_order',return_value=None), \
+             patch.object(self.e,'parent_tp_failure',return_value=''):
+            self.assertFalse(self.e.track(self.st,[]))
+        self.assertEqual(self.cycle['state'],'TP_WAIT')
+        self.assertEqual(self.cycle['tpOrders'][0]['sz'],'0.005')
+        self.assertFalse(self.e.tp_quantity_placeable(Decimal('.005')))
+        # Cannot send another SELL until attached outcome is known.
+        with patch.object(self.e.A,'req',side_effect=AssertionError('Do not submit another SELL')):
+            self.assertEqual(self.e.partial_cleanup_action(self.st,Decimal('110'),Decimal('.005'),'RUN'),'NONE')
 
     def test_live_reported_with_accfill_is_partial_not_ignored(self):
         self.buy['state']='live';self.buy['accFillSz']='0.01'
