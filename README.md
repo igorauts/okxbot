@@ -1,4 +1,8 @@
-**Latest release: [v0.6.9](https://github.com/igorauts/okxbot/releases/tag/v0.6.9)** — safety fixes, account-wide AUTO SOFT STOP, improved order reconciliation.
+**Latest release: [v0.6.10](https://github.com/igorauts/okxbot/releases/tag/v0.6.10)** — POST expiry, safer TP recovery, Telegram monitoring, manager updates.
+
+See [v0.6.10 documentation](README_v0610_RU.md) and [release notes](RELEASE_NOTES_v0610.md).
+
+**Previous release: [v0.6.9](https://github.com/igorauts/okxbot/releases/tag/v0.6.9)** — safety fixes, account-wide AUTO SOFT STOP, improved order reconciliation.
 
 See [v0.6.9 documentation](README_v069_RU.md). Earlier documentation below is retained for reference.
 

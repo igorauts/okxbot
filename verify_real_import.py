@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Full-module import + real 068->069 state-migration offline, NO exchange requests."""
+"""Full-module import + real 069->0610 state-migration offline, NO exchange requests."""
 import importlib.util, tempfile, json, shutil, os
 from pathlib import Path
 
-p=Path(__file__).with_name('okx_bot069.py')
+p=Path(__file__).with_name('okx_bot0610.py')
 with tempfile.TemporaryDirectory() as temp:
     root=Path(temp)
     for n in ('state','logs'): (root/n).mkdir()
@@ -13,23 +13,23 @@ with tempfile.TemporaryDirectory() as temp:
        active_tp_orders=74,contract_value='.01',tick_size='.01',contract_lot='.01',
        contract_min='.01',maker_fee_at_setup='.0002',upper_price='2800',
        capital_reference_price='2800',buy_base_qty='.01',live_trading=False,
-       created_at=1700000000,name='mock069')
+       created_at=1700000000,name='mock0610')
     (root/'config.json').write_text(json.dumps(cfg))
     (root/'.env').write_text('OKX_API_KEY=NOT_REAL\nOKX_API_SECRET=NOT_REAL\nOKX_API_PASSPHRASE=NOT_REAL\n')
     shutil.copy2(p,root/p.name)
-    old=dict(version='0.6.8',instrument='ETH-USDT-SWAP',cycles={},
+    old=dict(version='0.6.9',instrument='ETH-USDT-SWAP',cycles={},
              archived_cycles=[],completed=23,bootstrapped=True,started_at=1700000000)
     state_file=root/'state'/'bot04_state.json'
     state_file.write_text(json.dumps(old))
     os.environ['OKX_BOT04_AUDIT']='READ_ONLY'
-    spec=importlib.util.spec_from_file_location('okx_v069_offline',root/'okx_bot069.py')
+    spec=importlib.util.spec_from_file_location('okx_v069_offline',root/'okx_bot0610.py')
     m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
-    assert m.VER=='0.6.9'
+    assert m.VER=='0.6.10'
     m.run_tests()
     upgraded=m.ensure_state()
-    assert upgraded['version']=='0.6.9' and upgraded['completed']==23
-    backup=root/'state'/'bot04_state_before_v069.json'
+    assert upgraded['version']=='0.6.10' and upgraded['completed']==23
+    backup=root/'state'/'bot04_state_before_v0610.json'
     assert json.loads(backup.read_text())==old
-    assert m.ensure_state()['version']=='0.6.9'
+    assert m.ensure_state()['version']=='0.6.10'
     assert not list((root/'state').glob('*.sqlite'))
-    print('PASS full module import, internal grid tests, state backup + 068->069 upgrade, no network/orders')
+    print('PASS full module import, internal grid tests, state backup + 069->0610 upgrade, no network/orders')

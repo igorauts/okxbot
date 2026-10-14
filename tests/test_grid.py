@@ -104,7 +104,7 @@ class EngineTests(unittest.TestCase):
     def make_engine(self,coin='BTC',price='83200',upper='80000',step='10',tp='50',qty='0.0001',cap=500):
         td=tempfile.TemporaryDirectory()
         root=Path(td.name)
-        shutil.copy2(SRC/'okx_bot068.py',root/'okx_bot068.py')
+        shutil.copy2(SRC/'okx_bot0610.py',root/'okx_bot0610.py')
         ct={'BTC':'0.01','ETH':'0.1','SOL':'1'}[coin]
         min_quantity={'BTC':'0.0001','ETH':'0.001','SOL':'0.01'}[coin]
         min_contract=Decimal(min_quantity)/Decimal(ct)
@@ -120,7 +120,7 @@ class EngineTests(unittest.TestCase):
         (root/'config.json').write_text(json.dumps(cfg))
         (root/'.env').write_text('OKX_API_KEY=dev\nOKX_API_SECRET=dev\nOKX_API_PASSPHRASE=dev\nOKX_DEMO=0\n')
         (root/'state').mkdir();(root/'logs').mkdir()
-        spec=importlib.util.spec_from_file_location('engine060_test',root/'okx_bot068.py')
+        spec=importlib.util.spec_from_file_location('engine060_test',root/'okx_bot0610.py')
         engine=importlib.util.module_from_spec(spec)
         spec.loader.exec_module(engine)
         return td,engine
@@ -160,7 +160,7 @@ class EngineTests(unittest.TestCase):
             result=e.full_stats_snapshot(st,[buy,sell],Decimal('106.2'),Decimal('1'))
             self.assertTrue(result['complete'])
             self.assertEqual(result['grid_gain'],Decimal('0.0015756'))
-            report=e.format_weex_report(st,[buy,sell],result,now=1720002222)
+            report=e.format_okx_report(st,[buy,sell],result,now=1720002222)
             self.assertIn('Solana' if False else 'SOL GRID STATISTICS',report)
             self.assertIn('$547.13',report)
             self.assertIn('5.00000000 SOL',report)
@@ -176,12 +176,12 @@ class EngineTests(unittest.TestCase):
                  patch.object(e.A,'ticker',return_value=Decimal('106')), \
                  patch.object(e,'stats_exchange_fills',return_value=[]), \
                  patch.object(e,'full_stats_snapshot',return_value=fake), \
-                 patch.object(e,'format_weex_report',return_value='📊 OKX SOL GRID STATISTICS\n✅ Все закрытые циклы сопоставлены.'):
+                 patch.object(e,'format_okx_report',return_value='📊 OKX SOL GRID STATISTICS\n✅ Все закрытые циклы сопоставлены.'):
                 e.print_full_stats()
             obj=json.loads(e.STATS_FILE.read_text())
             self.assertEqual(obj['schema_version'],1)
             self.assertEqual(obj['instrument'],'SOL-USDT-SWAP')
-            self.assertEqual(obj['bot_version'],'0.6.8')
+            self.assertEqual(obj['bot_version'],'0.6.10')
             self.assertTrue(obj['complete'])
             self.assertTrue(obj['generated_at_unix']>0)
             self.assertIn('SOL GRID STATISTICS',obj['report'])
@@ -195,7 +195,7 @@ class EngineTests(unittest.TestCase):
                  patch.object(e.A,'ticker',return_value=Decimal('106')), \
                  patch.object(e,'stats_exchange_fills',return_value=[]), \
                  patch.object(e,'full_stats_snapshot',return_value={'complete':True}), \
-                 patch.object(e,'format_weex_report',return_value='Read-only report'):
+                 patch.object(e,'format_okx_report',return_value='Read-only report'):
                 e.print_full_stats()
             self.assertFalse(e.STATS_FILE.exists())
             with patch.object(e,'LIVE',True), \

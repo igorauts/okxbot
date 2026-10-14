@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.6.10 — POST expiry, isolated TP recovery, Telegram monitoring
+
+- Added OKX REST `expTime` header to BUY and virtual TP placement; deadlines are persisted before HTTP transmission.
+- If placement ACK is lost, reconcile by exact client ID. Only new deadline-protected intents may be automatically resolved after three independent, complete negative history checks and a 120-second grace period; legacy unknown orders remain fail-closed.
+- An uncertain SELL reserves its own quantity but no longer stops unrelated, separately covered virtual TP from being restored.
+- Added optional external Telegram monitor with critical event notifications, service health checks, daily 09:00 Santiago-time digest, and read-only `/status` command.
+- Updated manager engine discovery and systemd drop-in handling (applied to repository clone by `prepare_repository_v0610.py`).
+- Updated main engine tests for the new version while keeping v0.6.8 historical regression tests.
+- Removed obsolete references to unrelated exchanges from the engine code and renamed the OKX report formatter without changing the report output.
+- State v0.6.9 migrates with a durable backup; existing SQLite tables, trading settings and LIVE modes remain unchanged.
+
+
 ## v0.6.9 — Safety Fixes
 
 - Fixed explicit OKX BUY/TP rejection handling.

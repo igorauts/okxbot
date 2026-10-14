@@ -95,7 +95,7 @@ def bot_path(entry):
 
 
 def engine_file(path):
-    for name in ('okx_bot068.py', 'okx_bot067.py', 'okx_bot066.py', 'okx_bot065.py', 'okx_bot064.py', 'okx_bot062.py', 'okx_bot061.py', 'okx_bot060.py', 'okx_bot059.py'):
+    for name in ('okx_bot0610.py', 'okx_bot069.py', 'okx_bot068.py', 'okx_bot067.py', 'okx_bot066.py', 'okx_bot065.py', 'okx_bot064.py', 'okx_bot062.py', 'okx_bot061.py', 'okx_bot060.py', 'okx_bot059.py'):
         if (path / name).is_file():
             return name
     raise RuntimeError('Не найден исполняемый Python-файл бота')
@@ -264,13 +264,27 @@ TERMINAL_PHASES = {'RETIRED', 'PANIC_DONE'}
 
 
 def control_supported(entry):
-    # The service ExecStart, not mere file presence, defines the live engine.
+    """Check the *effective* service command, including ordered systemd drop-ins.
+
+    Unit-file-only checks are wrong after an engine upgrade performed with an
+    ExecStart drop-in. No shell or manager writes happen in this function.
+    """
     path=bot_path(entry)
     unit=SYSTEMD_DIR/unit_name(entry)
     if not unit.is_file():return False
-    match=re.search(r'^ExecStart=(.+)$',unit.read_text(encoding='utf-8'),re.M)
-    return bool(match and any((path/name).is_file() and str(path/name) in match.group(1).split()
-                              for name in ('okx_bot068.py','okx_bot067.py','okx_bot066.py','okx_bot065.py','okx_bot064.py')))
+    files=[unit]
+    override=SYSTEMD_DIR/(unit.name+'.d')
+    if override.is_dir():files+=sorted(override.glob('*.conf'))
+    command=''
+    for f in files:
+        for line in f.read_text(encoding='utf-8').splitlines():
+            if line.startswith('ExecStart='):
+                command=line[len('ExecStart='):].strip()
+    if not command:return False
+    engines=('okx_bot0610.py','okx_bot069.py','okx_bot068.py',
+             'okx_bot067.py','okx_bot066.py','okx_bot065.py','okx_bot064.py')
+    return any((path/name).is_file() and str(path/name) in command.split()
+               for name in engines)
 
 
 def read_control(entry):

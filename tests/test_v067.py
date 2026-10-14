@@ -72,7 +72,7 @@ class BotDrawdownV068(unittest.TestCase):
             'open_gain':D('0'),'total_gain':D('0')}
         with patch.object(e,'_first_anchor',return_value=(1720000000,D('2800'))), \
              patch.object(e,'_last_24h_profit',return_value=D('0')):
-            report=e.format_weex_report(st,[],stats,now=1720000100)
+            report=e.format_okx_report(st,[],stats,now=1720000100)
         self.assertIn('МАКС. ПРОСАДКА БОТА:',report)
         self.assertIn('−$2.35000000',report)
         self.assertNotIn('EQUITY ВСЕГО СЧЁТА',report)
