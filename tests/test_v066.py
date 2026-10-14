@@ -1,4 +1,4 @@
-"""Release v0.6.7 safety regression tests: no network, mock OKX exact IDs."""
+"""Release v0.6.8 safety regression tests: no network, mock OKX exact IDs."""
 import unittest
 import json
 import time
@@ -7,7 +7,7 @@ from unittest.mock import patch
 from test_grid import EngineTests
 
 
-class PartialExitV067(unittest.TestCase):
+class PartialExitV068(unittest.TestCase):
     def setUp(self):
         self.td,self.e=EngineTests().make_engine('SOL','106','120','.03','.13','.04')
         self.addCleanup(self.td.cleanup)

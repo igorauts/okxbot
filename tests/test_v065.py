@@ -10,7 +10,7 @@ from decimal import Decimal
 from unittest.mock import patch
 
 ROOT=Path(__file__).resolve().parents[1]
-spec=importlib.util.spec_from_file_location('wizard065',ROOT/'okx_setup067.py')
+spec=importlib.util.spec_from_file_location('wizard065',ROOT/'okx_setup068.py')
 w=importlib.util.module_from_spec(spec);spec.loader.exec_module(w)
 spec=importlib.util.spec_from_file_location('controller065',ROOT/'okxbot.py')
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
@@ -23,7 +23,7 @@ class SafeCases(unittest.TestCase):
         self.systemd=base/'systemd';self.systemd.mkdir()
         self.bot=self.base/'sol64';self.bot.mkdir()
         for path in ('state','logs','.venv/bin'): (self.bot/path).mkdir(parents=True)
-        shutil.copy2(ROOT/'okx_bot067.py',self.bot/'okx_bot067.py')
+        shutil.copy2(ROOT/'okx_bot068.py',self.bot/'okx_bot068.py')
         (self.bot/'.venv/bin/python').write_text('fake')
         cfg={'instrument':'SOL-USDT-SWAP','direction':'long','td_mode':'cross','buy_type':'post_only',
              'tp_type':'attached_limit','grid_step':'0.05','take_profit':'0.20','order_size':'0.01',
@@ -35,17 +35,17 @@ class SafeCases(unittest.TestCase):
         (self.bot/'.env').write_text('OKX_API_KEY=x\nOKX_API_SECRET=y\nOKX_API_PASSPHRASE=z\nOKX_DEMO=0\n')
         self.service=self.systemd/'okx-grid-sol64.service'
         self.service.write_text('WorkingDirectory='+str(self.bot)+'\nExecStart='+str(self.bot)+
-                                '/.venv/bin/python -u '+str(self.bot)+'/okx_bot067.py\n')
+                                '/.venv/bin/python -u '+str(self.bot)+'/okx_bot068.py\n')
         for var,value in [('BASE',self.base),('SYSTEMD_DIR',self.systemd),
                           ('REGISTRY',self.base/'registry.json'),('SOURCE',ROOT)]:
             p=patch.object(m,var,value);p.start();self.addCleanup(p.stop)
         entries={'sol64':{'slug':'sol64','path':str(self.bot),'service':'okx-grid-sol64'}}
         m.save_registry(entries)
-        spec=importlib.util.spec_from_file_location('engine64_test',self.bot/'okx_bot067.py')
+        spec=importlib.util.spec_from_file_location('engine64_test',self.bot/'okx_bot068.py')
         self.e=importlib.util.module_from_spec(spec)
         with patch.dict(os.environ,{'OKX_BOT04_LIVE':'CONFIRM','OKX_BOT04_PROBE':'FULL_25'}):
             spec.loader.exec_module(self.e)
-        self.state={'version':'0.6.7','instrument':'SOL-USDT-SWAP','cycles':{},
+        self.state={'version':'0.6.8','instrument':'SOL-USDT-SWAP','cycles':{},
                     'archived_cycles':[],'completed':0}
 
     def test_engine_controls_are_persistent(self):
@@ -182,7 +182,7 @@ class SafeCases(unittest.TestCase):
                 m.cmd_control('sol64','RUN')
 
     def test_manager_old_engine_refuses_destructive_control(self):
-        (self.bot/'okx_bot067.py').unlink()
+        (self.bot/'okx_bot068.py').unlink()
         (self.bot/'okx_bot060.py').write_text('old')
         with patch.object(m,'service_running',return_value=True), \
              patch.object(m,'run') as proc:

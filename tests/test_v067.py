@@ -7,7 +7,7 @@ from unittest.mock import patch
 from test_grid import EngineTests
 
 
-class BotDrawdownV067(unittest.TestCase):
+class BotDrawdownV068(unittest.TestCase):
     def setUp(self):
         self.td, self.e = EngineTests().make_engine('ETH','2500','2800','.5','2.75','.03')
         self.addCleanup(self.td.cleanup)
@@ -89,7 +89,7 @@ class BotDrawdownV067(unittest.TestCase):
 if __name__ == '__main__':unittest.main()
 
 # Manager must show the newest drawdown even when cached full report is older.
-class ManagerDrawdownV067(unittest.TestCase):
+class ManagerDrawdownV068(unittest.TestCase):
     def test_read_only_overlay_uses_latest_dd_file(self):
         import tempfile
         from pathlib import Path

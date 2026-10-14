@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OKX v0.6.7 first-run terminal wizard. NO TRADING API WRITES.
+"""OKX v0.6.8 first-run terminal wizard. NO TRADING API WRITES.
 
 Creates a NEW, separate bot directory. All prompts require explicit input;
 no empty-Enter defaults. Existing bot directories are never overwritten.
@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP
 from pathlib import Path
 
-VER='0.6.7'
+VER='0.6.8'
 BASE=Path(__file__).resolve().parent
 ASSETS={'Bitcoin':'BTC','Ethereum':'ETH','Solana':'SOL'}
 
@@ -82,8 +82,8 @@ def validate_numeric(key,s,ctx):
         if x!=x.to_integral_value() or not 1<=x<=hi:
             raise ValueError(f'Введите целое число следящих BUY: 1–{hi}.')
     elif key=='real_tp':
-        if x!=x.to_integral_value() or not 1<=x<=75:
-            raise ValueError('Введите целое количество реальных TP: 1–75.')
+        if x!=x.to_integral_value() or not 1<=x<=min(75,99-int(ctx.get('buys',25))):
+            raise ValueError(f'Реальных TP допускается 1–{min(75,99-int(ctx.get("buys",25)))}: BUY+TP не больше 99.')
     elif key=='upper':
         if x<0:raise ValueError('Верхняя граница не может быть отрицательной.')
         if x and x%tick:raise ValueError(f'Верхняя граница должна быть кратна ${tick}.')
@@ -212,8 +212,8 @@ def lines_for(key,ctx):
         f'Например: {min(25,int(ctx["grids"]))}', '', 'Количество BUY LIMIT:']
     if key=='real_tp':return [
         'Укажите количество реальных TP на бирже.', '',
-        'Минимум: 1','Максимум: 75','',
-        'Например: 75','', 'Количество TP:']
+        'Минимум: 1',f'Максимум: {min(75,99-int(ctx.get("buys",25)))}','',
+        f'Например: {min(75,99-int(ctx.get("buys",25)))}','', 'Количество TP:']
     if key=='upper':
         x1=to_tick_up(price*Decimal('1.10'),ctx['tick'])
         x2=to_tick_up(price*Decimal('1.15'),ctx['tick'])
@@ -440,7 +440,7 @@ def persist(ctx,out,env_raw):
         'contract_min':as_string(ctx['min_contracts']),
         'fee_group_id':str(ctx['spec'].get('groupId') or ''),
         'tick_size':as_string(ctx['tick']),
-        'active_buy_orders':int(ctx['buys']),'active_tp_orders':int(ctx['real_tp']),
+        'active_buy_orders':int(ctx.get('buys',25)),'active_tp_orders':int(ctx['real_tp']),
         'max_grids':int(ctx['grids']),'max_exchange_orders':500,
         'upper_price':as_string(ctx['upper']),
         'capital_reference_price':as_string(ref),
@@ -456,13 +456,13 @@ def persist(ctx,out,env_raw):
     secret_path=out/'.env'
     fd=os.open(secret_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
     with os.fdopen(fd,'w') as f:f.write(env_raw)
-    shutil.copy2(BASE/'okx_bot067.py',out/'okx_bot067.py')
+    shutil.copy2(BASE/'okx_bot068.py',out/'okx_bot068.py')
     shutil.copy2(BASE/'requirements.txt',out/'requirements.txt')
     return out
 
 
 def main():
-    parser=argparse.ArgumentParser(description='Create a NEW v0.6.7 OKX bot directory; never sends orders.')
+    parser=argparse.ArgumentParser(description='Create a NEW v0.6.8 OKX bot directory; never sends orders.')
     parser.add_argument('--output',required=True,help='NEW empty bot directory, e.g. /root/okx/btc01')
     parser.add_argument('--env-file',required=True,help='Existing local OKX API .env')
     args=parser.parse_args()

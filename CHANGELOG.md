@@ -1,21 +1,23 @@
 # Changelog
 
-## v0.6.7 — Hotfix
-- Added per-bot maximum drawdown tracking based on total PnL.
-- Removed account-wide equity monitoring.
-- Added persistent drawdown history and 5-second local sampling.
-- Drawdown is now displayed in bot statistics.
-- Trading grid and order execution logic remain unchanged.
+## v0.6.8 — Reliability & performance
+- Introduced durable SQLite archive of verified exchange fills and completed PnL.
+- One-time verified migration of previous fill history; fetch only missing order executions afterward.
+- Reworked per-bot maximum drawdown sampling using reconciled state snapshots.
+- Added retry for safe GET errors; uncertain POST outcomes and position mismatch now enter safe reconciliation wait.
+- Added per-thread HTTPS keep-alive.
+- Capped combined active BUY + real TP orders at 99 (25 BUY + 74 real TP).
+- Fixed 24-hour profit after completed cycles are archived in SQLite.
+- Fixed drawdown worker retry failures caused by five-element snapshots.
+- Both fixes validated on running ETH and SOL bots.
+- Trading strategy, minimum TP, funding exclusion and partial-BUY cleanup stay unchanged.
 
-## v0.6.6 — Trading Update
-- Added automatic cleanup of stale partially filled BUY orders.
-- Default trigger: 60 seconds and 5 grid steps above BUY price.
-- Added safe cancellation of attached TP before reduce-only MARKET exit.
-- Added separate PnL accounting for partial MARKET exits.
-- Standardized interactive confirmation commands to English.
-- Improved recovery and duplicate-order protection.
+## v0.6.7 — Hotfix
+- Added persistent per-bot maximum negative total PnL tracking; removed account-level equity monitoring.
+
+## v0.6.6 — Trading update
+- Added stale partially filled BUY cleanup and reduce-only market exit after attached TP cancellation.
+- Added separate realized PnL for partial-market exits; confirmation commands standardized in English.
 
 ## v0.6.5 — Hotfix
-- Fixed partial BUY accounting and position coverage checks.
-- Improved partial-fill recovery and TP handling.
-- Added regression tests for partial executions.
+- Reconciled partially filled BUY exposure and TP state; added tests for fill/cancel transitions.
