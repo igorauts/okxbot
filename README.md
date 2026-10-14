@@ -1,3 +1,11 @@
+# OKX Grid Bot v0.7.3 — BTC / ETH / SOL
+
+**Universal v0.7.3:** [documentation](README_v073_UNIVERSAL_RU.md) · [release notes](RELEASE_NOTES_v073.md). One configurable engine, instance manager, optional read-only burst / execution monitors. Default monitoring OFF.
+
+**Publishing does NOT upgrade any running bot.** Do not commit .env, config.json, SQLite or user state. New bots are created with live trading disabled and require explicit read-only exchange audit and live confirmation.
+
+---
+
 # OKX Grid Bot — current ETH release v0.7.2
 
 **Latest release: [v0.7.2](https://github.com/igorauts/okxbot/releases/tag/v0.7.2)** — fixes near-BID BUY cancellation in Grid Following. Live on ETH-USDT-SWAP. SOL runs an independent older engine.

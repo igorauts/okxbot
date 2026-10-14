@@ -1,3 +1,11 @@
+## v0.7.3 — 2026-10-14
+
+- One BTC/ETH/SOL-USDT-SWAP LONG grid engine, from ETH/SOL live-tested v0.7.3 code.
+- Independently configurable BUY target (1–25), temporary BUY buffer (0–5), near-BID protection (0–10 grid steps), SELL TP base (1–25), temporary SELL TP buffer (0–30).
+- BUY following, TP 1500ms grace, one-at-a-time cleanup (>=100ms), virtual TP and aggregate reduce-only market exits.
+- Instance wizard and manager select one universal engine. Optional read-only Burst and Execution monitors selectable per instance (off by default).
+- Offline tests across BTC/ETH/SOL. No automatic LIVE upgrades or trading restarts.
+
 ## v0.7.2 — 2026-10-14
 
 - ETH BUY Grid Following: protect near-BID entries during 25→30→25 buffer cleanup.

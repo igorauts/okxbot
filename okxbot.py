@@ -95,7 +95,7 @@ def bot_path(entry):
 
 
 def engine_file(path):
-    for name in ('okx_bot0610.py', 'okx_bot069.py', 'okx_bot068.py', 'okx_bot067.py', 'okx_bot066.py', 'okx_bot065.py', 'okx_bot064.py', 'okx_bot062.py', 'okx_bot061.py', 'okx_bot060.py', 'okx_bot059.py'):
+    for name in ('okx_bot073.py','okx_bot072.py','okx_bot071.py','okx_bot070.py','okx_bot0610.py', 'okx_bot069.py', 'okx_bot068.py', 'okx_bot067.py', 'okx_bot066.py', 'okx_bot065.py', 'okx_bot064.py', 'okx_bot062.py', 'okx_bot061.py', 'okx_bot060.py', 'okx_bot059.py'):
         if (path / name).is_file():
             return name
     raise RuntimeError('Не найден исполняемый Python-файл бота')
@@ -281,7 +281,7 @@ def control_supported(entry):
             if line.startswith('ExecStart='):
                 command=line[len('ExecStart='):].strip()
     if not command:return False
-    engines=('okx_bot0610.py','okx_bot069.py','okx_bot068.py',
+    engines=('okx_bot073.py','okx_bot072.py','okx_bot071.py','okx_bot070.py','okx_bot0610.py','okx_bot069.py','okx_bot068.py',
              'okx_bot067.py','okx_bot066.py','okx_bot065.py','okx_bot064.py')
     return any((path/name).is_file() and str(path/name) in command.split()
                for name in engines)
@@ -441,7 +441,7 @@ def cmd_clone(source_name, new_name):
     ref=upper if upper else px
     if ref-Decimal(str(cfg['grid_step']))*(int(cfg['max_grids'])-1)<=0:
         raise RuntimeError('Новая цена несовместима с выбранным диапазоном гридов')
-    cfg.update(version='0.6.8',name=new_name,created_at=time.time(),
+    cfg.update(version='0.7.3',name=new_name,created_at=time.time(),
                live_trading=False,price_at_setup=str(px),
                capital_reference_price=str(ref),cloned_from=old)
     print(f'Клон «{new_name}» из «{old}» | {cfg["instrument"]} | текущий BID {px}')
@@ -451,7 +451,7 @@ def cmd_clone(source_name, new_name):
     dest.mkdir(mode=0o700)
     (dest/'state').mkdir(mode=0o700)
     (dest/'logs').mkdir(mode=0o700)
-    for f in ('okx_bot068.py','requirements.txt'):
+    for f in ('okx_bot073.py','requirements.txt'):
         shutil.copy2(SOURCE/f,dest/f)
     (dest/'.env').write_bytes((source/'.env').read_bytes())
     os.chmod(dest/'.env',0o600)
@@ -460,7 +460,7 @@ def cmd_clone(source_name, new_name):
     run([sys.executable,'-m','venv',str(dest/'.venv')])
     run([str(dest/'.venv/bin/pip'),'install','-r',str(dest/'requirements.txt')])
     service=f'okx-grid-{slug}'
-    (SYSTEMD_DIR/f'{service}.service').write_text(unit_text(dest,'okx_bot068.py',new_name))
+    (SYSTEMD_DIR/f'{service}.service').write_text(unit_text(dest,'okx_bot073.py',new_name))
     run(['systemctl','daemon-reload'])
     entries[new_name]={'slug':slug,'path':str(dest),'service':service}
     save_registry(entries)
@@ -802,6 +802,20 @@ def _pause_return():
             pass
 
 
+def cmd_monitor(name, kind, action):
+    """Optional observer per instance. NO trading service start/stop."""
+    import okx_monitor073 as monitors
+    _,entry=find_entry(name)
+    service=entry['service']
+    root=bot_path(entry)
+    script=SOURCE/'okx_monitor073.py'
+    run([sys.executable,str(script),'--root',str(root),'--service',service,
+         '--kind',kind,action])
+
+def monitor_enabled(entry,kind):
+    import okx_monitor073 as monitors
+    return service_running(monitors.monitor_unit(entry['service'],kind))
+
 def interactive_bot_menu(name):
     """Single menu; only controls supported by the selected trading engine."""
     while True:
@@ -809,7 +823,9 @@ def interactive_bot_menu(name):
         is_new=control_supported(entry)
         terminal=instance_terminal(entry)
         mode=control_desired(entry)
-        choices=['Статистика','Статус','Настройки','Логи (LIVE)']
+        choices=['Статистика','Статус','Настройки','Логи (LIVE)',
+                 'Burst Monitor: '+('ON' if monitor_enabled(entry,'burst') else 'OFF'),
+                 'Execution Monitor: '+('ON' if monitor_enabled(entry,'execution') else 'OFF')]
         active=service_running(unit_name(entry))
         if is_new and not terminal and active:
             if mode in ('PAUSE','SOFT'):
@@ -829,7 +845,10 @@ def interactive_bot_menu(name):
         j=curses.wrapper(lambda s: wizard.menu(s,'OKX GRID BOT — '+name,choices))
         if j is None or choices[j]=='Назад':return
         chosen=choices[j]
-        if chosen=='Статистика':
+        if chosen.startswith(('Burst Monitor:','Execution Monitor:')):
+            kind='burst' if chosen.startswith('Burst') else 'execution'
+            cmd_monitor(name,kind,'off' if monitor_enabled(entry,kind) else 'on')
+        elif chosen=='Статистика':
             curses.wrapper(lambda s: stats_screen(s,name))
         elif chosen=='Логи (LIVE)':
             curses.wrapper(lambda s: live_logs_screen(s,name))
@@ -894,6 +913,9 @@ def main(argv=None):
     clone.add_argument('source_name');clone.add_argument('new_name')
     a=sub.add_parser('attach',help='дать имя существующему боту без его перезапуска')
     a.add_argument('name');a.add_argument('--path',required=True);a.add_argument('--service',required=True)
+    mon=sub.add_parser('monitor',help='read-only monitor for selected instance')
+    mon.add_argument('name');mon.add_argument('kind',choices=('burst','execution'))
+    mon.add_argument('setting',choices=('on','off','status','report'))
     opts=p.parse_args(argv)
     cmd=opts.action
     name=getattr(opts,'name',None)
@@ -918,6 +940,7 @@ def main(argv=None):
     elif cmd=='clone':cmd_clone(opts.source_name,opts.new_name)
     elif cmd=='logs':cmd_logs(name,getattr(opts,'follow',False))
     elif cmd=='audit':audit_entry(find_entry(name)[1])
+    elif cmd=='monitor':cmd_monitor(name,opts.kind,opts.setting)
 
 
 if __name__=='__main__':

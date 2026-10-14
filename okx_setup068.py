@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP
 from pathlib import Path
 
-VER='0.6.8'
+VER='0.7.3'
 BASE=Path(__file__).resolve().parent
 ASSETS={'Bitcoin':'BTC','Ethereum':'ETH','Solana':'SOL'}
 
@@ -82,8 +82,14 @@ def validate_numeric(key,s,ctx):
         if x!=x.to_integral_value() or not 1<=x<=hi:
             raise ValueError(f'Введите целое число следящих BUY: 1–{hi}.')
     elif key=='real_tp':
-        if x!=x.to_integral_value() or not 1<=x<=min(75,99-int(ctx.get('buys',25))):
-            raise ValueError(f'Реальных TP допускается 1–{min(75,99-int(ctx.get("buys",25)))}: BUY+TP не больше 99.')
+        if x!=x.to_integral_value() or not 1<=x<=25:
+            raise ValueError('Количество базовых реальных TP: 1–25.')
+    elif key in ('buy_buf','buy_protect','tp_buf'):
+        max_allowed={'buy_buf':5,'buy_protect':10,'tp_buf':30}[key]
+        if x!=x.to_integral_value() or not 0<=x<=max_allowed:
+            raise ValueError(f'{key}: целое число 0–{max_allowed}.')
+        if key=='buy_buf' and int(ctx.get('buys',25))+int(x)>30:
+            raise ValueError('BUY вместе с буфером не может быть больше 30.')
     elif key=='upper':
         if x<0:raise ValueError('Верхняя граница не может быть отрицательной.')
         if x and x%tick:raise ValueError(f'Верхняя граница должна быть кратна ${tick}.')
@@ -212,8 +218,16 @@ def lines_for(key,ctx):
         f'Например: {min(25,int(ctx["grids"]))}', '', 'Количество BUY LIMIT:']
     if key=='real_tp':return [
         'Укажите количество реальных TP на бирже.', '',
-        'Минимум: 1',f'Максимум: {min(75,99-int(ctx.get("buys",25)))}','',
-        f'Например: {min(75,99-int(ctx.get("buys",25)))}','', 'Количество TP:']
+        'Минимум: 1','Максимум: 25','',
+        'Например: 25','', 'Базовых реальных TP:']
+    if key in ('buy_buf','buy_protect','tp_buf'):
+        cap={'buy_buf':5,'buy_protect':10,'tp_buf':30}[key]
+        title={'buy_buf':'Дополнительные BUY','buy_protect':'Зона запрета отмены BUY (в шагах)',
+               'tp_buf':'Временный буфер SELL TP'}[key]
+        default={'buy_buf':5,'buy_protect':3,'tp_buf':30}[key]
+        return [title,'',f'Допустимо: 0–{cap}',f'Рекомендуется: {default}',
+                'BUY buffer — число ордеров, защита BID — шаги сетки.',
+                'Укажите значение:']
     if key=='upper':
         x1=to_tick_up(price*Decimal('1.10'),ctx['tick'])
         x2=to_tick_up(price*Decimal('1.15'),ctx['tick'])
@@ -281,6 +295,9 @@ def report(ctx):
         f'Максимум гридов:               {int(ctx["grids"])}',
         f'Следящих BUY LIMIT:            {int(ctx["buys"])}',
         f'Активных TP:                   {int(ctx["real_tp"])}',
+        f'BUY буфер:                     {int(ctx["buy_buf"])}',
+        f'Защита BUY (шаги):             {int(ctx["buy_protect"])}',
+        f'SELL TP буфер:                 {int(ctx["tp_buf"])}',
         f'Верхняя граница:               {"Без ограничения" if not upper else "$"+str(upper)}',
         '-----------------------------------------------',
         f'Максимальная позиция:          {position} {c}',
@@ -378,7 +395,7 @@ def wizard(stdscr,env,existing_names=()):
             go=menu(stdscr,f'OKX GRID BOT — {coin}',
                 ['Продолжить','Назад к выбору'],contract_lines)
             if go!=0:break
-            steps=['step','tp','grids','qty','buys','real_tp','upper','name']
+            steps=['step','tp','grids','qty','buys','real_tp','buy_buf','buy_protect','tp_buf','upper','name']
             j=0
             while j>=0:
                 if j<len(steps):
@@ -441,6 +458,10 @@ def persist(ctx,out,env_raw):
         'fee_group_id':str(ctx['spec'].get('groupId') or ''),
         'tick_size':as_string(ctx['tick']),
         'active_buy_orders':int(ctx.get('buys',25)),'active_tp_orders':int(ctx['real_tp']),
+         'real_tp_target':int(ctx['real_tp']),
+         'buy_buffer_orders':int(ctx['buy_buf']),
+         'buy_cancel_protect_steps':int(ctx['buy_protect']),
+         'tp_buffer_orders':int(ctx['tp_buf']),
         'max_grids':int(ctx['grids']),'max_exchange_orders':500,
         'upper_price':as_string(ctx['upper']),
         'capital_reference_price':as_string(ref),
@@ -456,7 +477,7 @@ def persist(ctx,out,env_raw):
     secret_path=out/'.env'
     fd=os.open(secret_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
     with os.fdopen(fd,'w') as f:f.write(env_raw)
-    shutil.copy2(BASE/'okx_bot068.py',out/'okx_bot068.py')
+    shutil.copy2(BASE/'okx_bot073.py',out/'okx_bot073.py')
     shutil.copy2(BASE/'requirements.txt',out/'requirements.txt')
     return out
 
