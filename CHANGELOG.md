@@ -1,3 +1,12 @@
+## v0.7.2 — 2026-10-14
+
+- ETH BUY Grid Following: protect near-BID entries during 25→30→25 buffer cleanup.
+- Prefer canceling farthest obsolete BUY; recheck BID before cancel.
+- Bidirectional 1.5s cleanup cooldown, deferred placement if no safe slot.
+- Retain previous real/virtual TP, aggregate MARKET logic, PnL and ETH state.
+- 61 offline tests, including 11 ETH regression tests; ETH LIVE migration completed.
+- No changes to SOL v0.6.10.
+
 # Changelog
 
 ## v0.6.10 — POST expiry, isolated TP recovery, Telegram monitoring

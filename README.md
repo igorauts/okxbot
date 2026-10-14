@@ -1,4 +1,14 @@
-**Latest release: [v0.6.10](https://github.com/igorauts/okxbot/releases/tag/v0.6.10)** — POST expiry, safer TP recovery, Telegram monitoring, manager updates.
+# OKX Grid Bot — current ETH release v0.7.2
+
+**Latest release: [v0.7.2](https://github.com/igorauts/okxbot/releases/tag/v0.7.2)** — fixes near-BID BUY cancellation in Grid Following. Live on ETH-USDT-SWAP. SOL runs an independent older engine.
+
+Documentation: [v0.7.2 (RU)](README_v072_RU.md) · [Release notes](RELEASE_NOTES_v072.md)
+
+**Safety:** 61 offline tests passed; full live behavior remains under observation. Never commit private keys, config, state, or logs.
+
+---
+
+**Previous release: [v0.6.10](https://github.com/igorauts/okxbot/releases/tag/v0.6.10)** — POST expiry, safer TP recovery, Telegram monitoring, manager updates.
 
 See [v0.6.10 documentation](README_v0610_RU.md) and [release notes](RELEASE_NOTES_v0610.md).
 
