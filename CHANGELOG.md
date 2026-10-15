@@ -1,3 +1,11 @@
+## v0.7.4 — 2026-10-15
+
+- Unified manager/status/settings: actual version from systemd, real-time local BUY/SELL/virtual/partial counts, process and VPS uptime, monitored grid gaps with freshness checks. LIVE journal preserved.
+- New wizard: only BUY and real SELL TP base counts configurable (1..25); fixed BUY buffer +5, near-BID cancel protection 5 steps; SELL buffer dynamically BUY base +5 (6..30); unique bot names 3..20 characters.
+- Old config `active_tp_orders=75` no longer shown as effective target; legacy buffer/protection entries ignored by v0.7.4 engine. Historical state is preserved during v0.7.3→v0.7.4 migration.
+- Trading engine exposes its actual TP cooldown and cancel-gap decision timings to avoid false observer warnings. No performance changes to REST execution or durable order handling.
+- One package for BTC/ETH/SOL, optional per-instance monitors. No automatic LIVE changes.
+
 # OKX Grid Bot — полная история версий
 
 История разработки начиная с **v0.5.9 — первого подтверждённого запуска торгового ETH-бота на реальном OKX**. Включены публичные релизы GitHub, промежуточные LIVE-версии и внутренние сборки. Это история разработки продукта, **не история сделок, счёта или конфигураций конкретных пользователей**.

@@ -1,16 +1,16 @@
-# OKX Grid Bot v0.7.3 — BTC / ETH / SOL
+# OKX Grid Bot v0.7.4 — BTC / ETH / SOL
 
-**Universal v0.7.3:** [documentation](README_v073_UNIVERSAL_RU.md) · [release notes](RELEASE_NOTES_v073.md). One configurable engine, instance manager, optional read-only burst / execution monitors. Default monitoring OFF.
+**Текущий релиз:** [v0.7.4](https://github.com/igorauts/okxbot/releases/tag/v0.7.4) · [Документация](README_v074_RU.md) · [Изменения](RELEASE_NOTES_v074.md). Менеджер и движок v0.7.4, встроенный optional мониторинг для каждого экземпляра.
 
-**Publishing does NOT upgrade any running bot.** Do not commit .env, config.json, SQLite or user state. New bots are created with live trading disabled and require explicit read-only exchange audit and live confirmation.
+**Важно:** публикация релиза не перезапускает и не обновляет уже работающие боты. Новые экземпляры создаются с отключённой LIVE-торговлей.
 
 ---
 
 ## Версии и история изменений
 
-**Текущая версия: [v0.7.3](https://github.com/igorauts/okxbot/releases/tag/v0.7.3)** — единый LONG Grid Bot для BTC, ETH и SOL, менеджер экземпляров и опциональные мониторы по каждому боту. Новая публикация **не обновляет** работающие экземпляры на VPS.
+**Предыдущая версия: [v0.7.3](https://github.com/igorauts/okxbot/releases/tag/v0.7.3)** — единый LONG Grid Bot для BTC, ETH и SOL, менеджер экземпляров и опциональные мониторы по каждому боту. Новая публикация **не обновляет** работающие экземпляры на VPS.
 
-**[Полный CHANGELOG от v0.5.9 до v0.7.3](CHANGELOG.md)** — включая внутренние сборки без GitHub Release, первый LIVE ETH, запуск SOL и все промежуточные версии.
+**[Полный CHANGELOG от v0.5.9 до v0.7.4](CHANGELOG.md)** — включая внутренние сборки без GitHub Release, первый LIVE ETH, запуск SOL и все промежуточные версии.
 
 Предыдущие публичные релизы: [v0.7.2](https://github.com/igorauts/okxbot/releases/tag/v0.7.2) · [v0.6.10](https://github.com/igorauts/okxbot/releases/tag/v0.6.10) · [v0.6.9](https://github.com/igorauts/okxbot/releases/tag/v0.6.9) · [v0.6.8](https://github.com/igorauts/okxbot/releases/tag/v0.6.8).
 
@@ -18,7 +18,7 @@
 
 ## Архив: документация v0.6.8 (историческая, не текущая конфигурация)
 
-> **Внимание:** всё ниже описывает поведение и команды **v0.6.8**, а не актуальные лимиты, версию движка или порядок установки v0.7.3. Для новой установки используйте [документацию v0.7.3](README_v073_UNIVERSAL_RU.md). В частности, исторический лимит 74 real TP был заменён новой схемой 25+30.
+> **Внимание:** всё ниже описывает поведение и команды **v0.6.8**, а не актуальные лимиты, версию движка или порядок установки v0.7.4. Для новой установки используйте [документацию v0.7.4](README_v074_RU.md). В частности, исторический лимит 74 real TP был заменён новой схемой 25+30.
 
 Движок сохраняет торговую стратегию LONG/CROSS и работу с виртуальными TP. **Суммарный лимит — 99 биржевых заявок:** при 25 BUY допускается максимум **74 реальных TP** (включая принудительное ограничение ранее созданных экземпляров, у которых в `config.json` указано 75). Алгоритм размещения BUY и минимальный TP +20% не менялись.
 

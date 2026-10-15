@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP
 from pathlib import Path
 
-VER='0.7.3'
+VER='0.7.4'
 BASE=Path(__file__).resolve().parent
 ASSETS={'Bitcoin':'BTC','Ethereum':'ETH','Solana':'SOL'}
 
@@ -85,11 +85,7 @@ def validate_numeric(key,s,ctx):
         if x!=x.to_integral_value() or not 1<=x<=25:
             raise ValueError('Количество базовых реальных TP: 1–25.')
     elif key in ('buy_buf','buy_protect','tp_buf'):
-        max_allowed={'buy_buf':5,'buy_protect':10,'tp_buf':30}[key]
-        if x!=x.to_integral_value() or not 0<=x<=max_allowed:
-            raise ValueError(f'{key}: целое число 0–{max_allowed}.')
-        if key=='buy_buf' and int(ctx.get('buys',25))+int(x)>30:
-            raise ValueError('BUY вместе с буфером не может быть больше 30.')
+        raise ValueError('Служебные буферы и защита BUY фиксированы в v0.7.4.')
     elif key=='upper':
         if x<0:raise ValueError('Верхняя граница не может быть отрицательной.')
         if x and x%tick:raise ValueError(f'Верхняя граница должна быть кратна ${tick}.')
@@ -220,14 +216,6 @@ def lines_for(key,ctx):
         'Укажите количество реальных TP на бирже.', '',
         'Минимум: 1','Максимум: 25','',
         'Например: 25','', 'Базовых реальных TP:']
-    if key in ('buy_buf','buy_protect','tp_buf'):
-        cap={'buy_buf':5,'buy_protect':10,'tp_buf':30}[key]
-        title={'buy_buf':'Дополнительные BUY','buy_protect':'Зона запрета отмены BUY (в шагах)',
-               'tp_buf':'Временный буфер SELL TP'}[key]
-        default={'buy_buf':5,'buy_protect':3,'tp_buf':30}[key]
-        return [title,'',f'Допустимо: 0–{cap}',f'Рекомендуется: {default}',
-                'BUY buffer — число ордеров, защита BID — шаги сетки.',
-                'Укажите значение:']
     if key=='upper':
         x1=to_tick_up(price*Decimal('1.10'),ctx['tick'])
         x2=to_tick_up(price*Decimal('1.15'),ctx['tick'])
@@ -246,8 +234,8 @@ def lines_for(key,ctx):
 
 def validate_name(raw, existing=()):
     name=raw.strip()
-    if not (2<=len(name)<=48):
-        raise ValueError('Название: от 2 до 48 символов.')
+    if not (3<=len(name)<=20):
+        raise ValueError('Название: от 3 до 20 символов.')
     if any(not ch.isprintable() or ch in '/\\' for ch in name):
         raise ValueError('Название не должно содержать / или обратную косую черту.')
     if name.casefold() in {x.casefold() for x in existing}:
@@ -275,7 +263,7 @@ def name_input(stdscr,title,existing):
                 error=str(exc);continue
         if ch in ('\b','\x7f',curses.KEY_BACKSPACE,127):
             value=value[:-1];continue
-        if isinstance(ch,str) and ch.isprintable() and len(value)<48:
+        if isinstance(ch,str) and ch.isprintable() and len(value)<20:
             value+=ch
 
 
@@ -293,11 +281,11 @@ def report(ctx):
         f'Размер BUY:                    {ctx["qty"]} {c}',
         f'Стоимость BUY:                 ≈ ${ctx["qty"]*price:.2f}', '',
         f'Максимум гридов:               {int(ctx["grids"])}',
-        f'Следящих BUY LIMIT:            {int(ctx["buys"])}',
-        f'Активных TP:                   {int(ctx["real_tp"])}',
-        f'BUY буфер:                     {int(ctx["buy_buf"])}',
-        f'Защита BUY (шаги):             {int(ctx["buy_protect"])}',
-        f'SELL TP буфер:                 {int(ctx["tp_buf"])}',
+        f'Активных BUY LIMIT:            {int(ctx["buys"])} (макс. {int(ctx["buys"])+5})',
+        f'Реальных SELL TP:              {int(ctx["real_tp"])} (макс. {int(ctx["real_tp"])+int(ctx["buys"])+5})',
+        f'BUY буфер:                     +5',
+        f'Защита BUY (шаги):             5',
+        f'SELL TP буфер:                 +{int(ctx["buys"])+5}',
         f'Верхняя граница:               {"Без ограничения" if not upper else "$"+str(upper)}',
         '-----------------------------------------------',
         f'Максимальная позиция:          {position} {c}',
@@ -386,16 +374,13 @@ def wizard(stdscr,env,existing_names=()):
                 f'Минимальный ордер:           {ctx["min_qty"]} {coin}',
                 f'Стоимость минимального:     ${ctx["min_qty"]*ctx["price"]:.2f}',
                 f'Шаг цены:                    ${ctx["tick"]}', '',
-                f'Ваши комиссии ({ctx["fee_level"]}):',
-                f'  Maker:                     {ctx["maker"]*100:.4f}%',
-                f'  Taker:                     {ctx["taker"]*100:.4f}%', '',
                 f'Расстояние безубытка:       ${ctx["break_even"]}',
                 '(BUY maker + TP maker)',
             ]
             go=menu(stdscr,f'OKX GRID BOT — {coin}',
                 ['Продолжить','Назад к выбору'],contract_lines)
             if go!=0:break
-            steps=['step','tp','grids','qty','buys','real_tp','buy_buf','buy_protect','tp_buf','upper','name']
+            steps=['step','tp','grids','qty','buys','real_tp','upper','name']
             j=0
             while j>=0:
                 if j<len(steps):
@@ -459,9 +444,9 @@ def persist(ctx,out,env_raw):
         'tick_size':as_string(ctx['tick']),
         'active_buy_orders':int(ctx.get('buys',25)),'active_tp_orders':int(ctx['real_tp']),
          'real_tp_target':int(ctx['real_tp']),
-         'buy_buffer_orders':int(ctx['buy_buf']),
-         'buy_cancel_protect_steps':int(ctx['buy_protect']),
-         'tp_buffer_orders':int(ctx['tp_buf']),
+         'buy_buffer_orders':5,
+         'buy_cancel_protect_steps':5,
+         'tp_buffer_orders':int(ctx['buys'])+5,
         'max_grids':int(ctx['grids']),'max_exchange_orders':500,
         'upper_price':as_string(ctx['upper']),
         'capital_reference_price':as_string(ref),
@@ -477,7 +462,7 @@ def persist(ctx,out,env_raw):
     secret_path=out/'.env'
     fd=os.open(secret_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
     with os.fdopen(fd,'w') as f:f.write(env_raw)
-    shutil.copy2(BASE/'okx_bot073.py',out/'okx_bot073.py')
+    shutil.copy2(BASE/'okx_bot074.py',out/'okx_bot074.py')
     shutil.copy2(BASE/'requirements.txt',out/'requirements.txt')
     return out
 

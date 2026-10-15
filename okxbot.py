@@ -95,7 +95,7 @@ def bot_path(entry):
 
 
 def engine_file(path):
-    for name in ('okx_bot073.py','okx_bot072.py','okx_bot071.py','okx_bot070.py','okx_bot0610.py', 'okx_bot069.py', 'okx_bot068.py', 'okx_bot067.py', 'okx_bot066.py', 'okx_bot065.py', 'okx_bot064.py', 'okx_bot062.py', 'okx_bot061.py', 'okx_bot060.py', 'okx_bot059.py'):
+    for name in ('okx_bot074.py','okx_bot073.py','okx_bot072.py','okx_bot071.py','okx_bot070.py','okx_bot0610.py', 'okx_bot069.py', 'okx_bot068.py', 'okx_bot067.py', 'okx_bot066.py', 'okx_bot065.py', 'okx_bot064.py', 'okx_bot062.py', 'okx_bot061.py', 'okx_bot060.py', 'okx_bot059.py'):
         if (path / name).is_file():
             return name
     raise RuntimeError('Не найден исполняемый Python-файл бота')
@@ -281,7 +281,7 @@ def control_supported(entry):
             if line.startswith('ExecStart='):
                 command=line[len('ExecStart='):].strip()
     if not command:return False
-    engines=('okx_bot073.py','okx_bot072.py','okx_bot071.py','okx_bot070.py','okx_bot0610.py','okx_bot069.py','okx_bot068.py',
+    engines=('okx_bot074.py','okx_bot073.py','okx_bot072.py','okx_bot071.py','okx_bot070.py','okx_bot0610.py','okx_bot069.py','okx_bot068.py',
              'okx_bot067.py','okx_bot066.py','okx_bot065.py','okx_bot064.py')
     return any((path/name).is_file() and str(path/name) in command.split()
                for name in engines)
@@ -441,7 +441,12 @@ def cmd_clone(source_name, new_name):
     ref=upper if upper else px
     if ref-Decimal(str(cfg['grid_step']))*(int(cfg['max_grids'])-1)<=0:
         raise RuntimeError('Новая цена несовместима с выбранным диапазоном гридов')
-    cfg.update(version='0.7.3',name=new_name,created_at=time.time(),
+    cfg['real_tp_target']=int(cfg.get('real_tp_target',min(25,int(cfg.get('active_tp_orders',25)))))
+    cfg['active_tp_orders']=cfg['real_tp_target']
+    cfg['buy_buffer_orders']=5
+    cfg['buy_cancel_protect_steps']=5
+    cfg['tp_buffer_orders']=int(cfg['active_buy_orders'])+5
+    cfg.update(version='0.7.4',name=new_name,created_at=time.time(),
                live_trading=False,price_at_setup=str(px),
                capital_reference_price=str(ref),cloned_from=old)
     print(f'Клон «{new_name}» из «{old}» | {cfg["instrument"]} | текущий BID {px}')
@@ -451,7 +456,7 @@ def cmd_clone(source_name, new_name):
     dest.mkdir(mode=0o700)
     (dest/'state').mkdir(mode=0o700)
     (dest/'logs').mkdir(mode=0o700)
-    for f in ('okx_bot073.py','requirements.txt'):
+    for f in ('okx_bot074.py','requirements.txt'):
         shutil.copy2(SOURCE/f,dest/f)
     (dest/'.env').write_bytes((source/'.env').read_bytes())
     os.chmod(dest/'.env',0o600)
@@ -460,7 +465,7 @@ def cmd_clone(source_name, new_name):
     run([sys.executable,'-m','venv',str(dest/'.venv')])
     run([str(dest/'.venv/bin/pip'),'install','-r',str(dest/'requirements.txt')])
     service=f'okx-grid-{slug}'
-    (SYSTEMD_DIR/f'{service}.service').write_text(unit_text(dest,'okx_bot073.py',new_name))
+    (SYSTEMD_DIR/f'{service}.service').write_text(unit_text(dest,'okx_bot074.py',new_name))
     run(['systemctl','daemon-reload'])
     entries[new_name]={'slug':slug,'path':str(dest),'service':service}
     save_registry(entries)
@@ -582,6 +587,13 @@ def stats_text(name):
     if snapshot is not None:
         report, ts = snapshot
         report = with_latest_bot_dd(report, path, instrument)
+        try:
+            from okx_position_peak import format_peak
+            peak=format_peak(path,instrument)
+            if peak:
+                report += "\n"+"\n".join(peak)
+        except (OSError,ValueError,KeyError,ImportError):
+            pass
         age = max(0, int(time.time() - ts))
         freshness = 'АКТУАЛЬНА' if age <= _STATS_MAX_AGE else 'УСТАРЕЛА'
         status = 'работает' if service_running(unit) else 'остановлен'
@@ -616,18 +628,15 @@ def cmd_list():
 
 
 def cmd_status(name):
-    name,entry=find_entry(name)
-    print(f'Имя: {name}; Пара: {describe(entry)}; Каталог: {entry["path"]}')
-    if control_supported(entry):
-        print('Режим:',control_desired(entry),'| Подтверждение:',read_ack(entry).get('phase','ожидание'))
-    run(['systemctl','status',unit_name(entry),'--no-pager','--lines=15'],check=False)
+    from okx_ui074 import status
+    name, entry = find_entry(name)
+    print(status(name,bot_path(entry),unit_name(entry)))
 
 
 def cmd_show(name):
-    name,entry=find_entry(name)
-    cfg=json.loads((bot_path(entry)/'config.json').read_text())
-    print('Бот:',name,'| Служба:',entry['service'])
-    print(json.dumps(cfg,ensure_ascii=False,indent=2))
+    from okx_ui074 import settings
+    name, entry = find_entry(name)
+    print(settings(name,bot_path(entry),unit_name(entry)))
 
 
 def cmd_logs(name,follow=False):
@@ -781,17 +790,15 @@ def _text_screen(scr, title, text):
 
 
 def _capture_status(name):
-    _, entry = find_entry(name)
-    result = subprocess.run(['systemctl', 'status', unit_name(entry),
-                             '--no-pager', '--lines=20'],
-                            capture_output=True, text=True, timeout=10, check=False)
-    return result.stdout + result.stderr
+    from okx_ui074 import status
+    name, entry = find_entry(name)
+    return status(name,bot_path(entry),unit_name(entry))
 
 
 def _capture_settings(name):
-    _, entry = find_entry(name)
-    cfg = json.loads((bot_path(entry) / 'config.json').read_text())
-    return f'Бот: {name} | Служба: {entry["service"]}\n\n' + json.dumps(cfg, ensure_ascii=False, indent=2)
+    from okx_ui074 import settings
+    name, entry = find_entry(name)
+    return settings(name,bot_path(entry),unit_name(entry))
 
 
 def _pause_return():
@@ -803,18 +810,33 @@ def _pause_return():
 
 
 def cmd_monitor(name, kind, action):
-    """Optional observer per instance. NO trading service start/stop."""
-    import okx_monitor073 as monitors
+    """Optional read-only observer per instance. Never touch trading service."""
+    import okx_monitor074 as monitors
     _,entry=find_entry(name)
-    service=entry['service']
-    root=bot_path(entry)
-    script=SOURCE/'okx_monitor073.py'
-    run([sys.executable,str(script),'--root',str(root),'--service',service,
-         '--kind',kind,action])
+    service=entry['service'];root=bot_path(entry)
+    script=SOURCE/'okx_monitor074.py'
+    # If older v073 observer is enabled, turning OFF should disable it, too.
+    if action=='off':
+        try:
+            import okx_monitor073 as legacy
+            old=legacy.monitor_unit(service,kind)
+            if service_running(old):
+                oldscript=SOURCE/'okx_monitor073.py'
+                run([sys.executable,str(oldscript),'--root',str(root),
+                     '--service',service,'--kind',kind,'off'])
+        except ImportError:
+            pass
+    run([sys.executable,str(script),'--root',str(root),
+         '--service',service,'--kind',kind,action])
 
 def monitor_enabled(entry,kind):
-    import okx_monitor073 as monitors
-    return service_running(monitors.monitor_unit(entry['service'],kind))
+    import okx_monitor074 as monitors
+    try:
+        import okx_monitor073 as legacy
+        old=service_running(legacy.monitor_unit(entry['service'],kind))
+    except ImportError:
+        old=False
+    return (service_running(monitors.monitor_unit(entry['service'],kind)) or old)
 
 def interactive_bot_menu(name):
     """Single menu; only controls supported by the selected trading engine."""
@@ -855,8 +877,6 @@ def interactive_bot_menu(name):
         elif chosen in ('Статус','Настройки'):
             try:
                 content=_capture_status(name) if chosen=='Статус' else _capture_settings(name)
-                if chosen=='Статус' and is_new:
-                    content=f'Режим: {mode}\nПоследняя операция: {read_ack(entry).get("phase","—")}\n\n'+content
             except Exception as exc:content='ОШИБКА: '+str(exc)
             curses.wrapper(lambda s: _text_screen(s,'OKX GRID BOT — '+name+' — '+chosen,content))
         else:
@@ -879,7 +899,7 @@ def interactive_main(env_file):
     while True:
         entries = load_registry()
         titles = ['Создать нового бота', 'Список ботов']
-        names = list(entries)
+        names = sorted(entries,key=lambda name: (not service_running(unit_name(entries[name])),name.casefold()))
         titles.extend(f'{name} — {describe(entries[name])}' for name in names)
         titles.append('Выход')
         i = curses.wrapper(lambda s: wizard.menu(s, 'OKX GRID BOTS', titles))
