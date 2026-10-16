@@ -95,7 +95,7 @@ def bot_path(entry):
 
 
 def engine_file(path):
-    for name in ('okx_bot074.py','okx_bot073.py','okx_bot072.py','okx_bot071.py','okx_bot070.py','okx_bot0610.py', 'okx_bot069.py', 'okx_bot068.py', 'okx_bot067.py', 'okx_bot066.py', 'okx_bot065.py', 'okx_bot064.py', 'okx_bot062.py', 'okx_bot061.py', 'okx_bot060.py', 'okx_bot059.py'):
+    for name in ('okx_bot075.py','okx_bot074.py','okx_bot073.py','okx_bot072.py','okx_bot071.py','okx_bot070.py','okx_bot0610.py', 'okx_bot069.py', 'okx_bot068.py', 'okx_bot067.py', 'okx_bot066.py', 'okx_bot065.py', 'okx_bot064.py', 'okx_bot062.py', 'okx_bot061.py', 'okx_bot060.py', 'okx_bot059.py'):
         if (path / name).is_file():
             return name
     raise RuntimeError('Не найден исполняемый Python-файл бота')
@@ -281,7 +281,7 @@ def control_supported(entry):
             if line.startswith('ExecStart='):
                 command=line[len('ExecStart='):].strip()
     if not command:return False
-    engines=('okx_bot074.py','okx_bot073.py','okx_bot072.py','okx_bot071.py','okx_bot070.py','okx_bot0610.py','okx_bot069.py','okx_bot068.py',
+    engines=('okx_bot075.py','okx_bot074.py','okx_bot073.py','okx_bot072.py','okx_bot071.py','okx_bot070.py','okx_bot0610.py','okx_bot069.py','okx_bot068.py',
              'okx_bot067.py','okx_bot066.py','okx_bot065.py','okx_bot064.py')
     return any((path/name).is_file() and str(path/name) in command.split()
                for name in engines)
@@ -446,7 +446,7 @@ def cmd_clone(source_name, new_name):
     cfg['buy_buffer_orders']=5
     cfg['buy_cancel_protect_steps']=5
     cfg['tp_buffer_orders']=int(cfg['active_buy_orders'])+5
-    cfg.update(version='0.7.4',name=new_name,created_at=time.time(),
+    cfg.update(version='0.7.5',name=new_name,created_at=time.time(),
                live_trading=False,price_at_setup=str(px),
                capital_reference_price=str(ref),cloned_from=old)
     print(f'Клон «{new_name}» из «{old}» | {cfg["instrument"]} | текущий BID {px}')
@@ -456,7 +456,7 @@ def cmd_clone(source_name, new_name):
     dest.mkdir(mode=0o700)
     (dest/'state').mkdir(mode=0o700)
     (dest/'logs').mkdir(mode=0o700)
-    for f in ('okx_bot074.py','requirements.txt'):
+    for f in ('okx_bot075.py','requirements.txt'):
         shutil.copy2(SOURCE/f,dest/f)
     (dest/'.env').write_bytes((source/'.env').read_bytes())
     os.chmod(dest/'.env',0o600)
@@ -465,7 +465,7 @@ def cmd_clone(source_name, new_name):
     run([sys.executable,'-m','venv',str(dest/'.venv')])
     run([str(dest/'.venv/bin/pip'),'install','-r',str(dest/'requirements.txt')])
     service=f'okx-grid-{slug}'
-    (SYSTEMD_DIR/f'{service}.service').write_text(unit_text(dest,'okx_bot074.py',new_name))
+    (SYSTEMD_DIR/f'{service}.service').write_text(unit_text(dest,'okx_bot075.py',new_name))
     run(['systemctl','daemon-reload'])
     entries[new_name]={'slug':slug,'path':str(dest),'service':service}
     save_registry(entries)
