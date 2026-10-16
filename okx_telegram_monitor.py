@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only Telegram control-room for OKX bot instances (status v0.7.5).
+"""Read-only Telegram control-room for OKX bot instances (status v0.7.6).
 
 One process serves both instruments; it never loads exchange API keys, never
 sends/cancels an exchange order, and never writes trading state/control files.
@@ -33,8 +33,16 @@ ALERT_EVENTS = {
     'RECONCILIATION_RECOVERED':'✅ Reconciliation recovered',
     'STARTUP_SYNC_WAIT':'⚠️ Startup syncing',
     'FEE_CHECK_PAUSED_BUYS':'⚠️ BUY paused: fee check',
+    'ACCOUNT_POSITIONS_GATE_RECOVERED':'⚠️ Position limiter recovered',
+    'ACCOUNT_POSITIONS_GATE_DEGRADED':'🚨 Position limiter fallback active',
+    'AGG_MARKET_INTENT':'⚠️ Market SELL: intent saved',
+    'AGG_MARKET_ACK':'📤 Market SELL: accepted by OKX',
+    'AGG_MARKET_REJECTED':'🚨 Market SELL: rejected',
+    'AGG_MARKET_TERMINAL':'💰 Market SELL: final result',
 }
 RATE_LIMIT_SECONDS = 600
+MARKET_ALERTS = frozenset({'AGG_MARKET_INTENT','AGG_MARKET_ACK',
+                            'AGG_MARKET_REJECTED','AGG_MARKET_TERMINAL'})
 POLL_SECONDS = 5
 TZ = ZoneInfo('America/Santiago')
 
@@ -265,7 +273,8 @@ def status_report():
 def format_alert(name,obj):
     typ=obj['event']
     parts=[f'{ALERT_EVENTS[typ]} | OKX {name}']
-    for key in ('severity','code','price','cycleId','seconds','reason','message'):
+    for key in ('severity','code','price','cycleId','cycles','qty','requested',
+                'filled','avgPx','state','ordId','clOrdId','seconds','reason','error','message'):
         if key in obj and obj[key] not in ('',None):
             safe=re.sub(r'[^\w\d .:,()=+\-_/]', '',str(obj[key]))
             parts.append(f'{key}: {safe[:200]}')
@@ -298,7 +307,10 @@ def ingest_events(api,st):
                     key=f'{name}/{typ}/{obj.get("severity","")}'
                     now=time.time()
                     last=float(st['last_alerts'].get(key,0))
-                    important=typ in ('ACCOUNT_AUTO_SOFT_STOP','AUTO_SOFT_MODE_LATCHED')
+                    # Every MARKET event belongs to its own order; never
+                    # suppress another market exit for 10 minutes.
+                    important=typ in MARKET_ALERTS or typ in (
+                        'ACCOUNT_AUTO_SOFT_STOP','AUTO_SOFT_MODE_LATCHED')
                     if important or now-last>=RATE_LIMIT_SECONDS:
                         api.send(format_alert(name,obj))
                         st['last_alerts'][key]=now

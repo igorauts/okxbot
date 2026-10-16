@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OKX Grid Bot v0.7.5 — read-only presentation only.
+"""OKX Grid Bot v0.7.6 — read-only presentation only.
 
 Never imports trading engine, accesses .env, submits OKX HTTP requests, or
 modifies live bot state. Every unavailable metric remains unknown rather than 0.
@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-MANAGER_VERSION='v0.7.5'
+MANAGER_VERSION='v0.7.6'
 ENGINE_PATTERN=re.compile(r'\bokx_bot(\d{3,4})\.py\b')
 GRID_LINE=re.compile(r'BID=([0-9.]+)\b')
 TERMINAL_AGG={'FILLED','CANCELED','REJECTED','DONE','CLOSED'}
@@ -121,7 +121,7 @@ def read_local_orders(state):
 def read_monitor(root,now=None):
     now=time.time() if now is None else now
     st=read_json(Path(root)/'state/bot04_state.json')
-    version={'0.7.5':'075','0.7.4':'074','0.7.3':'073'}.get(st.get('version') if st else None)
+    version={'0.7.6':'075','0.7.5':'075','0.7.4':'074','0.7.3':'073'}.get(st.get('version') if st else None)
     if version is None:return None
     for version in (version,):
         p=Path(root)/'diagnostics'/('execution_v'+version)/('summary_v'+version+'.json')

@@ -1,3 +1,9 @@
+# OKX Grid Bot v0.7.6 — 16 октября 2026
+
+**Новый релиз:** отказоустойчивый общий лимитер позиций, Telegram-уведомления о MARKET SELL, безопасное продление проверки неопределённых POST и исправление BUY no-churn r2. [Описание v0.7.6](README_v076_RU.md) · [Release notes](RELEASE_NOTES_v076.md) · [GitHub Release](https://github.com/igorauts/okxbot/releases/tag/v0.7.6). Публикация не обновляет LIVE-ботов.
+
+---
+
 # OKX Grid Bot v0.7.5 — 16 октября 2026
 
 **Новый релиз:** ускоренная сверка с объединением сохранений JSON, обновлённый Telegram `/status` и исправленная отмена BUY **снизу вверх (сначала минимальная цена)**. [Описание v0.7.5](README_v075_RU.md) · [Release notes](RELEASE_NOTES_v075.md) · [Скачать релиз](https://github.com/igorauts/okxbot/releases/tag/v0.7.5). Публикация исходников не обновляет LIVE-ботов.
