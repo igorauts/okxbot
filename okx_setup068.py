@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP
 from pathlib import Path
 
-VER='0.7.4'
+VER='0.7.5'
 BASE=Path(__file__).resolve().parent
 ASSETS={'Bitcoin':'BTC','Ethereum':'ETH','Solana':'SOL'}
 
@@ -85,7 +85,7 @@ def validate_numeric(key,s,ctx):
         if x!=x.to_integral_value() or not 1<=x<=25:
             raise ValueError('Количество базовых реальных TP: 1–25.')
     elif key in ('buy_buf','buy_protect','tp_buf'):
-        raise ValueError('Служебные буферы и защита BUY фиксированы в v0.7.4.')
+        raise ValueError('Служебные буферы и защита BUY фиксированы в v0.7.5.')
     elif key=='upper':
         if x<0:raise ValueError('Верхняя граница не может быть отрицательной.')
         if x and x%tick:raise ValueError(f'Верхняя граница должна быть кратна ${tick}.')
@@ -462,13 +462,13 @@ def persist(ctx,out,env_raw):
     secret_path=out/'.env'
     fd=os.open(secret_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
     with os.fdopen(fd,'w') as f:f.write(env_raw)
-    shutil.copy2(BASE/'okx_bot074.py',out/'okx_bot074.py')
+    shutil.copy2(BASE/'okx_bot075.py',out/'okx_bot075.py')
     shutil.copy2(BASE/'requirements.txt',out/'requirements.txt')
     return out
 
 
 def main():
-    parser=argparse.ArgumentParser(description='Create a NEW v0.6.8 OKX bot directory; never sends orders.')
+    parser=argparse.ArgumentParser(description='Create a NEW v0.7.5 OKX bot directory; never sends orders.')
     parser.add_argument('--output',required=True,help='NEW empty bot directory, e.g. /root/okx/btc01')
     parser.add_argument('--env-file',required=True,help='Existing local OKX API .env')
     args=parser.parse_args()

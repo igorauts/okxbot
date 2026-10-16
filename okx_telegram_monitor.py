@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only Telegram control-room for OKX bot instances (v0.6.10).
+"""Read-only Telegram control-room for OKX bot instances (status v0.7.5).
 
 One process serves both instruments; it never loads exchange API keys, never
 sends/cancels an exchange order, and never writes trading state/control files.
@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import subprocess
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from urllib.request import Request, urlopen
 
@@ -93,30 +93,172 @@ def save_state(st):
     os.replace(target,STATE_PATH)
 
 
+def _report_values(report):
+    """Read verified fields from the engine's complete stats snapshot.
+
+    Do not recalculate fees, grid PnL, 24h PnL, percentages or drawdown.
+    """
+    values={}
+    for line in str(report).splitlines():
+        m=re.match(r'^\s*([^:]+?):\s*(.*?)\s*$',line)
+        if m:
+            values[m.group(1).strip().casefold()]=m.group(2).strip()
+    return values
+
+
+def _value(values,*keys):
+    for key in keys:
+        v=values.get(key.casefold())
+        if v and v!='—':return v
+    return 'н/д'
+
+
+def _launch_epoch(root,values):
+    """Bot's original first launch, not current process/systemd start."""
+    possible=[]
+    source=_value(values,'Запущен')
+    if source!='н/д':
+        try:
+            dt=datetime.strptime(source,'%d.%m.%Y %H:%M:%S UTC')
+            possible.append(dt.replace(tzinfo=timezone.utc).timestamp())
+        except ValueError:pass
+    for file,key in (
+        (root/'state/bot04_state.json','started_at'),
+        (root/'state/okx_stats_grid_reference_v059.json','started_at'),
+    ):
+        try:
+            val=float(json.loads(file.read_text())[key])
+            if 0<val<=time.time():possible.append(val)
+        except (OSError,ValueError,KeyError,TypeError):pass
+    return min(possible) if possible else None
+
+
+def _age_label(start):
+    if start is None or start>time.time():return 'н/д'
+    minutes=max(0,int((time.time()-start)//60))
+    days,remaining=divmod(minutes,24*60)
+    hours,mins=divmod(remaining,60)
+    return f'{days}d {hours}h {mins}min'
+
+
+def _service_status(name,control_mode,stats_age):
+    """Exchange-trading status comes from systemd and control file."""
+    try:
+        result=subprocess.run(['systemctl','is-active',SERVICES[name]],
+                              capture_output=True,text=True,timeout=3)
+        active=result.stdout.strip()=='active'
+    except (OSError,subprocess.TimeoutExpired):
+        return '🟡','unknown'
+    if not active:return '🔴','stopped'
+    if SHARED_SOFT.exists():return '🟡','auto soft stop'
+    control_mode=str(control_mode).upper()
+    if control_mode in ('RUN','RUNNING'):
+        if stats_age>1200:return '🟡','stats stale'
+        return '🟢','running'
+    if control_mode in ('STOP','STOPPED','PANIC','ERROR'):
+        return '🔴',control_mode.lower()
+    return '🟡','paused' if control_mode in ('PAUSE','PAUSED') else control_mode.lower()
+
+
+def _historical_max_position(root, instrument):
+    """Reuse the existing manager's historical position result, never recompute it.
+
+    okxbot.py uses `okx_position_peak.format_peak(root, instrument)`.
+    Its output has a dedicated `МАКС. ПОЗИЦИЯ В ИСТОРИИ:` line.
+    `max position` in the normal grid report is NOT this value.
+    """
+    try:
+        from okx_position_peak import format_peak
+    except ImportError:
+        # The script and manager may live in different directories on VPS.
+        import sys
+        format_peak=None
+        for module_dir in ('/root/okx', '/opt/okx-grid-v068'):
+            if not (Path(module_dir)/'okx_position_peak.py').is_file():
+                continue
+            if module_dir not in sys.path:
+                sys.path.insert(0, module_dir)
+            try:
+                from okx_position_peak import format_peak
+                break
+            except ImportError:
+                continue
+        if format_peak is None:
+            return 'н/д'
+    try:
+        lines=format_peak(root, instrument) or []
+        if isinstance(lines,str):
+            lines=lines.splitlines()
+        for line in lines:
+            label,sep,value=str(line).partition(':')
+            if not sep:continue
+            normalized=label.casefold().replace('.', '').strip()
+            if 'позиц' in normalized and 'истори' in normalized and ('макс' in normalized or 'наибольш' in normalized):
+                return value.strip() or 'н/д'
+        return 'н/д'
+    except (OSError, ValueError, TypeError, KeyError):
+        return 'н/д'
+
+
 def mode_and_stats(name):
     root=Path(BOT_DIRS[name]);control=root/'state/control.json'
     mode='RUN'
     if control.exists():
         mode=json.loads(control.read_text()).get('mode','UNKNOWN')
-    if SHARED_SOFT.exists():mode='AUTO SOFT'
     path=root/'state/stats.json'
-    if not path.exists():return f'{name}: {mode} | statistics unavailable'
-    st=json.loads(path.read_text())
-    age=time.time()-float(st.get('generated_at_unix',0))
-    text=str(st.get('report',''))
-    picks=['Текущий BID:','Закрытых циклов:','BUY LIMIT:','ждут TP:',
-           'виртуальных TP:','GRID PROFIT:','Прибыль за последние 24ч:',
-           'Открытая позиция:','Нереализованный PnL:','ИТОГОВЫЙ PnL:']
-    rows=[line.strip() for line in text.splitlines() if any(item in line for item in picks)]
-    stale=f' | статистика {int(age//60)} мин назад' if age>1200 else ''
-    return '\n'.join([f'{name}: {mode}{stale}',*rows])
+    if not path.exists():return f'🟡 {name.lower()}: статистика недоступна'
+    stats=json.loads(path.read_text())
+    age=max(0,time.time()-float(stats.get('generated_at_unix',0)))
+    values=_report_values(stats.get('report',''))
+    version=stats.get('bot_version') or 'н/д'
+    try:
+        state=json.loads((root/'state/bot04_state.json').read_text())
+        if state.get('instrument')!=stats.get('instrument'):
+            raise ValueError('Statistics instrument mismatch')
+        version=state.get('version') or version
+    except (OSError,ValueError,KeyError,TypeError):
+        pass
+    icon,status=_service_status(name,mode,age)
+    age_label=_age_label(_launch_epoch(root,values))
+    uptime_suffix=(' '+age_label if age_label!='н/д' else '')
+    bot_name=root.name
+    rows=[f'{icon} {bot_name} · v{str(version).lstrip("v")} · {status}{uptime_suffix}']
+    if age>1200:rows.append(f'⚠️ Статистика обновлялась {int(age//60)} мин назад')
+    labels=(
+        ('Текущий BID','Текущий BID'),
+        ('Закрытых циклов','Закрытых циклов'),
+        ('Грид профит','GRID PROFIT'),
+        ('Торговый объём','Общий объём'),
+        ('Уплаченная комиссия','Уплачено комиссий'),
+        ('Прибыль за последние 24ч','Прибыль за последние 24ч'),
+        ('Открытая позиция','Открытая позиция'),
+        ('Нереализованный PnL','Нереализованный PnL'),
+        ('Итоговый PnL','ИТОГОВЫЙ PnL'),
+    )
+    for label,key in labels:
+        rows.append(f'{label}: {_value(values,key)}')
+    rows.extend(['','Средний темп:',
+                 f'  сутки: {_value(values,"сутки")}',
+                 f'  30 дней: {_value(values,"30 дней")}',
+                 f'  год: {_value(values,"год")}',
+                 ''])
+    drawdown=_value(values,'МАКС. ПРОСАДКА БОТА')
+    if drawdown!='н/д' and '%' in drawdown:
+        drawdown=drawdown.replace('%)','% от 1x)')
+    rows.append(f'Максимальная просадка бота: {drawdown}')
+    rows.append(f'  Зафиксирована: {_value(values,"Зафиксирована")}')
+    rows.append('Максимальная позиция в истории: '+
+                _historical_max_position(root, stats.get("instrument", "")))
+    return '\n'.join(rows)
 
 
 def status_report():
-    output=['📊 OKX BOTS | v0.6.10']
-    for name in BOT_DIRS:
-        try:output.extend(['',mode_and_stats(name)])
-        except Exception:output.extend(['',f'{name}: statistics temporarily unavailable'])
+    output=['📊 OKX Grid Monitor']
+    for idx,name in enumerate(BOT_DIRS):
+        if idx:output.extend(['','━━━━━━━━━━━━━━━━━━'])
+        output.append('')
+        try:output.append(mode_and_stats(name))
+        except Exception:output.append(f'🟡 {name.lower()}: статистика временно недоступна')
     return '\n'.join(output)
 
 
