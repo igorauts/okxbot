@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only Telegram control-room for OKX bot instances (status v0.7.6).
+"""Read-only Telegram control-room for OKX bot instances (status v0.7.7).
 
 One process serves both instruments; it never loads exchange API keys, never
 sends/cancels an exchange order, and never writes trading state/control files.
@@ -15,8 +15,78 @@ from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from urllib.request import Request, urlopen
 
-BOT_DIRS = {'ETH':'/root/okx/eth064', 'SOL':'/root/okx/sol065'}
-SERVICES = {'ETH':'okx-grid-eth064', 'SOL':'okx-grid-sol065'}
+BASE = Path(os.environ.get('OKXBOT_BASE_DIR','/root/okx')).resolve()
+REGISTRY = Path(os.environ.get('OKXBOT_REGISTRY',str(BASE/'.okxbot_registry.json')))
+SYSTEMD_DIR = Path(os.environ.get('OKXBOT_SYSTEMD_DIR','/etc/systemd/system'))
+BOT_DIRS = {}
+SERVICES = {}
+_DISCOVERY_LAST = 0.0
+
+
+def _inside_base(path):
+    try:
+        p=Path(path).resolve()
+        return p != BASE and BASE in p.parents and (p/'config.json').is_file()
+    except (OSError,ValueError):return False
+
+
+def discover_bots():
+    """All registry bots + unregistered grid systemd units. Never reads .env."""
+    found={}
+    try:
+        records=json.loads(REGISTRY.read_text()) if REGISTRY.is_file() else {}
+        if isinstance(records,dict):
+            for display,entry in records.items():
+                if not isinstance(entry,dict):continue
+                root=entry.get('path','')
+                unit=str(entry.get('service',''))
+                if (_inside_base(root) and re.fullmatch(r'okx-grid-[a-z0-9-]+',unit)):
+                    key=Path(root).name
+                    found[key]=(str(Path(root).resolve()),unit)
+    except (OSError,ValueError,TypeError):pass
+    for file in SYSTEMD_DIR.glob('okx-grid-*.service'):
+        try:
+            unit=file.stem
+            if not re.fullmatch(r'okx-grid-[a-z0-9-]+',unit):continue
+            text=file.read_text(encoding='utf-8')
+            m=re.search(r'(?m)^WorkingDirectory=(.+)$',text)
+            if not m or not _inside_base(m.group(1).strip()):continue
+            root=Path(m.group(1).strip()).resolve()
+            found.setdefault(root.name,(str(root),unit))
+        except (OSError,ValueError):continue
+    return dict(sorted(found.items()))
+
+
+def refresh_bots(*,force=False):
+    global _DISCOVERY_LAST
+    now=time.monotonic()
+    if not force and now-_DISCOVERY_LAST<15:return
+    _DISCOVERY_LAST=now
+    discovered=discover_bots()
+    BOT_DIRS.clear();SERVICES.clear()
+    for key,(root,unit) in discovered.items():
+        BOT_DIRS[key]=root;SERVICES[key]=unit
+
+
+def _active_service(name):
+    try:
+        p=subprocess.run(['systemctl','is-active',SERVICES[name]],
+            capture_output=True,text=True,timeout=3)
+        return p.stdout.strip()=='active'
+    except (OSError,subprocess.TimeoutExpired,KeyError):return False
+
+
+def _terminal_report(name):
+    root=Path(BOT_DIRS[name]);path=root/'state/final_stats.json'
+    if not path.is_file():return None
+    data=json.loads(path.read_text())
+    instrument=json.loads((root/'config.json').read_text()).get('instrument')
+    if (data.get('schema_version')!=1 or data.get('complete') is not True
+        or data.get('instrument')!=instrument
+        or data.get('mode') not in ('PANIC_DONE','RETIRED')):
+        raise ValueError('Invalid terminal report')
+    return f'🔴 {name} · {data["mode"]}\n'+data['report']
+
 SHARED_SOFT = Path('/var/lib/okxbot/account_soft_stop.json')
 STATE_PATH = Path('/var/lib/okxbot/telegram_monitor_state.json')
 ALERT_EVENTS = {
@@ -39,10 +109,13 @@ ALERT_EVENTS = {
     'AGG_MARKET_ACK':'📤 Market SELL: accepted by OKX',
     'AGG_MARKET_REJECTED':'🚨 Market SELL: rejected',
     'AGG_MARKET_TERMINAL':'💰 Market SELL: final result',
+    'BOT_TERMINAL_FINALIZED':'🏁 Final bot PnL verified',
+    'BOT_TERMINAL_STATS_PENDING':'⚠️ Final bot accounting pending',
 }
 RATE_LIMIT_SECONDS = 600
 MARKET_ALERTS = frozenset({'AGG_MARKET_INTENT','AGG_MARKET_ACK',
-                            'AGG_MARKET_REJECTED','AGG_MARKET_TERMINAL'})
+                            'AGG_MARKET_REJECTED','AGG_MARKET_TERMINAL',
+                            'BOT_TERMINAL_FINALIZED','BOT_TERMINAL_STATS_PENDING'})
 POLL_SECONDS = 5
 TZ = ZoneInfo('America/Santiago')
 
@@ -209,11 +282,31 @@ def _historical_max_position(root, instrument):
 
 
 def mode_and_stats(name):
+    final=_terminal_report(name)
+    if final is not None:
+        root=Path(BOT_DIRS[name])
+        path=root/'state/stats.json'
+        try:
+            data=json.loads(path.read_text(encoding='utf-8'))
+            cfg=json.loads((root/'config.json').read_text(encoding='utf-8'))
+            hist=data.get('report') if (data.get('complete') is True and
+                    data.get('instrument') == cfg.get('instrument') and
+                    isinstance(data.get('report'),str) and data.get('report').strip()) else None
+        except (OSError,ValueError,TypeError):
+            hist=None
+        return (f'📜 {name}: ИСТОРИЧЕСКИЙ СНИМОК ДО ЗАВЕРШЕНИЯ\n\n'
+                + (hist+'\n\n' if hist else 'Историческая статистика недоступна.\n\n')
+                + '━'*24+'\n'+final)
     root=Path(BOT_DIRS[name]);control=root/'state/control.json'
     mode='RUN'
     if control.exists():
         mode=json.loads(control.read_text()).get('mode','UNKNOWN')
     path=root/'state/stats.json'
+    state_file=root/'state/bot04_state.json'
+    if state_file.is_file():
+        st=json.loads(state_file.read_text())
+        if st.get('terminal_mode') in ('PANIC_DONE','RETIRED'):
+            return f'⏳ {name}: бот завершён, финальный расчёт ожидает подтверждения'
     if not path.exists():return f'🟡 {name.lower()}: статистика недоступна'
     stats=json.loads(path.read_text())
     age=max(0,time.time()-float(stats.get('generated_at_unix',0)))
@@ -260,20 +353,42 @@ def mode_and_stats(name):
     return '\n'.join(rows)
 
 
-def status_report():
-    output=['📊 OKX Grid Monitor']
-    for idx,name in enumerate(BOT_DIRS):
+def status_report(requested=None):
+    refresh_bots()
+    if requested:
+        for name in BOT_DIRS:
+            if requested.casefold() in (name.casefold(),Path(BOT_DIRS[name]).name.casefold()):
+                return '📊 OKX Grid Monitor\n\n'+mode_and_stats(name)
+        return f'Бот {requested} не найден. /status — все активные боты.'
+    output=['📊 OKX Grid Monitor — активные боты']
+    active=[name for name in BOT_DIRS if _active_service(name)]
+    if not active:output.append('Нет активных ботов. Для завершённого: /status имя_бота')
+    for idx,name in enumerate(active):
         if idx:output.extend(['','━━━━━━━━━━━━━━━━━━'])
         output.append('')
         try:output.append(mode_and_stats(name))
-        except Exception:output.append(f'🟡 {name.lower()}: статистика временно недоступна')
+        except Exception:output.append(f'🟡 {name}: статистика временно недоступна')
     return '\n'.join(output)
+
+
+def send_report(api,report):
+    """Telegram truncates at 3900 in send(); split instead of dropping bots."""
+    lines=report.splitlines(keepends=True)
+    block=''
+    for line in lines:
+        if len(block)+len(line)>3700 and block:
+            api.send(block.rstrip());block=''
+        while len(line)>3700:
+            api.send(line[:3700]);line=line[3700:]
+        block+=line
+    if block.strip():api.send(block.rstrip())
 
 
 def format_alert(name,obj):
     typ=obj['event']
     parts=[f'{ALERT_EVENTS[typ]} | OKX {name}']
     for key in ('severity','code','price','cycleId','cycles','qty','requested',
+                'grid_pnl','final_pnl','remaining','mode',
                 'filled','avgPx','state','ordId','clOrdId','seconds','reason','error','message'):
         if key in obj and obj[key] not in ('',None):
             safe=re.sub(r'[^\w\d .:,()=+\-_/]', '',str(obj[key]))
@@ -287,6 +402,9 @@ def ingest_events(api,st):
         if not path.is_file():continue
         signature=f'{name}'
         known=st['offsets'].get(signature)
+        legacy={'eth064':'ETH','sol065':'SOL'}.get(name)
+        if known is None and legacy in st['offsets']:
+            known=st['offsets'][legacy]
         size=path.stat().st_size
         if known is None:
             # Initial launch does not spam the entire history.
@@ -325,19 +443,22 @@ def poll_commands(api,st):
         st['updates_offset']=msg['update_id']+1
         data=msg.get('message',{})
         source=str(data.get('chat',{}).get('id',''))
-        if source==api.chat and str(data.get('text','')).split('@')[0].startswith('/status'):
-            api.send(status_report())
+        if source==api.chat:
+            raw=str(data.get('text','')).strip().split()
+            if raw and raw[0].split('@')[0]=='/status':
+                send_report(api,status_report(raw[1] if len(raw)>1 else None))
         save_state(st)
 
 
 def services_check(api,st):
+    # Keep last statuses for stopped bots so active -> stopped is notified.
     for name,service in SERVICES.items():
         result=subprocess.run(['systemctl','is-active',service],capture_output=True,
                               text=True,timeout=5).stdout.strip()
         previous=st['service_status'].get(name)
-        if result!='active' and previous is None:
-            api.send(f'🚨 OKX {name}: service {result} at monitor start')
-        elif result!=previous and previous is not None:
+        if result=='active' and previous is None:
+            st['service_status'][name]=result;continue
+        if result!=previous and previous is not None:
             api.send(f'{"✅" if result=="active" else "🚨"} OKX {name}: service {previous} → {result}')
         st['service_status'][name]=result
 
@@ -351,6 +472,7 @@ def safety_check(api,st):
         api.send('✅ OKX ACCOUNT: shared SOFT latch cleared manually.')
     st['shared_soft']=is_soft
     for name,root in BOT_DIRS.items():
+        if not _active_service(name):continue
         heartbeat=Path(root)/'state/okx_stats_runtime_v059.json'
         if not heartbeat.is_file():continue
         try:
@@ -366,7 +488,7 @@ def daily_check(api,st,now=None):
     now=now or datetime.now(TZ)
     day=now.strftime('%Y-%m-%d')
     if now.hour>=9 and st.get('daily_date')!=day:
-        api.send(status_report())
+        send_report(api,status_report())
         st['daily_date']=day
 
 
@@ -377,6 +499,7 @@ def main():
     print('OKX Telegram monitor running',flush=True)
     while True:
         try:
+            refresh_bots()
             ingest_events(api,st)
             services_check(api,st)
             safety_check(api,st)

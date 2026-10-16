@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "engines": {
+    "0.7.7": {
+      "file": "okx_bot077.py",
+      "dependencies": [
+        "okx_terminal_accounting_v077.py"
+      ]
+    },
+    "0.7.8": {
+      "file": "okx_bot078.py",
+      "dependencies": [
+        "okx_terminal_accounting_v077.py"
+      ]
+    }
+  }
+}

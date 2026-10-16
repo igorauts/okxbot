@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OKX Grid Bot v0.7.6 — read-only presentation only.
+"""OKX Grid Bot v0.7.8 — read-only presentation only.
 
 Never imports trading engine, accesses .env, submits OKX HTTP requests, or
 modifies live bot state. Every unavailable metric remains unknown rather than 0.
@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-MANAGER_VERSION='v0.7.6'
+MANAGER_VERSION='v0.7.8'
 ENGINE_PATTERN=re.compile(r'\bokx_bot(\d{3,4})\.py\b')
 GRID_LINE=re.compile(r'BID=([0-9.]+)\b')
 TERMINAL_AGG={'FILLED','CANCELED','REJECTED','DONE','CLOSED'}
@@ -119,19 +119,20 @@ def read_local_orders(state):
 
 
 def read_monitor(root,now=None):
+    """Best-effort local v078 diagnostic summary (no OKX API)."""
     now=time.time() if now is None else now
-    st=read_json(Path(root)/'state/bot04_state.json')
-    version={'0.7.6':'075','0.7.5':'075','0.7.4':'074','0.7.3':'073'}.get(st.get('version') if st else None)
-    if version is None:return None
-    for version in (version,):
-        p=Path(root)/'diagnostics'/('execution_v'+version)/('summary_v'+version+'.json')
-        item=read_json(p)
+    root=Path(root)
+    for path in (root/'diagnostics/execution_v078/summary.json',
+                 root/'diagnostics/execution_v077/summary.json'):
+        item=read_json(path)
         if not item:continue
-        raw=item.get('ts')
-        try:t=datetime.fromisoformat(raw.replace('Z','+00:00')).timestamp()
-        except (ValueError,AttributeError):continue
-        if 0<=now-t<=20:
-            return item
+        try:when=datetime.fromisoformat(str(item['ts']).replace('Z','+00:00')).timestamp()
+        except (KeyError,ValueError,TypeError):continue
+        if not 0<=now-when<=45:continue
+        item=dict(item)
+        item['bid']=item.get('fresh_bid')
+        item['state']={}  # Never invent missing-grid metrics from persisted JSON.
+        return item
     return None
 
 
@@ -191,7 +192,10 @@ def settings(name,root,unit):
     if cfg is None:return f'Бот {name}: настройки недоступны'
     info=systemd_info(unit);ver=engine_version(info) or 'не определена'
     buy=int(cfg.get('active_buy_orders',25));real_tp=int(cfg.get('real_tp_target',min(25,int(cfg.get('active_tp_orders',25)))))
-    buf=buy+5
+    buy_buffer = 5 if ver in ('v0.7.8','v0.7.7','v0.7.6','v0.7.5','v0.7.4') else int(cfg.get('buy_buffer_orders', 5))
+    tp_buffer = buy+5 if ver in ('v0.7.8','v0.7.7','v0.7.6','v0.7.5','v0.7.4') else int(cfg.get('tp_buffer_orders', 30))
+    protect = 5 if ver in ('v0.7.8','v0.7.7','v0.7.6','v0.7.5','v0.7.4') else (int(cfg.get('buy_cancel_protect_steps',3))
+             if ver in ('v0.7.3','v0.7.2') else None)
     coin=str(cfg.get('instrument','')).split('-')[0]
     qty=dec(cfg.get('order_size'));contract=dec(cfg.get('contract_value'))
     amount=(qty*contract) if qty is not None and contract is not None else None
@@ -201,6 +205,7 @@ def settings(name,root,unit):
     ref=up if up else dec(cfg.get('capital_reference_price'))
     lower=(ref-step*(int(cfg.get('max_grids',0))-1)) if ref is not None and step is not None else None
     cap=(amount*int(cfg.get('max_grids',0))*(ref+lower)/2) if (amount is not None and ref is not None and lower is not None) else None
+    protect_text=(f'{protect} ' + ('шага' if protect in (2,3,4) else 'шагов')) if protect is not None else 'нет данных'
     created='—'
     try:created=datetime.fromtimestamp(float(cfg['created_at']),timezone.utc).strftime('%d.%m.%Y %H:%M UTC')
     except (KeyError,ValueError,TypeError,OverflowError):pass
@@ -210,20 +215,23 @@ def settings(name,root,unit):
           '\nСЕТКА И ОРДЕРА','─'*54,
           table_row('Шаг сетки',fmt_num(step)),table_row('Take Profit',fmt_num(tp)+ratio),
           table_row('Размер BUY',f'{amount} {coin}' if amount is not None else '—'),
-          table_row('Активные BUY',f'{buy} (макс. {buy+5})'),
-          table_row('Реальные SELL TP',f'{real_tp} (макс. {real_tp+buf})'),
-          table_row('Защита BUY возле BID',f'5 шагов ({fmt_num(step*5)})' if step is not None else '5 шагов'),
+          table_row('Активные BUY',f'{buy} (макс. {buy+buy_buffer})'),
+          table_row('Реальные SELL TP',f'{real_tp} (макс. {real_tp+tp_buffer})'),
+          table_row('Защита BUY возле BID',(f'{protect_text} ({fmt_num(step*protect)})' if step is not None else protect_text)),
           table_row('Максимум гридов',cfg.get('max_grids','—')),
           '\nЦЕНОВОЙ ДИАПАЗОН','─'*54,
           table_row('Верхняя граница',fmt_num(up) if up else 'без ограничения'),
           table_row('Цена при создании',fmt_num(cfg.get('price_at_setup'))),
-          table_row('Расчётная нижняя цена',fmt_num(lower)),
-          table_row('Расчётный капитал 1x',fmt_num(cap)),
+          table_row('Капитал 1x (оценка)',fmt_num(cap)),
           '\nПРОЧЕЕ','─'*54,
           table_row('Создан',created)]
-    if ver!='не определена' and ver!=MANAGER_VERSION:
-        rows.append(f'⚠ Менеджер {MANAGER_VERSION}, этот бот использует {ver}')
     return '\n'.join(map(str,rows))
+
+
+def _monitor_label(unit,root,kind):
+    from okx_monitor_compat078 import status_label
+    service=unit[:-8] if unit.endswith('.service') else unit
+    return status_label(service,root,kind)
 
 
 def status(name,root,unit):
@@ -243,7 +251,9 @@ def status(name,root,unit):
     state=read_json(Path(root)/'state/bot04_state.json')
     counters=read_local_orders(state)
     buy=int(cfg.get('active_buy_orders',25));real_tp=int(cfg.get('real_tp_target',min(25,int(cfg.get('active_tp_orders',25)))))
-    max_tp=real_tp+buy+5
+    buy_buffer = 5 if ver in ('v0.7.8','v0.7.7','v0.7.6','v0.7.5','v0.7.4') else int(cfg.get('buy_buffer_orders', 5))
+    tp_buffer = buy+5 if ver in ('v0.7.8','v0.7.7','v0.7.6','v0.7.5','v0.7.4') else int(cfg.get('tp_buffer_orders',30))
+    max_tp=real_tp+tp_buffer
     mon=read_monitor(root)
     bid=mon.get('bid') if mon and mon.get('bid') else last_local_bid(unit)
     missing=(mon.get('state') or {}).get('missing_buy') if mon else None
@@ -257,7 +267,7 @@ def status(name,root,unit):
        table_row('Аптайм VPS',duration(host)),
        '\nРЫНОК И ОРДЕРА','─'*54,
        table_row('BID',fmt_num(bid) if bid else 'нет свежих данных'),
-       table_row('BUY LIMIT (сейчас)',f'{show(counters["buy"] if counters else None)}/{buy} (макс. {buy+5})'),
+       table_row('BUY LIMIT (сейчас)',f'{show(counters["buy"] if counters else None)}/{buy} (макс. {buy+buy_buffer})'),
        table_row('BUY выставляются',show(counters['buy_placing'] if counters else None)),
        table_row('SELL TP (сейчас)',f'{show(counters["real_tp"] if counters else None)}/{real_tp} (макс. {max_tp})'),
        table_row('SELL TP в отмене',show(counters['tp_canceling'] if counters else None)),
@@ -271,18 +281,16 @@ def status(name,root,unit):
        table_row('Частичные SELL сейчас',show(counters['partial_tp'] if counters else None)),
        table_row('Ордеров с 2+ сделками',show(history_multifill(root))),
        '\nМОНИТОРИНГ','─'*54,
-       table_row('Burst Monitor','ВКЛЮЧЁН' if monitor_service_enabled(unit,'burst') else 'ВЫКЛЮЧЕН'),
-       table_row('Execution Monitor','ВКЛЮЧЁН' if monitor_service_enabled(unit,'execution') else ('внешние данные' if mon else 'ВЫКЛЮЧЕН'))]
+       table_row('Burst Monitor',_monitor_label(unit,root,'burst')),
+       table_row('Execution Monitor',_monitor_label(unit,root,'execution'))]
     # These counters are from optional local observer only, never fabricate.
     if mon is not None:
         events=mon.get('event_counts',{})
         s += [table_row('Бурстов (с запуска)',show(events.get('completed_bursts'))),
-              table_row('Предупреждений',show(events.get('alerts_WARNING'))),
-              table_row('Критических ошибок',show(events.get('alerts_CRITICAL')))]
+              table_row('Предупреждений (накоплено)',show(events.get('alerts_WARNING'))),
+              table_row('Критических (накоплено)',show(events.get('alerts_CRITICAL')))]
     else:
         s += [table_row('Бурсты / предупреждения','нет свежих данных')]
     s.append('\nСчётчики ордеров — локальное состояние; OKX независимо не опрашивается.')
     if not running:s.append('⚠ Бот остановлен: локальная сетка может быть устаревшей.')
-    if ver!='не определена' and ver!=MANAGER_VERSION:
-        s.append(f'⚠ Менеджер {MANAGER_VERSION}, торговый движок {ver}')
     return '\n'.join(s)
