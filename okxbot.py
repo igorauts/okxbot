@@ -94,11 +94,84 @@ def bot_path(entry):
     return p
 
 
+def _engine_key(filename):
+    """0.6.10 < 0.7.0 < 0.7.7 < 0.7.10 (not lexical ordering)."""
+    m=re.fullmatch(r'okx_bot0(\d)(\d{1,2})\.py',filename)
+    return (0,int(m.group(1)),int(m.group(2))) if m else None
+
+
+def latest_engine(source=SOURCE):
+    """Resolve from disk EVERY time. Manager remains forward-compatible."""
+    candidates=[]
+    for file in Path(source).glob('okx_bot0*.py'):
+        version=_engine_key(file.name)
+        if version is not None and file.is_file() and not file.is_symlink():
+            candidates.append((version,file.name))
+    if not candidates:
+        raise RuntimeError('Нет установленного торгового движка')
+    version,name=max(candidates)
+    raw=(Path(source)/name).read_text(encoding='utf-8')
+    marker=re.search(r"(?m)^VER\s*=\s*['\"]([0-9]+\.[0-9]+\.[0-9]+)['\"]",raw)
+    expected='.'.join(map(str,version))
+    if not marker or marker.group(1)!=expected:
+        raise RuntimeError(f'Версия движка {name} не совпадает с VER={expected}')
+    compile(raw,str(Path(source)/name),'exec')
+    return name,expected
+
+
 def engine_file(path):
-    for name in ('okx_bot076.py','okx_bot075.py','okx_bot074.py','okx_bot073.py','okx_bot072.py','okx_bot071.py','okx_bot070.py','okx_bot0610.py', 'okx_bot069.py', 'okx_bot068.py', 'okx_bot067.py', 'okx_bot066.py', 'okx_bot065.py', 'okx_bot064.py', 'okx_bot062.py', 'okx_bot061.py', 'okx_bot060.py', 'okx_bot059.py'):
-        if (path / name).is_file():
-            return name
-    raise RuntimeError('Не найден исполняемый Python-файл бота')
+    matches=[(_engine_key(p.name),p.name) for p in Path(path).glob('okx_bot0*.py')
+             if _engine_key(p.name) is not None and p.is_file() and not p.is_symlink()]
+    if not matches:raise RuntimeError('Не найден исполняемый Python-файл бота')
+    return max(matches)[1]
+
+
+def latest_dependencies(engine_name,version,source=SOURCE):
+    """Manifest-driven future dependencies; no manager changes per release."""
+    path=Path(source)/'engine_manifest.json'
+    if not path.is_file():
+        # Backwards compatibility for already installed old manager directories.
+        return ['okx_terminal_accounting_v077.py'] if version=='0.7.7' else []
+    manifest=json.loads(path.read_text())
+    if manifest.get('schema_version')!=1:
+        raise RuntimeError('Unsupported engine manifest')
+    entry=manifest.get('engines',{}).get(version)
+    if not isinstance(entry,dict) or entry.get('file')!=engine_name:
+        raise RuntimeError('Latest engine missing/mismatched manifest')
+    deps=entry.get('dependencies')
+    if not isinstance(deps,list):raise RuntimeError('Invalid engine dependencies')
+    for dep in deps:
+        if (not isinstance(dep,str) or not re.fullmatch(r'[a-zA-Z0-9_]+\.py',dep)
+            or not (Path(source)/dep).is_file()):
+            raise RuntimeError('Missing/unsafe engine dependency')
+    return deps
+
+
+def provision_latest_engine(created,source=SOURCE):
+    """One-time wizard may ship an old engine: replace ONLY in NEW directory."""
+    name,version=latest_engine(source)
+    created=Path(created)
+    if not (created/'config.json').is_file():
+        raise RuntimeError('Wizard did not create config.json')
+    cfg=json.loads((created/'config.json').read_text())
+    if (created/'state/bot04_state.json').exists():
+        raise RuntimeError('Never upgrade an existing trading state in wizard')
+    shutil.copy2(Path(source)/name,created/name)
+    for dependency in latest_dependencies(name,version,source):
+        shutil.copy2(Path(source)/dependency,created/dependency)
+    for old in created.glob('okx_bot0*.py'):
+        if _engine_key(old.name) is not None and old.name != name:old.unlink()
+    cfg['version']=version
+    fd,tmp=tempfile.mkstemp(prefix='.config-engine-',dir=created)
+    try:
+        with os.fdopen(fd,'w',encoding='utf-8') as f:
+            json.dump(cfg,f,indent=2,ensure_ascii=False)
+            f.flush();os.fsync(f.fileno())
+        os.chmod(tmp,0o600)
+        os.replace(tmp,created/'config.json')
+    finally:
+        if os.path.exists(tmp):os.unlink(tmp)
+    return name,version
 
 
 def unit_text(path, engine, name):
@@ -172,11 +245,12 @@ def cmd_new(env_file):
         raise RuntimeError('Уже есть systemd-служба с этим именем')
     # No trading: create isolated config/state, install packages, install disabled unit.
     created = wizard.persist(ctx, path, raw)
+    selected_engine, selected_version = provision_latest_engine(created)
     unit = SYSTEMD_DIR / f'{service}.service'
     try:
         run([sys.executable, '-m', 'venv', str(created / '.venv')])
         run([str(created / '.venv/bin/pip'), 'install', '-r', str(created / 'requirements.txt')])
-        unit.write_text(unit_text(created, engine_file(created), name))
+        unit.write_text(unit_text(created, selected_engine, name))
         os.chmod(unit, 0o644)
         run(['systemctl', 'daemon-reload'])
         entries[name] = {'slug':slug, 'path':str(created),'service':service}
@@ -281,10 +355,11 @@ def control_supported(entry):
             if line.startswith('ExecStart='):
                 command=line[len('ExecStart='):].strip()
     if not command:return False
-    engines=('okx_bot076.py','okx_bot075.py','okx_bot074.py','okx_bot073.py','okx_bot072.py','okx_bot071.py','okx_bot070.py','okx_bot0610.py','okx_bot069.py','okx_bot068.py',
-             'okx_bot067.py','okx_bot066.py','okx_bot065.py','okx_bot064.py')
-    return any((path/name).is_file() and str(path/name) in command.split()
-               for name in engines)
+    # Future engines are accepted without installing a new manager.
+    parts=command.split()
+    return any(Path(token).parent==path and _engine_key(Path(token).name) is not None
+               and Path(token).is_file() for token in parts)
+
 
 
 def read_control(entry):
@@ -446,7 +521,8 @@ def cmd_clone(source_name, new_name):
     cfg['buy_buffer_orders']=5
     cfg['buy_cancel_protect_steps']=5
     cfg['tp_buffer_orders']=int(cfg['active_buy_orders'])+5
-    cfg.update(version='0.7.6',name=new_name,created_at=time.time(),
+    selected_engine, selected_version = latest_engine()
+    cfg.update(version=selected_version,name=new_name,created_at=time.time(),
                live_trading=False,price_at_setup=str(px),
                capital_reference_price=str(ref),cloned_from=old)
     print(f'Клон «{new_name}» из «{old}» | {cfg["instrument"]} | текущий BID {px}')
@@ -456,8 +532,10 @@ def cmd_clone(source_name, new_name):
     dest.mkdir(mode=0o700)
     (dest/'state').mkdir(mode=0o700)
     (dest/'logs').mkdir(mode=0o700)
-    for f in ('okx_bot076.py','requirements.txt'):
+    for f in (selected_engine,'requirements.txt'):
         shutil.copy2(SOURCE/f,dest/f)
+    for dependency in latest_dependencies(selected_engine,selected_version):
+        shutil.copy2(SOURCE/dependency,dest/dependency)
     (dest/'.env').write_bytes((source/'.env').read_bytes())
     os.chmod(dest/'.env',0o600)
     fd=os.open(dest/'config.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
@@ -465,7 +543,7 @@ def cmd_clone(source_name, new_name):
     run([sys.executable,'-m','venv',str(dest/'.venv')])
     run([str(dest/'.venv/bin/pip'),'install','-r',str(dest/'requirements.txt')])
     service=f'okx-grid-{slug}'
-    (SYSTEMD_DIR/f'{service}.service').write_text(unit_text(dest,'okx_bot076.py',new_name))
+    (SYSTEMD_DIR/f'{service}.service').write_text(unit_text(dest,selected_engine,new_name))
     run(['systemctl','daemon-reload'])
     entries[new_name]={'slug':slug,'path':str(dest),'service':service}
     save_registry(entries)
@@ -577,9 +655,30 @@ def stats_text(name):
     instrument = describe(entry)
     unit = unit_name(entry)
     header = f'Статистика: {name} | {instrument}\n\n'
+    final_file=path/'state'/'final_stats.json'
+    if final_file.is_file():
+        final=json.loads(final_file.read_text(encoding='utf-8'))
+        if (final.get('schema_version')!=1 or final.get('complete') is not True
+                or final.get('instrument')!=instrument
+                or final.get('mode') not in ('RETIRED','PANIC_DONE')
+                or not isinstance(final.get('report'),str)):
+            raise RuntimeError('Некорректный окончательный отчёт')
+        # Historical trading report is immutable: final accounting ADDS to it.
+        # Its market/open-position values are PRE-TERMINATION snapshots.
+        try:
+            historical=read_stats_snapshot(path,instrument)
+        except (ValueError,OSError,RuntimeError):
+            historical=None
+        if historical is not None:
+            previous=with_latest_bot_dd(historical[0],path,instrument)
+            return (header+'ИСТОРИЧЕСКАЯ СТАТИСТИКА (снимок ДО завершения)\n\n'
+                    +previous+'\n\n'+'━'*32+'\n'
+                    +final['report'])
+        return header+'Исторический снимок недоступен.\n\n'+final['report']
     if instance_terminal(entry):
-        header += ('ЭКЗЕМПЛЯР ЗАВЕРШЁН. Отчёт исторический; операции Hard/Panic '
-                   'и их комиссии могут не учитываться в GRID PROFIT.\n\n')
+        return header+('⏳ Финальный расчёт не подтверждён. '
+            'Торговлю не возобновлять. Выполните GET-only --terminal-finalize '
+            'на установленном движке v0.7.8.\n')
     try:
         snapshot = read_stats_snapshot(path, instrument)
     except (ValueError, OSError, RuntimeError) as e:
@@ -628,8 +727,11 @@ def cmd_list():
 
 
 def cmd_status(name):
-    from okx_ui074 import status
     name, entry = find_entry(name)
+    if instance_terminal(entry):
+        print(stats_text(name))
+        return
+    from okx_ui074 import status
     print(status(name,bot_path(entry),unit_name(entry)))
 
 
@@ -810,33 +912,20 @@ def _pause_return():
 
 
 def cmd_monitor(name, kind, action):
-    """Optional read-only observer per instance. Never touch trading service."""
-    import okx_monitor074 as monitors
-    _,entry=find_entry(name)
-    service=entry['service'];root=bot_path(entry)
-    script=SOURCE/'okx_monitor074.py'
-    # If older v073 observer is enabled, turning OFF should disable it, too.
-    if action=='off':
-        try:
-            import okx_monitor073 as legacy
-            old=legacy.monitor_unit(service,kind)
-            if service_running(old):
-                oldscript=SOURCE/'okx_monitor073.py'
-                run([sys.executable,str(oldscript),'--root',str(root),
-                     '--service',service,'--kind',kind,'off'])
-        except ImportError:
-            pass
-    run([sys.executable,str(script),'--root',str(root),
-         '--service',service,'--kind',kind,action])
+    """Monitor toggle: preflight and managed-only changes, never touch LIVE bot."""
+    from okx_monitor_compat078 import monitor_action
+    _, entry = find_entry(name)
+    return monitor_action(entry['service'], bot_path(entry), kind, action, SOURCE)
 
-def monitor_enabled(entry,kind):
-    import okx_monitor074 as monitors
-    try:
-        import okx_monitor073 as legacy
-        old=service_running(legacy.monitor_unit(entry['service'],kind))
-    except ImportError:
-        old=False
-    return (service_running(monitors.monitor_unit(entry['service'],kind)) or old)
+def monitor_enabled(entry, kind):
+    from okx_monitor_compat078 import monitor_state
+    st = monitor_state(entry['service'], bot_path(entry), kind)
+    return bool(st['managed'] or st['external'])
+
+
+def monitor_label(entry, kind):
+    from okx_monitor_compat078 import label
+    return label(entry['service'], bot_path(entry), kind)
 
 def interactive_bot_menu(name):
     """Single menu; only controls supported by the selected trading engine."""
@@ -846,8 +935,8 @@ def interactive_bot_menu(name):
         terminal=instance_terminal(entry)
         mode=control_desired(entry)
         choices=['Статистика','Статус','Настройки','Логи (LIVE)',
-                 'Burst Monitor: '+('ON' if monitor_enabled(entry,'burst') else 'OFF'),
-                 'Execution Monitor: '+('ON' if monitor_enabled(entry,'execution') else 'OFF')]
+                 'Burst Monitor: '+monitor_label(entry,'burst'),
+                 'Execution Monitor: '+monitor_label(entry,'execution')]
         active=service_running(unit_name(entry))
         if is_new and not terminal and active:
             if mode in ('PAUSE','SOFT'):
@@ -869,7 +958,12 @@ def interactive_bot_menu(name):
         chosen=choices[j]
         if chosen.startswith(('Burst Monitor:','Execution Monitor:')):
             kind='burst' if chosen.startswith('Burst') else 'execution'
-            cmd_monitor(name,kind,'off' if monitor_enabled(entry,kind) else 'on')
+            try:
+                cmd_monitor(name,kind,'off' if monitor_enabled(entry,kind) else 'on')
+            except Exception as exc:
+                curses.wrapper(lambda s: _text_screen(
+                    s,'OKX GRID BOT — '+name+' — мониторинг',
+                    'Действие не выполнено.\n\n'+str(exc)))
         elif chosen=='Статистика':
             curses.wrapper(lambda s: stats_screen(s,name))
         elif chosen=='Логи (LIVE)':
