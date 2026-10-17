@@ -989,10 +989,73 @@ def interactive_bot_menu(name):
             _pause_return()
 
 
+
+TELEGRAM_MONITOR_UNIT = 'okx-telegram-monitor.service'
+
+
+def telegram_monitor_state():
+    # Only systemd metadata; does not access the exchange or trading services.
+    result = subprocess.run(
+        ['systemctl', 'show', TELEGRAM_MONITOR_UNIT, '--no-pager',
+         '-p', 'LoadState', '-p', 'ActiveState', '-p', 'SubState',
+         '-p', 'UnitFileState', '-p', 'MainPID'],
+        capture_output=True, text=True, timeout=10, check=False)
+    if result.returncode != 0:
+        raise RuntimeError('Ошибка systemctl show: ' + result.stderr.strip()[:300])
+    return dict(line.split('=', 1) for line in result.stdout.splitlines() if '=' in line)
+
+
+def telegram_monitor_label():
+    try:
+        state = telegram_monitor_state()
+        if state.get('LoadState') != 'loaded':
+            return 'НЕ УСТАНОВЛЕН'
+        return 'РАБОТАЕТ' if state.get('ActiveState') == 'active' else 'ОСТАНОВЛЕН'
+    except (OSError, RuntimeError, subprocess.TimeoutExpired):
+        return 'ОШИБКА СТАТУСА'
+
+
+def telegram_monitor_report():
+    state = telegram_monitor_state()
+    return '\n'.join([
+        'Служба: ' + TELEGRAM_MONITOR_UNIT,
+        'Установлена: ' + ('да' if state.get('LoadState') == 'loaded' else 'нет'),
+        'Состояние: ' + state.get('ActiveState', '?') + ' / ' + state.get('SubState', '?'),
+        'Автозапуск: ' + state.get('UnitFileState', '?'),
+        'PID: ' + state.get('MainPID', '?'),
+        '',
+        'Это общий Telegram-монитор, а не торговый процесс.',
+    ])
+
+
+def interactive_telegram_menu():
+    while True:
+        choices = ['Показать статус', 'Запустить и включить автозапуск', 'Назад']
+        selected = curses.wrapper(
+            lambda scr: wizard.menu(scr, 'OKX GRID BOTS — Telegram Monitor', choices))
+        if selected is None or selected == 2:
+            return
+        try:
+            if selected == 1:
+                state = telegram_monitor_state()
+                if state.get('LoadState') != 'loaded':
+                    raise RuntimeError('Служба Telegram-монитора не установлена.')
+                # Only the fixed Telegram unit; does not touch trading bots.
+                run(['systemctl', 'enable', '--now', TELEGRAM_MONITOR_UNIT], timeout=45)
+                if telegram_monitor_state().get('ActiveState') != 'active':
+                    raise RuntimeError('systemctl завершился, но монитор не активен')
+            text = telegram_monitor_report()
+        except (OSError, RuntimeError, subprocess.CalledProcessError,
+                subprocess.TimeoutExpired) as exc:
+            text = 'Действие не выполнено: ' + str(exc)
+        curses.wrapper(lambda scr: _text_screen(
+            scr, 'OKX GRID BOTS — Telegram Monitor', text))
+
 def interactive_main(env_file):
     while True:
         entries = load_registry()
-        titles = ['Создать нового бота', 'Список ботов']
+        titles = ['Создать нового бота', 'Список ботов',
+                  'Telegram Monitor: ' + telegram_monitor_label()]
         names = sorted(entries,key=lambda name: (not service_running(unit_name(entries[name])),name.casefold()))
         titles.extend(f'{name} — {describe(entries[name])}' for name in names)
         titles.append('Выход')
@@ -1010,8 +1073,10 @@ def interactive_main(env_file):
                 cmd_list()
                 text = buf.getvalue()
             curses.wrapper(lambda s: _text_screen(s, 'OKX GRID BOTS — список', text))
+        elif i == 2:
+            interactive_telegram_menu()
         else:
-            interactive_bot_menu(names[i - 2])
+            interactive_bot_menu(names[i - 3])
 
 
 def main(argv=None):
