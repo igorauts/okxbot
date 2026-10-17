@@ -32,6 +32,14 @@ def fmt_num(x,places=2):
     return f'${n:,.{places}f}' if n is not None else '—'
 
 
+def fmt_price(x, cfg):
+    tick = dec(cfg.get('tick_size'))
+    if tick is None or tick <= 0:
+        return fmt_num(x)
+    digits = max(2, -tick.normalize().as_tuple().exponent)
+    return fmt_num(x, digits)
+
+
 def duration(seconds):
     if seconds is None or seconds < 0:return 'нет данных'
     s=int(seconds);d,s=divmod(s,86400);h,s=divmod(s,3600);m,s=divmod(s,60)
@@ -194,7 +202,7 @@ def settings(name,root,unit):
     buy=int(cfg.get('active_buy_orders',25));real_tp=int(cfg.get('real_tp_target',min(25,int(cfg.get('active_tp_orders',25)))))
     buy_buffer = 5 if ver in ('v0.7.8','v0.7.7','v0.7.6','v0.7.5','v0.7.4') else int(cfg.get('buy_buffer_orders', 5))
     tp_buffer = buy+5 if ver in ('v0.7.8','v0.7.7','v0.7.6','v0.7.5','v0.7.4') else int(cfg.get('tp_buffer_orders', 30))
-    protect = 5 if ver in ('v0.7.8','v0.7.7','v0.7.6','v0.7.5','v0.7.4') else (int(cfg.get('buy_cancel_protect_steps',3))
+    protect = 5 if ver in ('v0.7.10','v0.7.9','v0.7.8','v0.7.7','v0.7.6','v0.7.5','v0.7.4') else (int(cfg.get('buy_cancel_protect_steps',3))
              if ver in ('v0.7.3','v0.7.2') else None)
     coin=str(cfg.get('instrument','')).split('-')[0]
     qty=dec(cfg.get('order_size'));contract=dec(cfg.get('contract_value'))
@@ -213,15 +221,15 @@ def settings(name,root,unit):
           '\nОБЩЕЕ','─'*54,table_row('Версия',ver),
           table_row('Направление',str(cfg.get('direction','—')).upper()),
           '\nСЕТКА И ОРДЕРА','─'*54,
-          table_row('Шаг сетки',fmt_num(step)),table_row('Take Profit',fmt_num(tp)+ratio),
+          table_row('Шаг сетки',fmt_price(step, cfg)),table_row('Take Profit',fmt_price(tp, cfg)+ratio),
           table_row('Размер BUY',f'{amount} {coin}' if amount is not None else '—'),
           table_row('Активные BUY',f'{buy} (макс. {buy+buy_buffer})'),
-          table_row('Реальные SELL TP',f'{real_tp} (макс. {real_tp+tp_buffer})'),
-          table_row('Защита BUY возле BID',(f'{protect_text} ({fmt_num(step*protect)})' if step is not None else protect_text)),
+          table_row('Реальные SELL TP',f'{real_tp} (макс. {150 if ver in ("v0.7.9","v0.7.10") else real_tp+tp_buffer})'),
+          table_row('Защита BUY возле BID',(f'{protect_text} ({fmt_price(step*protect, cfg)})' if step is not None else protect_text)),
           table_row('Максимум гридов',cfg.get('max_grids','—')),
           '\nЦЕНОВОЙ ДИАПАЗОН','─'*54,
-          table_row('Верхняя граница',fmt_num(up) if up else 'без ограничения'),
-          table_row('Цена при создании',fmt_num(cfg.get('price_at_setup'))),
+          table_row('Верхняя граница',fmt_price(up, cfg) if up else 'без ограничения'),
+          table_row('Цена при создании',fmt_price(cfg.get('price_at_setup'), cfg)),
           table_row('Капитал 1x (оценка)',fmt_num(cap)),
           '\nПРОЧЕЕ','─'*54,
           table_row('Создан',created)]
@@ -253,7 +261,7 @@ def status(name,root,unit):
     buy=int(cfg.get('active_buy_orders',25));real_tp=int(cfg.get('real_tp_target',min(25,int(cfg.get('active_tp_orders',25)))))
     buy_buffer = 5 if ver in ('v0.7.8','v0.7.7','v0.7.6','v0.7.5','v0.7.4') else int(cfg.get('buy_buffer_orders', 5))
     tp_buffer = buy+5 if ver in ('v0.7.8','v0.7.7','v0.7.6','v0.7.5','v0.7.4') else int(cfg.get('tp_buffer_orders',30))
-    max_tp=real_tp+tp_buffer
+    max_tp=150 if ver in ('v0.7.9','v0.7.10') else real_tp+tp_buffer
     mon=read_monitor(root)
     bid=mon.get('bid') if mon and mon.get('bid') else last_local_bid(unit)
     missing=(mon.get('state') or {}).get('missing_buy') if mon else None
@@ -266,7 +274,7 @@ def status(name,root,unit):
        table_row('Аптайм бота',duration(proc)),
        table_row('Аптайм VPS',duration(host)),
        '\nРЫНОК И ОРДЕРА','─'*54,
-       table_row('BID',fmt_num(bid) if bid else 'нет свежих данных'),
+       table_row('BID',fmt_price(bid, cfg) if bid else 'нет свежих данных'),
        table_row('BUY LIMIT (сейчас)',f'{show(counters["buy"] if counters else None)}/{buy} (макс. {buy+buy_buffer})'),
        table_row('BUY выставляются',show(counters['buy_placing'] if counters else None)),
        table_row('SELL TP (сейчас)',f'{show(counters["real_tp"] if counters else None)}/{real_tp} (макс. {max_tp})'),
