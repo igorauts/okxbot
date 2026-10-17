@@ -23,7 +23,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-import okx_setup068 as wizard
+import okx_setup0710 as wizard
 
 BASE = Path(os.environ.get('OKXBOT_BASE_DIR', '/root/okx')).resolve()
 REGISTRY = Path(os.environ.get('OKXBOT_REGISTRY', str(BASE / '.okxbot_registry.json')))
@@ -188,6 +188,7 @@ def unit_text(path, engine, name):
             'Environment=OKX_BOT04_LIVE=CONFIRM\n'
             'Environment=OKX_BOT04_PROBE=FULL_25\n'
             f'ExecStart={path}/.venv/bin/python -u {path}/{engine}\n'
+            f'ExecStopPost=/usr/bin/python3 -B {SOURCE}/okx_panic_cleanup0710.py --root {path} --service okx-grid-{path.name}\n'
             'Restart=on-failure\nRestartSec=15\n\n'
             '[Install]\nWantedBy=multi-user.target\n')
 

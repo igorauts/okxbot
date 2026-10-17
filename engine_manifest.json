@@ -18,6 +18,12 @@
       "dependencies": [
         "okx_terminal_accounting_v077.py"
       ]
+    },
+    "0.7.10": {
+      "file": "okx_bot0710.py",
+      "dependencies": [
+        "okx_terminal_accounting_v077.py"
+      ]
     }
   }
 }

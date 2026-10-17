@@ -1,3 +1,14 @@
+# OKX Grid Bot v0.7.10 — 17 октября 2026
+
+**Текущий релиз:** [v0.7.10](https://github.com/igorauts/okxbot/releases/tag/v0.7.10) · [Описание](README_v0710_RU.md) · [Release notes](RELEASE_NOTES_v0710_RU.md).
+
+- Добавлены NEAR, ZEC, SUI; прежние BTC, ETH и SOL поддерживаются. Новый мастер — `okx_setup0710.py`.
+- Точность цен BUY, attached TP и ключей сетки теперь зависит от биржевого `tickSz`, а не ограничена двумя знаками; исправлены встроенный self-test и UI настроек.
+- После подтверждённого `PANIC_DONE` systemd `ExecStopPost` отключает автозапуск торгового экземпляра и останавливает принадлежащие ему наблюдатели. Общий Telegram Monitor не затрагивается.
+- 99 офлайн-тестов: v076 45, v078 13, v079 22, v0710 19. ZEC и SUI проверены реальной торговлей; отключение **работающих** наблюдателей после PANIC подтверждено только тестовыми заглушками, не LIVE.
+- Не используйте исторический `install.sh`: он предназначен для старой версии. Публикация GitHub не меняет уже работающие экземпляры.
+
+---
 # OKX Grid Bot v0.7.9 — BUY Refill Priority (17 октября 2026)
 
 **Текущий релиз:** [v0.7.9](https://github.com/igorauts/okxbot/releases/tag/v0.7.9) · [Описание](README_v079_RU.md) · [Release notes](RELEASE_NOTES_v079_RU.md).
