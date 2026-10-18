@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""v0.7.11 independent, local-only execution/burst observer.
+"""v0.7.12 independent, local-only execution/burst observer.
 
 Reads ONLY bot state, bot event log, and trading service journald.
 NEVER imports a trading module, reads .env, calls OKX, or writes bot state.
@@ -132,8 +132,8 @@ class Observer:
         self.root, self.service, self.mode = root, service, mode
         cfg = read_json(root / 'config.json')
         st = read_json(root / 'state/bot04_state.json')
-        if cfg is None or st is None or st.get('version') not in ('0.7.7','0.7.8','0.7.9','0.7.10','0.7.11'):
-            raise RuntimeError('Observer requires state version 0.7.7 through 0.7.11')
+        if cfg is None or st is None or st.get('version') not in ('0.7.7','0.7.8','0.7.9','0.7.10','0.7.11','0.7.12'):
+            raise RuntimeError('Observer requires state version 0.7.7 through 0.7.12')
         if cfg.get('instrument') != st.get('instrument'):
             raise RuntimeError('Instrument does not match')
         self.target_buy = int(cfg['active_buy_orders'])
@@ -171,6 +171,11 @@ class Observer:
         self.engine_stale_gaps = 0
         self.state_engine_disagreements = 0
         self.last_disagreement_notice = 0.
+        self.mismatch_since = None
+        self.mismatch_polls = 0
+        self.mismatch_confirmed = 0
+        self.mismatch_transient = 0
+        self.mismatch_longest_sec = 0.
         self.timeline_buffer = []
         self.last_flush = time.monotonic()
         self.dropped_timeline = 0
@@ -314,13 +319,31 @@ class Observer:
             if s['buy'] != self.engine_sample['buy']:
                 self.state_engine_disagreements += 1
                 now = time.monotonic()
-                if now-self.last_disagreement_notice>=30:
+                if self.mismatch_since is None:
+                    self.mismatch_since = now
+                    self.mismatch_polls = 0
+                self.mismatch_polls += 1
+                duration = now - self.mismatch_since
+                self.mismatch_longest_sec = max(self.mismatch_longest_sec, duration)
+                if (self.mode == 'execution' and self.mismatch_polls >= 3
+                        and duration >= 10 and now-self.last_disagreement_notice>=30):
+                    if self.mismatch_polls == 3:
+                        self.mismatch_confirmed += 1
                     self.message('PERSISTED_STATE_DIFFERS_FROM_ENGINE',{
                         'state_buy':s['buy'],'engine_buy':self.engine_sample['buy'],
+                        'duration_sec':round(duration,1),
                         'warning':'Not an exchange BUY deficit'})
                     self.last_disagreement_notice=now
+            elif self.mismatch_since is not None:
+                if self.mismatch_polls < 3:
+                    self.mismatch_transient += 1
+                self.mismatch_since = None
+                self.mismatch_polls = 0
         else:
             s['engine_buy']=None
+            # Engine reference is stale. Do not manufacture a mismatch alert.
+            self.mismatch_since = None
+            self.mismatch_polls = 0
         # Zero inferred BUY-recovery timers from the delayed JSON snapshot.
         if s['buy'] > self.target_buy + 5:
             self.message('BUY_EXCEEDED_BUFFER', {'buy':s['buy'], 'max':self.target_buy+5})
@@ -348,7 +371,7 @@ class Observer:
         self.burst = None
 
     def summary(self):
-        rec = {'ts':now_iso(),'version':'0.7.11','mode':self.mode,
+        rec = {'ts':now_iso(),'version':'0.7.12','mode':self.mode,
                'service':self.service, 'instrument':self.root.name,
                'target_buy':self.target_buy,'target_tp':self.target_tp,
                'last_state':self.last_state,'events':dict(self.counters),
@@ -358,6 +381,9 @@ class Observer:
                'engine_latest':self.engine_sample,
                'engine_count_source':'engine_journal',
                'state_engine_disagreements':self.state_engine_disagreements,
+                'state_engine_confirmed':self.mismatch_confirmed,
+                'state_engine_transient':self.mismatch_transient,
+                'state_engine_longest_sec':round(self.mismatch_longest_sec,1),
                'timeline_events_dropped':self.dropped_timeline,
                'cancel_then_replace_same_price_250ms':self.same_price_250ms,
                'cancel_then_replace_same_price_1s':self.same_price_1s,
@@ -403,7 +429,7 @@ def run(root,service,mode):
     proc = None
     selector = selectors.DefaultSelector()
     fragment = b''
-    print('OKX v0.7.11',mode,'observer ACTIVE / LOCAL READ ONLY / NO OKX API',flush=True)
+    print('OKX v0.7.12',mode,'observer ACTIVE / LOCAL READ ONLY / NO OKX API',flush=True)
     try:
         while True:
             if proc is None or proc.poll() is not None:

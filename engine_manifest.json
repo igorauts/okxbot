@@ -31,6 +31,15 @@
         "okx_terminal_accounting_v077.py",
         "okx_latency_v0711.py"
       ]
+    },
+    "0.7.12": {
+      "file": "okx_bot0712.py",
+      "dependencies": [
+        "okx_terminal_accounting_v077.py",
+        "okx_latency_v0711.py",
+        "okx_positions_fifo_v0712.py",
+        "okx_fill_singleflight_v0712.py"
+      ]
     }
   }
 }
