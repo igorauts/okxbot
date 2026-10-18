@@ -179,8 +179,11 @@ def unit_text(path, engine, name):
     if any(ch.isspace() for ch in str(path)) or not str(path).isascii():
         raise RuntimeError('Путь с пробелами не поддерживается для службы')
     description = name.replace('\n', ' ').replace('\r', ' ')[:48]
-    cleanup_file = ('okx_panic_cleanup0711.py' if engine == 'okx_bot0711.py'
-                    else 'okx_panic_cleanup0710.py')
+    cleanup_file = (
+        'okx_panic_cleanup0712.py' if engine == 'okx_bot0712.py'
+        else 'okx_panic_cleanup0711.py' if engine == 'okx_bot0711.py'
+        else 'okx_panic_cleanup0710.py'
+    )
     return (f'[Unit]\nDescription=OKX Grid Bot ({description})\n'
             'Wants=network-online.target\nAfter=network-online.target\n'
             'StartLimitIntervalSec=300\nStartLimitBurst=10\n\n'
