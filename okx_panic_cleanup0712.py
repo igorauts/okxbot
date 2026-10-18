@@ -78,9 +78,10 @@ def cleanup(root,service,unit_dir=UNIT_DIR):
     found=[]
     # Strict list for our managed observers. Never touch a global Telegram unit
     # or a different trading instance. No wildcard systemctl commands.
-    for version in ('v077','v078','v079','v0710','v0711','v0712'):
+    for version in ('v077','v078','v079','v0710','v0711','v0712',''):
         for kind in ('burst','execution'):
-            unit=f'observer-{service}-{kind}-{version}.service'
+            unit=(f'observer-{service}-{kind}-{version}.service'
+                  if version else f'observer-{service}-{kind}.service')
             unit_file=unit_dir/unit
             if not unit_file.is_file() or unit_file.is_symlink():
                 continue

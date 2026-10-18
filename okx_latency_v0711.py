@@ -13,7 +13,7 @@ from pathlib import Path
 
 
 class LatencyJournal:
-    MAX_BYTES = 16 * 1024 * 1024
+    MAX_BYTES = 256 * 1024 * 1024
 
     def __init__(self, path, enabled=True, max_queue=4096):
         self.path = Path(path)

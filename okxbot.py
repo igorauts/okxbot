@@ -422,7 +422,172 @@ def finalize_registry_if_needed(name, entry):
         save_registry(entries)
 
 
+
+# OKX_ACCOUNT_RESET_V0712_MANAGER_PATCH_1
+# Manager-only account-wide margin latch recovery. No exchange orders here.
+ACCOUNT_SOFT_LATCH = Path('/var/lib/okxbot/account_soft_stop.json')
+ACCOUNT_SOFT_EXPECTED = {
+    'eth079': 'ETH-USDT-SWAP',
+    'zec0710': 'ZEC-USDT-SWAP',
+    'sui0710-2': 'SUI-USDT-SWAP',
+}
+
+def _account_soft_latch_data():
+    """Read account latch; corrupt/unknown latch is always fail closed."""
+    if ACCOUNT_SOFT_LATCH.is_symlink():
+        raise RuntimeError('Общая блокировка — символическая ссылка; требуется ручная проверка')
+    if not ACCOUNT_SOFT_LATCH.exists():
+        return None
+    try:
+        value=json.loads(ACCOUNT_SOFT_LATCH.read_text(encoding='utf-8'))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError('Невозможно прочитать общую блокировку; восстановление запрещено') from exc
+    if not isinstance(value,dict) or value.get('schema')!=1 or value.get('mode')!='SOFT':
+        raise RuntimeError('Некорректная общая блокировка; восстановление запрещено')
+    return value
+
+def account_soft_active():
+    return _account_soft_latch_data() is not None
+
+def account_soft_menu_label():
+    try:
+        return ('Общая остановка аккаунта — восстановление (SOFT)' if account_soft_active()
+                else 'Общая остановка аккаунта — статус (нет блокировки)')
+    except (OSError,RuntimeError,ValueError):
+        return 'Общая остановка аккаунта — ОШИБКА, нужна проверка'
+
+def _account_reset_preflight(latch):
+    """Check ALL expected bots, service states and stored safety acknowledgments.
+
+    This check does NOT claim to independently measure available OKX margin.
+    The trading engines still enforce position coverage when BUY resumes.
+    """
+    if (latch.get('reason')!='MARGIN_REJECTION' or
+        latch.get('manual_reset_required') is not True):
+        raise RuntimeError('Разрешён только ручной сброс MARGIN_REJECTION')
+    try:
+        latch_at=datetime.fromisoformat(str(latch['at']).replace('Z','+00:00'))
+        if latch_at.tzinfo is None:raise ValueError('naive timestamp')
+    except (KeyError,TypeError,ValueError) as exc:
+        raise RuntimeError('Некорректное время общей блокировки') from exc
+
+    registry=load_registry()
+    found={}
+    for display,entry in registry.items():
+        try:root=bot_path(entry)
+        except (ValueError,OSError,RuntimeError):continue
+        if root.name in ACCOUNT_SOFT_EXPECTED:
+            if root.name in found:raise RuntimeError('Дублированный экземпляр '+root.name)
+            found[root.name]=(display,entry,root)
+    if set(found)!=set(ACCOUNT_SOFT_EXPECTED):
+        raise RuntimeError('В реестре отсутствуют боты аккаунта: '+
+                           str(sorted(set(ACCOUNT_SOFT_EXPECTED)-set(found))))
+    # Reject unknown active grid engines on this VPS: don't miss a fourth bot.
+    result=run(['systemctl','list-units','--type=service','--state=active',
+                '--all','--no-legend','--plain','--no-pager','okx-grid-*.service'],
+               capture_output=True,text=True,timeout=10)
+    actual={line.split()[0] for line in result.stdout.splitlines()
+            if line.strip() and line.split()[0].startswith('okx-grid-')}
+    expected={'okx-grid-'+slug+'.service' for slug in ACCOUNT_SOFT_EXPECTED}
+    if actual!=expected:
+        raise RuntimeError('Неожиданные/отсутствующие активные торговые службы: '+
+                           'active='+str(sorted(actual))+' expected='+str(sorted(expected)))
+
+    summary=[]
+    for slug,instrument in ACCOUNT_SOFT_EXPECTED.items():
+        name,entry,root=found[slug]
+        if unit_name(entry)!='okx-grid-'+slug+'.service':
+            raise RuntimeError('Несовпадение службы: '+slug)
+        if not service_running(unit_name(entry)) or not control_supported(entry):
+            raise RuntimeError('Бот не запущен либо не поддерживает control: '+slug)
+        if instance_terminal(entry):
+            raise RuntimeError('Терминальное состояние: '+slug)
+        config=json.loads((root/'config.json').read_text(encoding='utf-8'))
+        state=json.loads((root/'state/bot04_state.json').read_text(encoding='utf-8'))
+        if (config.get('version')!='0.7.12' or state.get('version')!='0.7.12' or
+            config.get('instrument')!=instrument):
+            raise RuntimeError('Версия или инструмент неожиданны: '+slug)
+        # Never allow an unreviewed local RUN/PANIC/HARD to be overridden.
+        if read_control(entry).get('mode')!='SOFT':
+            raise RuntimeError('Требуется локальный SOFT: '+slug)
+        ack=read_ack(entry)
+        if ack.get('mode')!='SOFT' or ack.get('phase')!='SOFT_STOPPED':
+            raise RuntimeError('Отсутствует подтверждение SOFT_STOPPED: '+slug)
+        try:
+            ack_at=datetime.fromisoformat(str(ack['updated_at']).replace('Z','+00:00'))
+            if ack_at.tzinfo is None or ack_at < latch_at:
+                raise ValueError('stale SOFT acknowledgment')
+        except (KeyError,ValueError,TypeError) as exc:
+            raise RuntimeError('Устаревшее/некорректное SOFT подтверждение: '+slug) from exc
+        cycles=state.get('cycles')
+        if not isinstance(cycles,dict):
+            raise RuntimeError('Некорректный список циклов: '+slug)
+        unsettled=sum(
+            1 for cyc in cycles.values()
+            if not isinstance(cyc,dict) or
+            cyc.get('state') in ('BUY_LIVE','BUY_PARTIAL','PLACING','CANCELING')
+        )
+        if unsettled:
+            raise RuntimeError(f'{slug}: {unsettled} незавершённых BUY/ордерных переходов')
+        summary.append((slug,instrument,name,len(cycles)))
+    return summary
+
+def cmd_account_reset():
+    """Unlock account-wide SOFT ONLY. Each bot must be resumed separately."""
+    import fcntl
+    data=_account_soft_latch_data()
+    if data is None:
+        print('Общая блокировка аккаунта отсутствует. Снимать нечего.')
+        return
+    print('\nОБЩАЯ ОСТАНОВКА АККАУНТА OKX')
+    print('Причина:',data.get('reason'),'| код:',data.get('code'))
+    print('Инструмент:',data.get('trigger_instrument'),'| время UTC:',data.get('at'))
+    summary=_account_reset_preflight(data)
+    for slug,inst,name,count in summary:
+        print(f'  {slug}: {inst}, SOFT_STOPPED, {count} циклов')
+    print('\nВАЖНО: менеджер НЕ МОЖЕТ подтвердить наличие свободной маржи на OKX.')
+    print('Перед сбросом проверь плечо, свободную маржу и риск новых BUY вручную.')
+    print('Сброс НЕ возобновляет BUY. Каждого бота после него запускаешь отдельно через Resume.')
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise RuntimeError('Сброс возможен только из интерактивного терминала')
+    phrase='RESET ACCOUNT SOFT STOP'
+    if input('Для снятия общей блокировки введи точно '+phrase+': ').strip()!=phrase:
+        print('Отменено: общая блокировка сохранена.')
+        return
+    lock=ACCOUNT_SOFT_LATCH.with_name(ACCOUNT_SOFT_LATCH.name+'.lock')
+    fd=os.open(lock,os.O_CREAT|os.O_RDWR,0o600)
+    try:
+        fcntl.flock(fd,fcntl.LOCK_EX)
+        fresh=_account_soft_latch_data()
+        if fresh!=data:
+            raise RuntimeError('Общая блокировка изменилась за время подтверждения; сброс запрещён')
+        # Re-check AFTER operator confirmation while holding exchange-compatible flock.
+        _account_reset_preflight(fresh)
+        if ACCOUNT_SOFT_LATCH.is_symlink():
+            raise RuntimeError('Недопустимая ссылка вместо общей блокировки')
+        # Preserve the evidence BEFORE unlocking. No config, state or SQLite writes.
+        audit=ACCOUNT_SOFT_LATCH.with_name('account_soft_reset_audit.jsonl')
+        record={'event':'MANUAL_ACCOUNT_SOFT_RESET',
+                'at':datetime.now(timezone.utc).isoformat(),
+                'latch':fresh,'bots':[x[0] for x in summary]}
+        with os.fdopen(os.open(audit,os.O_CREAT|os.O_APPEND|os.O_WRONLY,0o600),'a',encoding='utf-8') as f:
+            f.write(json.dumps(record,ensure_ascii=False,sort_keys=True)+'\n')
+            f.flush();os.fsync(f.fileno())
+        ACCOUNT_SOFT_LATCH.unlink()
+        dfd=os.open(ACCOUNT_SOFT_LATCH.parent,os.O_RDONLY)
+        try:os.fsync(dfd)
+        finally:os.close(dfd)
+    finally:
+        fcntl.flock(fd,fcntl.LOCK_UN)
+        os.close(fd)
+    print('\nОбщая блокировка СНЯТА. Все три бота по-прежнему SOFT.')
+    print('Возобновляй нужные боты по одному через меню «Возобновить работу».')
+    print('Если проблема с маржой повторится, блокировка автоматически восстановится.')
+
 def cmd_control(name, mode):
+    if mode=='RUN' and account_soft_active():
+        raise RuntimeError('Общий SOFT STOP аккаунта активен. Сначала открой меню '
+                           '«Общая остановка аккаунта — восстановление».')
     name,entry=find_entry(name)
     if not control_supported(entry):
         raise RuntimeError(f'Бот «{name}» работает на старом движке. '
@@ -478,6 +643,8 @@ def cmd_control(name, mode):
         if input(f'Повторное подтверждение {confirm2}: ').strip()!=confirm2:
             print('Отменено. Бот продолжает работать в прежнем режиме.')
             return
+    if mode=='RUN' and account_soft_active():
+        raise RuntimeError('Общий SOFT STOP снова активен. RESUME не отправлен.')
     write_control(entry,mode)
     print('Запрос принят. Движок подтвердит состояние после сверки OKX.')
     if mode in ('HARD','PANIC'):
@@ -1061,7 +1228,8 @@ def interactive_main(env_file):
     while True:
         entries = load_registry()
         titles = ['Создать нового бота', 'Список ботов',
-                  'Telegram Monitor: ' + telegram_monitor_label()]
+                  'Telegram Monitor: ' + telegram_monitor_label(),
+                  account_soft_menu_label()]
         names = sorted(entries,key=lambda name: (not service_running(unit_name(entries[name])),name.casefold()))
         titles.extend(f'{name} — {describe(entries[name])}' for name in names)
         titles.append('Выход')
@@ -1081,8 +1249,14 @@ def interactive_main(env_file):
             curses.wrapper(lambda s: _text_screen(s, 'OKX GRID BOTS — список', text))
         elif i == 2:
             interactive_telegram_menu()
+        elif i == 3:
+            try:
+                cmd_account_reset()
+            except Exception as exc:
+                print('ОШИБКА:',exc,file=sys.stderr)
+            _pause_return()
         else:
-            interactive_bot_menu(names[i - 3])
+            interactive_bot_menu(names[i - 4])
 
 
 def main(argv=None):
@@ -1094,6 +1268,7 @@ def main(argv=None):
         sp=sub.add_parser(cmd);sp.add_argument('name')
         if cmd=='logs':sp.add_argument('-f','--follow',action='store_true')
     sub.add_parser('list')
+    sub.add_parser('account-reset', help='проверить и снять общую блокировку после ручной проверки маржи')
     clone=sub.add_parser('clone',help='новый экземпляр из завершённого бота')
     clone.add_argument('source_name');clone.add_argument('new_name')
     a=sub.add_parser('attach',help='дать имя существующему боту без его перезапуска')
@@ -1112,6 +1287,7 @@ def main(argv=None):
         return
     if cmd=='new':cmd_new(getattr(opts,'env_file',str(BASE/'bot01/.env')))
     elif cmd=='list':cmd_list()
+    elif cmd=='account-reset':cmd_account_reset()
     elif cmd=='attach':cmd_attach(opts.name,opts.path,opts.service)
     elif cmd=='stats':cmd_stats(name)
     elif cmd=='status':cmd_status(name)
