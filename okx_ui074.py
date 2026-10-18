@@ -202,7 +202,7 @@ def settings(name,root,unit):
     buy=int(cfg.get('active_buy_orders',25));real_tp=int(cfg.get('real_tp_target',min(25,int(cfg.get('active_tp_orders',25)))))
     buy_buffer = 5 if ver in ('v0.7.8','v0.7.7','v0.7.6','v0.7.5','v0.7.4') else int(cfg.get('buy_buffer_orders', 5))
     tp_buffer = buy+5 if ver in ('v0.7.8','v0.7.7','v0.7.6','v0.7.5','v0.7.4') else int(cfg.get('tp_buffer_orders', 30))
-    protect = 5 if ver in ('v0.7.10','v0.7.9','v0.7.8','v0.7.7','v0.7.6','v0.7.5','v0.7.4') else (int(cfg.get('buy_cancel_protect_steps',3))
+    protect = 5 if ver in ('v0.7.11','v0.7.10','v0.7.9','v0.7.8','v0.7.7','v0.7.6','v0.7.5','v0.7.4') else (int(cfg.get('buy_cancel_protect_steps',3))
              if ver in ('v0.7.3','v0.7.2') else None)
     coin=str(cfg.get('instrument','')).split('-')[0]
     qty=dec(cfg.get('order_size'));contract=dec(cfg.get('contract_value'))
@@ -224,7 +224,7 @@ def settings(name,root,unit):
           table_row('Шаг сетки',fmt_price(step, cfg)),table_row('Take Profit',fmt_price(tp, cfg)+ratio),
           table_row('Размер BUY',f'{amount} {coin}' if amount is not None else '—'),
           table_row('Активные BUY',f'{buy} (макс. {buy+buy_buffer})'),
-          table_row('Реальные SELL TP',f'{real_tp} (макс. {150 if ver in ("v0.7.9","v0.7.10") else real_tp+tp_buffer})'),
+          table_row('Реальные SELL TP',f'{real_tp} (макс. {150 if ver in ("v0.7.9","v0.7.10","v0.7.11") else real_tp+tp_buffer})'),
           table_row('Защита BUY возле BID',(f'{protect_text} ({fmt_price(step*protect, cfg)})' if step is not None else protect_text)),
           table_row('Максимум гридов',cfg.get('max_grids','—')),
           '\nЦЕНОВОЙ ДИАПАЗОН','─'*54,
@@ -261,7 +261,7 @@ def status(name,root,unit):
     buy=int(cfg.get('active_buy_orders',25));real_tp=int(cfg.get('real_tp_target',min(25,int(cfg.get('active_tp_orders',25)))))
     buy_buffer = 5 if ver in ('v0.7.8','v0.7.7','v0.7.6','v0.7.5','v0.7.4') else int(cfg.get('buy_buffer_orders', 5))
     tp_buffer = buy+5 if ver in ('v0.7.8','v0.7.7','v0.7.6','v0.7.5','v0.7.4') else int(cfg.get('tp_buffer_orders',30))
-    max_tp=150 if ver in ('v0.7.9','v0.7.10') else real_tp+tp_buffer
+    max_tp=150 if ver in ('v0.7.9','v0.7.10','v0.7.11') else real_tp+tp_buffer
     mon=read_monitor(root)
     bid=mon.get('bid') if mon and mon.get('bid') else last_local_bid(unit)
     missing=(mon.get('state') or {}).get('missing_buy') if mon else None

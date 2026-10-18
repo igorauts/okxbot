@@ -19,7 +19,7 @@ class WizardTests(unittest.TestCase):
         self.assertEqual(list(wizard.ASSETS.values()),['BTC','ETH','SOL','NEAR','ZEC','SUI'])
 
     def test_engine_selected_is_0710(self):
-        self.assertEqual(okxbot.latest_engine(ROOT),('okx_bot0710.py','0.7.10'))
+        self.assertEqual(okxbot.latest_engine(ROOT),('okx_bot0711.py','0.7.11'))
         self.assertEqual(okxbot.latest_dependencies('okx_bot0710.py','0.7.10',ROOT),['okx_terminal_accounting_v077.py'])
 
     def test_contract_sizes_queried_not_assumed(self):
