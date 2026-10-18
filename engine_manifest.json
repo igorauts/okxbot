@@ -40,6 +40,17 @@
         "okx_positions_fifo_v0712.py",
         "okx_fill_singleflight_v0712.py"
       ]
+    },
+    "0.7.14": {
+      "file": "okx_bot.py",
+      "dependencies": [
+        "okx_terminal_accounting.py",
+        "okx_latency.py",
+        "okx_positions_fifo.py",
+        "okx_fill_singleflight.py",
+        "okx_emergency_gate.py"
+      ]
     }
-  }
+  },
+  "current_version": "0.7.14"
 }

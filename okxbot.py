@@ -23,7 +23,9 @@ import sys
 import tempfile
 from pathlib import Path
 
-import okx_setup0711 as wizard
+import okx_setup as wizard
+from okx_observers import provision_observers
+from okx_instance_discovery import discover_single_account
 
 BASE = Path(os.environ.get('OKXBOT_BASE_DIR', '/root/okx')).resolve()
 REGISTRY = Path(os.environ.get('OKXBOT_REGISTRY', str(BASE / '.okxbot_registry.json')))
@@ -101,29 +103,38 @@ def _engine_key(filename):
 
 
 def latest_engine(source=SOURCE):
-    """Resolve from disk EVERY time. Manager remains forward-compatible."""
-    candidates=[]
-    for file in Path(source).glob('okx_bot0*.py'):
-        version=_engine_key(file.name)
-        if version is not None and file.is_file() and not file.is_symlink():
-            candidates.append((version,file.name))
-    if not candidates:
-        raise RuntimeError('Нет установленного торгового движка')
-    version,name=max(candidates)
-    raw=(Path(source)/name).read_text(encoding='utf-8')
-    marker=re.search(r"(?m)^VER\s*=\s*['\"]([0-9]+\.[0-9]+\.[0-9]+)['\"]",raw)
-    expected='.'.join(map(str,version))
-    if not marker or marker.group(1)!=expected:
-        raise RuntimeError(f'Версия движка {name} не совпадает с VER={expected}')
-    compile(raw,str(Path(source)/name),'exec')
-    return name,expected
+    """The release manifest and internal VER are authoritative; never filename digits."""
+    source=Path(source)
+    path=source/'okx_bot.py'
+    if not path.is_file() or path.is_symlink():
+        raise RuntimeError('Нет установленного торгового движка okx_bot.py')
+    raw=path.read_text(encoding='utf-8')
+    m=re.search(r"(?m)^VER\s*=\s*['\"]([0-9]+\.[0-9]+\.[0-9]+)['\"]",raw)
+    if not m:
+        raise RuntimeError('Внутренняя версия VER в okx_bot.py отсутствует')
+    ver=m.group(1)
+    compile(raw,str(path),'exec')
+    manifest=json.loads((source/'engine_manifest.json').read_text(encoding='utf-8'))
+    if manifest.get('schema_version')!=1 or manifest.get('current_version')!=ver:
+        raise RuntimeError('Несоответствие VER и текущей версии манифеста')
+    if manifest.get('engines',{}).get(ver,{}).get('file')!='okx_bot.py':
+        raise RuntimeError('Манифест не указывает на okx_bot.py')
+    return 'okx_bot.py',ver
+
 
 
 def engine_file(path):
-    matches=[(_engine_key(p.name),p.name) for p in Path(path).glob('okx_bot0*.py')
+    """Prefer versionless engine; keep legacy read-only audit support for migration."""
+    path=Path(path)
+    stable=path/'okx_bot.py'
+    if stable.is_file() and not stable.is_symlink():
+        return 'okx_bot.py'
+    matches=[(_engine_key(p.name),p.name) for p in path.glob('okx_bot0*.py')
              if _engine_key(p.name) is not None and p.is_file() and not p.is_symlink()]
-    if not matches:raise RuntimeError('Не найден исполняемый Python-файл бота')
+    if not matches:
+        raise RuntimeError('Не найден исполняемый Python-файл бота')
     return max(matches)[1]
+
 
 
 def latest_dependencies(engine_name,version,source=SOURCE):
@@ -179,11 +190,7 @@ def unit_text(path, engine, name):
     if any(ch.isspace() for ch in str(path)) or not str(path).isascii():
         raise RuntimeError('Путь с пробелами не поддерживается для службы')
     description = name.replace('\n', ' ').replace('\r', ' ')[:48]
-    cleanup_file = (
-        'okx_panic_cleanup0712.py' if engine == 'okx_bot0712.py'
-        else 'okx_panic_cleanup0711.py' if engine == 'okx_bot0711.py'
-        else 'okx_panic_cleanup0710.py'
-    )
+    cleanup_file = 'okx_panic_cleanup.py'
     return (f'[Unit]\nDescription=OKX Grid Bot ({description})\n'
             'Wants=network-online.target\nAfter=network-online.target\n'
             'StartLimitIntervalSec=300\nStartLimitBurst=10\n\n'
@@ -259,6 +266,8 @@ def cmd_new(env_file):
         unit.write_text(unit_text(created, selected_engine, name))
         os.chmod(unit, 0o644)
         run(['systemctl', 'daemon-reload'])
+        # Auto-arm BOTH read-only observers; never start the trading bot.
+        provision_observers(created, service, SOURCE, SYSTEMD_DIR)
         entries[name] = {'slug':slug, 'path':str(created),'service':service}
         save_registry(entries)
     except Exception:
@@ -344,27 +353,31 @@ TERMINAL_PHASES = {'RETIRED', 'PANIC_DONE'}
 
 
 def control_supported(entry):
-    """Check the *effective* service command, including ordered systemd drop-ins.
+    """Inspect effective ExecStart, respecting ordered systemd drop-ins.
 
-    Unit-file-only checks are wrong after an engine upgrade performed with an
-    ExecStart drop-in. No shell or manager writes happen in this function.
+    Older running engines remain recognizable until explicitly migrated.
+    No systemd mutations, no trust in registry alone.
     """
     path=bot_path(entry)
     unit=SYSTEMD_DIR/unit_name(entry)
-    if not unit.is_file():return False
+    if not unit.is_file() or unit.is_symlink():return False
     files=[unit]
     override=SYSTEMD_DIR/(unit.name+'.d')
     if override.is_dir():files+=sorted(override.glob('*.conf'))
     command=''
     for f in files:
+        if f.is_symlink():return False
         for line in f.read_text(encoding='utf-8').splitlines():
             if line.startswith('ExecStart='):
                 command=line[len('ExecStart='):].strip()
     if not command:return False
-    # Future engines are accepted without installing a new manager.
     parts=command.split()
-    return any(Path(token).parent==path and _engine_key(Path(token).name) is not None
-               and Path(token).is_file() for token in parts)
+    return any(Path(token).parent==path
+               and (Path(token).name=='okx_bot.py' or
+                    _engine_key(Path(token).name) is not None)
+               and Path(token).is_file() and not Path(token).is_symlink()
+               for token in parts)
+
 
 
 
@@ -426,11 +439,6 @@ def finalize_registry_if_needed(name, entry):
 # OKX_ACCOUNT_RESET_V0712_MANAGER_PATCH_1
 # Manager-only account-wide margin latch recovery. No exchange orders here.
 ACCOUNT_SOFT_LATCH = Path('/var/lib/okxbot/account_soft_stop.json')
-ACCOUNT_SOFT_EXPECTED = {
-    'eth079': 'ETH-USDT-SWAP',
-    'zec0710': 'ZEC-USDT-SWAP',
-    'sui0710-2': 'SUI-USDT-SWAP',
-}
 
 def _account_soft_latch_data():
     """Read account latch; corrupt/unknown latch is always fail closed."""
@@ -457,79 +465,82 @@ def account_soft_menu_label():
         return 'Общая остановка аккаунта — ОШИБКА, нужна проверка'
 
 def _account_reset_preflight(latch):
-    """Check ALL expected bots, service states and stored safety acknowledgments.
+    """Verify EVERY active registered instance; never hardcode bot names.
 
-    This check does NOT claim to independently measure available OKX margin.
-    The trading engines still enforce position coverage when BUY resumes.
+    The VPS is designated for exactly one main OKX account. This checks local
+    state and systemd ONLY; operator must separately confirm exchange margin.
+    A disappeared/unknown running service or any racing startup fails closed.
     """
-    if (latch.get('reason')!='MARGIN_REJECTION' or
-        latch.get('manual_reset_required') is not True):
+    if (latch.get('reason') != 'MARGIN_REJECTION' or
+            latch.get('manual_reset_required') is not True):
         raise RuntimeError('Разрешён только ручной сброс MARGIN_REJECTION')
     try:
-        latch_at=datetime.fromisoformat(str(latch['at']).replace('Z','+00:00'))
-        if latch_at.tzinfo is None:raise ValueError('naive timestamp')
-    except (KeyError,TypeError,ValueError) as exc:
+        latch_at = datetime.fromisoformat(str(latch['at']).replace('Z', '+00:00'))
+        if latch_at.tzinfo is None:
+            raise ValueError('naive timestamp')
+    except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeError('Некорректное время общей блокировки') from exc
 
-    registry=load_registry()
-    found={}
-    for display,entry in registry.items():
-        try:root=bot_path(entry)
-        except (ValueError,OSError,RuntimeError):continue
-        if root.name in ACCOUNT_SOFT_EXPECTED:
-            if root.name in found:raise RuntimeError('Дублированный экземпляр '+root.name)
-            found[root.name]=(display,entry,root)
-    if set(found)!=set(ACCOUNT_SOFT_EXPECTED):
-        raise RuntimeError('В реестре отсутствуют боты аккаунта: '+
-                           str(sorted(set(ACCOUNT_SOFT_EXPECTED)-set(found))))
-    # Reject unknown active grid engines on this VPS: don't miss a fourth bot.
-    result=run(['systemctl','list-units','--type=service','--state=active',
-                '--all','--no-legend','--plain','--no-pager','okx-grid-*.service'],
-               capture_output=True,text=True,timeout=10)
-    actual={line.split()[0] for line in result.stdout.splitlines()
-            if line.strip() and line.split()[0].startswith('okx-grid-')}
-    expected={'okx-grid-'+slug+'.service' for slug in ACCOUNT_SOFT_EXPECTED}
-    if actual!=expected:
-        raise RuntimeError('Неожиданные/отсутствующие активные торговые службы: '+
-                           'active='+str(sorted(actual))+' expected='+str(sorted(expected)))
+    # Each invocation enumerates registry and real systemd units afresh.
+    # The discovery module rejects unknown active bot services, duplicates,
+    # broken registry entries and missing configuration/credentials.
+    instances = discover_single_account(BASE, SYSTEMD_DIR)
+    registered = load_registry()
+    unstable = [bot.service for bot in instances
+                if bot.systemd_state in ('activating', 'reloading', 'deactivating')]
+    if unstable:
+        raise RuntimeError('Службы меняют состояние; повтори позже: '+str(unstable))
+    active = [bot for bot in instances if bot.systemd_state == 'active']
+    if not active:
+        raise RuntimeError('Нет активных экземпляров для безопасной проверки SOFT')
 
-    summary=[]
-    for slug,instrument in ACCOUNT_SOFT_EXPECTED.items():
-        name,entry,root=found[slug]
-        if unit_name(entry)!='okx-grid-'+slug+'.service':
-            raise RuntimeError('Несовпадение службы: '+slug)
-        if not service_running(unit_name(entry)) or not control_supported(entry):
-            raise RuntimeError('Бот не запущен либо не поддерживает control: '+slug)
+    summary = []
+    for bot in active:
+        name, slug, instrument = bot.display_name, bot.root.name, bot.instrument
+        entry = registered.get(name)
+        if not isinstance(entry, dict):
+            raise RuntimeError('Экземпляр исчез из реестра: '+name)
+        # Catch registry/service changes between discovery and verification.
+        if (unit_name(entry) != bot.service or bot_path(entry) != bot.root or
+                not service_running(bot.service) or not control_supported(entry)):
+            raise RuntimeError('Служба/движок недоступны или изменились: '+slug)
         if instance_terminal(entry):
-            raise RuntimeError('Терминальное состояние: '+slug)
-        config=json.loads((root/'config.json').read_text(encoding='utf-8'))
-        state=json.loads((root/'state/bot04_state.json').read_text(encoding='utf-8'))
-        if (config.get('version')!='0.7.12' or state.get('version')!='0.7.12' or
-            config.get('instrument')!=instrument):
-            raise RuntimeError('Версия или инструмент неожиданны: '+slug)
-        # Never allow an unreviewed local RUN/PANIC/HARD to be overridden.
-        if read_control(entry).get('mode')!='SOFT':
+            raise RuntimeError('Активный экземпляр уже терминален: '+slug)
+        try:
+            config = json.loads((bot.root/'config.json').read_text(encoding='utf-8'))
+            state = json.loads((bot.root/'state/bot04_state.json').read_text(encoding='utf-8'))
+        except (OSError, ValueError) as exc:
+            raise RuntimeError('Не удаётся проверить сохранённое состояние: '+slug) from exc
+        if (not isinstance(config, dict) or not isinstance(state, dict) or
+                config.get('instrument') != instrument or
+                not isinstance(config.get('version'), str) or
+                not config['version'] or
+                state.get('version') != config['version']):
+            raise RuntimeError('Версия/инструмент/state не согласованы: '+slug)
+        # Current local requests and engine acknowledgments BOTH must be SOFT.
+        if read_control(entry).get('mode') != 'SOFT':
             raise RuntimeError('Требуется локальный SOFT: '+slug)
-        ack=read_ack(entry)
-        if ack.get('mode')!='SOFT' or ack.get('phase')!='SOFT_STOPPED':
+        ack = read_ack(entry)
+        if ack.get('mode') != 'SOFT' or ack.get('phase') != 'SOFT_STOPPED':
             raise RuntimeError('Отсутствует подтверждение SOFT_STOPPED: '+slug)
         try:
-            ack_at=datetime.fromisoformat(str(ack['updated_at']).replace('Z','+00:00'))
+            ack_at = datetime.fromisoformat(str(ack['updated_at']).replace('Z', '+00:00'))
             if ack_at.tzinfo is None or ack_at < latch_at:
                 raise ValueError('stale SOFT acknowledgment')
-        except (KeyError,ValueError,TypeError) as exc:
+        except (KeyError, ValueError, TypeError) as exc:
             raise RuntimeError('Устаревшее/некорректное SOFT подтверждение: '+slug) from exc
-        cycles=state.get('cycles')
-        if not isinstance(cycles,dict):
+        cycles = state.get('cycles')
+        if not isinstance(cycles, dict):
             raise RuntimeError('Некорректный список циклов: '+slug)
-        unsettled=sum(
-            1 for cyc in cycles.values()
-            if not isinstance(cyc,dict) or
-            cyc.get('state') in ('BUY_LIVE','BUY_PARTIAL','PLACING','CANCELING')
-        )
+        unsettled = sum(1 for cyc in cycles.values()
+                        if not isinstance(cyc, dict) or
+                        cyc.get('state') in ('BUY_LIVE', 'BUY_PARTIAL', 'PLACING', 'CANCELING'))
         if unsettled:
             raise RuntimeError(f'{slug}: {unsettled} незавершённых BUY/ордерных переходов')
-        summary.append((slug,instrument,name,len(cycles)))
+        summary.append((slug, instrument, name, len(cycles)))
+
+    # Discovery is repeated after user confirmation under the latch lock
+    # by cmd_account_reset(); thus a fourth bot cannot silently bypass preflight.
     return summary
 
 def cmd_account_reset():
@@ -718,6 +729,8 @@ def cmd_clone(source_name, new_name):
     service=f'okx-grid-{slug}'
     (SYSTEMD_DIR/f'{service}.service').write_text(unit_text(dest,selected_engine,new_name))
     run(['systemctl','daemon-reload'])
+    # Auto-arm BOTH read-only observers before registering the clone.
+    provision_observers(dest, service, SOURCE, SYSTEMD_DIR)
     entries[new_name]={'slug':slug,'path':str(dest),'service':service}
     save_registry(entries)
     print(f'Клон создан, торговля выключена. Запуск: okxbot start "{new_name}"')
@@ -904,12 +917,12 @@ def cmd_status(name):
     if instance_terminal(entry):
         print(stats_text(name))
         return
-    from okx_ui074 import status
+    from okx_ui import status
     print(status(name,bot_path(entry),unit_name(entry)))
 
 
 def cmd_show(name):
-    from okx_ui074 import settings
+    from okx_ui import settings
     name, entry = find_entry(name)
     print(settings(name,bot_path(entry),unit_name(entry)))
 
@@ -1065,13 +1078,13 @@ def _text_screen(scr, title, text):
 
 
 def _capture_status(name):
-    from okx_ui074 import status
+    from okx_ui import status
     name, entry = find_entry(name)
     return status(name,bot_path(entry),unit_name(entry))
 
 
 def _capture_settings(name):
-    from okx_ui074 import settings
+    from okx_ui import settings
     name, entry = find_entry(name)
     return settings(name,bot_path(entry),unit_name(entry))
 
@@ -1086,18 +1099,18 @@ def _pause_return():
 
 def cmd_monitor(name, kind, action):
     """Monitor toggle: preflight and managed-only changes, never touch LIVE bot."""
-    from okx_monitor_compat078 import monitor_action
+    from okx_monitor import monitor_action
     _, entry = find_entry(name)
     return monitor_action(entry['service'], bot_path(entry), kind, action, SOURCE)
 
 def monitor_enabled(entry, kind):
-    from okx_monitor_compat078 import monitor_state
+    from okx_monitor import monitor_state
     st = monitor_state(entry['service'], bot_path(entry), kind)
     return bool(st['managed'] or st['external'])
 
 
 def monitor_label(entry, kind):
-    from okx_monitor_compat078 import label
+    from okx_monitor import label
     return label(entry['service'], bot_path(entry), kind)
 
 def interactive_bot_menu(name):
