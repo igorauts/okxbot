@@ -24,6 +24,13 @@
       "dependencies": [
         "okx_terminal_accounting_v077.py"
       ]
+    },
+    "0.7.11": {
+      "file": "okx_bot0711.py",
+      "dependencies": [
+        "okx_terminal_accounting_v077.py",
+        "okx_latency_v0711.py"
+      ]
     }
   }
 }

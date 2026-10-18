@@ -84,7 +84,7 @@ class PricePrecisionTests(unittest.TestCase):
     def test_settings_supports_0710(self):
         ui = UI.read_text()
         self.assertIn(
-            "protect = 5 if ver in ('v0.7.10'",
+            "protect = 5 if ver in ('v0.7.11','v0.7.10'",
             ui
         )
         self.assertIn(
