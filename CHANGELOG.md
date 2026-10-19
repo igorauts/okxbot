@@ -1,3 +1,7 @@
+## v0.7.14 — post-release operational verification (2026-10-19)
+
+All four engines, manager and eight versionless observer services verified on LIVE. Six v0.7.12 observer systemd drop-ins were removed after backups; the published v0.7.14 runtime code was already correct. See [verification](LIVE_POST_RELEASE_v0714.md).
+
 ## v0.7.13 — 2026-10-18 — Management/monitoring hotfix
 - Общая ручная разблокировка после account SOFT STOP и корректный запрет Resume при активной блокировке.
 - Постоянные systemd-имена наблюдателей; совместимость lifecycle handler.
