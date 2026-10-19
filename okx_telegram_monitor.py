@@ -14,6 +14,9 @@ import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from urllib.request import Request, urlopen
+import html
+from okx_telegram_views import status_one, latency_report, read_json, LINE
+from okx_telegram_events import (one, event_alert, market_event, market_process, partial_scan, zero_buy_scan, observer_fault_scan)
 
 BASE = Path(os.environ.get('OKXBOT_BASE_DIR','/root/okx')).resolve()
 REGISTRY = Path(os.environ.get('OKXBOT_REGISTRY',str(BASE/'.okxbot_registry.json')))
@@ -150,8 +153,10 @@ class Telegram:
         if not result.get('ok'):
             raise RuntimeError('Telegram '+method+' returned not-ok')
         return result.get('result')
-    def send(self,text):
-        return self.call('sendMessage',{'chat_id':self.chat,'text':text[:3900]})
+    def send(self,text,parse_mode=None):
+        payload={'chat_id':self.chat,'text':text[:3900]}
+        if parse_mode: payload['parse_mode']=parse_mode
+        return self.call('sendMessage',payload)
 
 
 def load_state():
@@ -282,107 +287,42 @@ def _historical_max_position(root, instrument):
 
 
 def mode_and_stats(name):
-    final=_terminal_report(name)
-    if final is not None:
-        root=Path(BOT_DIRS[name])
-        path=root/'state/stats.json'
-        try:
-            data=json.loads(path.read_text(encoding='utf-8'))
-            cfg=json.loads((root/'config.json').read_text(encoding='utf-8'))
-            hist=data.get('report') if (data.get('complete') is True and
-                    data.get('instrument') == cfg.get('instrument') and
-                    isinstance(data.get('report'),str) and data.get('report').strip()) else None
-        except (OSError,ValueError,TypeError):
-            hist=None
-        return (f'📜 {name}: ИСТОРИЧЕСКИЙ СНИМОК ДО ЗАВЕРШЕНИЯ\n\n'
-                + (hist+'\n\n' if hist else 'Историческая статистика недоступна.\n\n')
-                + '━'*24+'\n'+final)
-    root=Path(BOT_DIRS[name]);control=root/'state/control.json'
-    mode='RUN'
-    if control.exists():
-        mode=json.loads(control.read_text()).get('mode','UNKNOWN')
-    path=root/'state/stats.json'
-    state_file=root/'state/bot04_state.json'
-    if state_file.is_file():
-        st=json.loads(state_file.read_text())
-        if st.get('terminal_mode') in ('PANIC_DONE','RETIRED'):
-            return f'⏳ {name}: бот завершён, финальный расчёт ожидает подтверждения'
-    if not path.exists():return f'🟡 {name.lower()}: статистика недоступна'
-    stats=json.loads(path.read_text())
-    age=max(0,time.time()-float(stats.get('generated_at_unix',0)))
+    root=Path(BOT_DIRS[name])
+    stats=json.loads((root/'state/stats.json').read_text()) if (root/'state/stats.json').is_file() else {}
     values=_report_values(stats.get('report',''))
-    version=stats.get('bot_version') or 'н/д'
-    try:
-        state=json.loads((root/'state/bot04_state.json').read_text())
-        if state.get('instrument')!=stats.get('instrument'):
-            raise ValueError('Statistics instrument mismatch')
-        version=state.get('version') or version
-    except (OSError,ValueError,KeyError,TypeError):
-        pass
-    icon,status=_service_status(name,mode,age)
-    age_label=_age_label(_launch_epoch(root,values))
-    uptime_suffix=(' '+age_label if age_label!='н/д' else '')
-    bot_name=root.name
-    rows=[f'{icon} {bot_name} · v{str(version).lstrip("v")} · {status}{uptime_suffix}']
-    if age>1200:rows.append(f'⚠️ Статистика обновлялась {int(age//60)} мин назад')
-    labels=(
-        ('Текущий BID','Текущий BID'),
-        ('Закрытых циклов','Закрытых циклов'),
-        ('Грид профит','GRID PROFIT'),
-        ('Торговый объём','Общий объём'),
-        ('Уплаченная комиссия','Уплачено комиссий'),
-        ('Прибыль за последние 24ч','Прибыль за последние 24ч'),
-        ('Открытая позиция','Открытая позиция'),
-        ('Нереализованный PnL','Нереализованный PnL'),
-        ('Итоговый PnL','ИТОГОВЫЙ PnL'),
-    )
-    for label,key in labels:
-        rows.append(f'{label}: {_value(values,key)}')
-    rows.extend(['','Средний темп:',
-                 f'  сутки: {_value(values,"сутки")}',
-                 f'  30 дней: {_value(values,"30 дней")}',
-                 f'  год: {_value(values,"год")}',
-                 ''])
-    drawdown=_value(values,'МАКС. ПРОСАДКА БОТА')
-    if drawdown!='н/д' and '%' in drawdown:
-        drawdown=drawdown.replace('%)','% от 1x)')
-    rows.append(f'Максимальная просадка бота: {drawdown}')
-    rows.append(f'  Зафиксирована: {_value(values,"Зафиксирована")}')
-    rows.append('Максимальная позиция в истории: '+
-                _historical_max_position(root, stats.get("instrument", "")))
-    return '\n'.join(rows)
-
+    age=_age_label(_launch_epoch(root,values))
+    return status_one(name,root,age)
 
 def status_report(requested=None):
-    refresh_bots()
+    refresh_bots(force=True)
     if requested:
         for name in BOT_DIRS:
-            if requested.casefold() in (name.casefold(),Path(BOT_DIRS[name]).name.casefold()):
-                return '📊 OKX Grid Monitor\n\n'+mode_and_stats(name)
-        return f'Бот {requested} не найден. /status — все активные боты.'
-    output=['📊 OKX Grid Monitor — активные боты']
-    active=[name for name in BOT_DIRS if _active_service(name)]
-    if not active:output.append('Нет активных ботов. Для завершённого: /status имя_бота')
-    for idx,name in enumerate(active):
-        if idx:output.extend(['','━━━━━━━━━━━━━━━━━━'])
-        output.append('')
-        try:output.append(mode_and_stats(name))
-        except Exception:output.append(f'🟡 {name}: статистика временно недоступна')
-    return '\n'.join(output)
-
+            if name.casefold()==requested.casefold():
+                return mode_and_stats(name)
+        return 'Бот '+html.escape(str(requested))+' не найден.'
+    out=[]
+    for name in BOT_DIRS:
+        if not _active_service(name): continue
+        root=Path(BOT_DIRS[name])
+        if (root/'state/final_stats.json').exists(): continue
+        try: out.append(mode_and_stats(name))
+        except (OSError,ValueError,KeyError,TypeError):
+            out.append('<b>'+html.escape(name)+'</b>\n⚠️ Статистика недоступна')
+    return ('\n'+LINE+'\n').join(out) if out else 'Нет активных ботов.'
 
 def send_report(api,report):
-    """Telegram truncates at 3900 in send(); split instead of dropping bots."""
-    lines=report.splitlines(keepends=True)
-    block=''
-    for line in lines:
-        if len(block)+len(line)>3700 and block:
-            api.send(block.rstrip());block=''
-        while len(line)>3700:
-            api.send(line[:3700]);line=line[3700:]
-        block+=line
-    if block.strip():api.send(block.rstrip())
-
+    # HTML messages are split ONLY on bot separators; never break HTML tags.
+    parts=report.split('\n'+LINE+'\n')
+    batch=''
+    for part in parts:
+        combined=(batch+'\n'+LINE+'\n' if batch else '')+part
+        if batch and len(combined)>3700:
+            api.send(batch,parse_mode='HTML');batch=part
+        else:
+            batch=combined
+        if len(batch)>3800:
+            raise ValueError('Single Telegram bot report exceeds 3800 bytes')
+    if batch: api.send(batch,parse_mode='HTML')
 
 def format_alert(name,obj):
     typ=obj['event']
@@ -397,92 +337,101 @@ def format_alert(name,obj):
 
 
 def ingest_events(api,st):
-    for name,root in BOT_DIRS.items():
-        path=Path(root)/'logs/bot04_events.jsonl'
-        if not path.is_file():continue
-        signature=f'{name}'
-        known=st['offsets'].get(signature)
-        legacy={'eth064':'ETH','sol065':'SOL'}.get(name)
-        if known is None and legacy in st['offsets']:
-            known=st['offsets'][legacy]
+    for name,root_s in BOT_DIRS.items():
+        root=Path(root_s)
+        path=root/'logs/bot04_events.jsonl'
+        if not path.is_file(): continue
+        key=name
+        start=st.setdefault('offsets',{}).get(key)
         size=path.stat().st_size
-        if known is None:
-            # Initial launch does not spam the entire history.
-            st['offsets'][signature]=size
+        if start is None:
+            # New monitor starts from tail; don't replay old live incidents.
+            st['offsets'][key]=size
             continue
-        if known>size:known=0  # log rotated/truncated
-        with path.open('rb') as file:
-            file.seek(known)
+        if start>size: start=0
+        with path.open('rb') as f:
+            f.seek(start)
             while True:
-                point=file.tell()
-                raw=file.readline()
-                if not raw:break
-                if not raw.endswith(b'\n'):
-                    break
-                obj=json.loads(raw)
-                typ=obj.get('event')
-                if typ in ALERT_EVENTS:
-                    key=f'{name}/{typ}/{obj.get("severity","")}'
-                    now=time.time()
-                    last=float(st['last_alerts'].get(key,0))
-                    # Every MARKET event belongs to its own order; never
-                    # suppress another market exit for 10 minutes.
-                    important=typ in MARKET_ALERTS or typ in (
-                        'ACCOUNT_AUTO_SOFT_STOP','AUTO_SOFT_MODE_LATCHED')
-                    if important or now-last>=RATE_LIMIT_SECONDS:
-                        api.send(format_alert(name,obj))
-                        st['last_alerts'][key]=now
-                st['offsets'][signature]=file.tell()
-                # Write cursor only after successful send. On API failure, replay.
+                row=f.readline()
+                if not row or not row.endswith(b'\n'):break
+                try: obj=json.loads(row)
+                except ValueError:
+                    st['offsets'][key]=f.tell();continue
+                kind=obj.get('event')
+                if kind in ('AGG_MARKET_INTENT','AGG_MARKET_ACK','AGG_MARKET_TERMINAL',
+                            'AGG_MARKET_REJECTED'):
+                    market_event(st,name,obj)
+                else:
+                    event_alert(api,st,name,obj)
+                st['offsets'][key]=f.tell()
                 save_state(st)
-
+    market_process(api,st,{k:Path(v) for k,v in BOT_DIRS.items()})
+    names={k:Path(v) for k,v in BOT_DIRS.items() if _active_service(k)}
+    observer_fault_scan(api,st,names)
+    partial_scan(api,st,names)
+    zero_buy_scan(api,st,names)
 
 def poll_commands(api,st):
     updates=api.call('getUpdates',{'offset':st['updates_offset'],'timeout':0,'limit':20})
     for msg in updates:
         st['updates_offset']=msg['update_id']+1
         data=msg.get('message',{})
-        source=str(data.get('chat',{}).get('id',''))
-        if source==api.chat:
-            raw=str(data.get('text','')).strip().split()
-            if raw and raw[0].split('@')[0]=='/status':
-                send_report(api,status_report(raw[1] if len(raw)>1 else None))
+        if str(data.get('chat',{}).get('id',''))==api.chat:
+            parts=str(data.get('text','')).strip().split()
+            cmd=parts[0].split('@')[0] if parts else ''
+            if cmd=='/status':
+                send_report(api,status_report(parts[1] if len(parts)>1 else None))
+            elif cmd=='/help':
+                api.send('🤖 OKX Grid Bot\n/status — статистика активных ботов'
+                         '\n/status ИМЯ — один бот\n/latency — последние 60 минут'
+                         '\n/latency 8h — последние 8 часов\n/help — команды')
+            elif cmd=='/latency':
+                hours=8 if len(parts)==2 and parts[1].casefold()=='8h' else 1
+                if len(parts)>1 and parts[1].casefold()!='8h':
+                    api.send('Допустимо: /latency или /latency 8h')
+                else:
+                    refresh_bots(force=True)
+                    active=[(name,Path(root)) for name,root in BOT_DIRS.items()
+                            if _active_service(name) and not (Path(root)/'state/final_stats.json').exists()]
+                    send_report(api,latency_report(active,hours))
         save_state(st)
 
-
 def services_check(api,st):
-    # Keep last statuses for stopped bots so active -> stopped is notified.
-    for name,service in SERVICES.items():
-        result=subprocess.run(['systemctl','is-active',service],capture_output=True,
+    for name,unit in SERVICES.items():
+        root=Path(BOT_DIRS[name])
+        result=subprocess.run(['systemctl','is-active',unit],capture_output=True,
                               text=True,timeout=5).stdout.strip()
-        previous=st['service_status'].get(name)
-        if result=='active' and previous is None:
-            st['service_status'][name]=result;continue
-        if result!=previous and previous is not None:
-            api.send(f'{"✅" if result=="active" else "🚨"} OKX {name}: service {previous} → {result}')
+        previous=st.setdefault('service_status',{}).get(name)
+        if previous=='active' and result!='active':
+            ack=read_json(root/'state/control_ack.json')
+            cfg=read_json(root/'state/control.json')
+            if ack.get('phase') not in ('PANIC_DONE','RETIRED') and cfg.get('mode') not in ('HARD','PANIC'):
+                one(api,st,'service_down/'+name+'/'+str(time.time_ns()),
+                    f'🚨 {name}: торговый процесс {previous} → {result}')
         st['service_status'][name]=result
 
-
 def safety_check(api,st):
+    now=time.time()
     is_soft=SHARED_SOFT.exists()
-    previous=st.get('shared_soft')
-    if is_soft and previous is not True:
-        api.send('🚨 OKX ACCOUNT: shared AUTO SOFT STOP active. Manual reset required.')
-    elif not is_soft and previous is True:
-        api.send('✅ OKX ACCOUNT: shared SOFT latch cleared manually.')
+    if is_soft and st.get('shared_soft') is not True:
+        one(api,st,'shared_soft/'+str(int(now)),
+            '🚨 OKX ACCOUNT: shared AUTO SOFT STOP. Manual reset required.')
     st['shared_soft']=is_soft
-    for name,root in BOT_DIRS.items():
-        if not _active_service(name):continue
-        heartbeat=Path(root)/'state/okx_stats_runtime_v059.json'
-        if not heartbeat.is_file():continue
+    for name,root_s in BOT_DIRS.items():
+        if not _active_service(name): continue
+        heartbeat=Path(root_s)/'state/okx_stats_runtime_v059.json'
+        if not heartbeat.is_file(): continue
         try:
-            value=json.loads(heartbeat.read_text())
-            age=time.time()-float(value.get('last',0))
-            if age>120 and time.time()-float(st['last_alerts'].get('HEARTBEAT/'+name,0))>600:
-                api.send(f'🚨 OKX {name}: no trading heartbeat for {int(age)} seconds')
-                st['last_alerts']['HEARTBEAT/'+name]=time.time()
-        except (OSError,ValueError,KeyError):pass
-
+            age=now-float(json.loads(heartbeat.read_text()).get('last',0))
+            key='heartbeat_fault/'+name
+            seen=st.setdefault('health_faults',{})
+            if age>120 and not seen.get(key):
+                one(api,st,'heartbeat/'+name+'/'+str(int(now)),
+                    f'🚨 {name}: no trading heartbeat for {int(age)} seconds')
+                seen[key]=True
+            if age<=120:
+                seen.pop(key,None)
+        except (OSError,ValueError,TypeError): pass
 
 def daily_check(api,st,now=None):
     now=now or datetime.now(TZ)

@@ -1134,8 +1134,6 @@ def interactive_bot_menu(name):
             if mode in ('RUN','PAUSE','SOFT'):
                 choices.extend(['Hard Stop — завершить бота, отменить все ордера',
                                 'Panic Sell — завершить и закрыть позицию'])
-        if terminal:
-            choices.append('Создать нового бота-клона')
         if not active and not terminal and mode=='RUN':
             choices.append('Запустить')
         choices.append('Назад')
@@ -1237,40 +1235,72 @@ def interactive_telegram_menu():
         curses.wrapper(lambda scr: _text_screen(
             scr, 'OKX GRID BOTS — Telegram Monitor', text))
 
+def _menu_timestamp(name,entry,archive=False):
+    root=bot_path(entry)
+    cfg=json.loads((root/'config.json').read_text())
+    if not archive:
+        return float(cfg.get('created_at') or 0)
+    ack=read_ack(entry)
+    for k in ('completed_at','finished_at','stopped_at','updated_at','at'):
+        v=ack.get(k)
+        if isinstance(v,(float,int)) and v>0: return float(v)
+        if isinstance(v,str):
+            try: return datetime.fromisoformat(v.replace('Z','+00:00')).timestamp()
+            except ValueError: pass
+    final=root/'state/final_stats.json'
+    return final.stat().st_mtime if final.exists() else 0
+
+
+def interactive_archive_menu(entries):
+    while True:
+        names=sorted(entries,key=lambda n:_menu_timestamp(n,entries[n],True),reverse=True)
+        titles=[f'{name} — {describe(entries[name])}' for name in names]+['Назад']
+        selected=curses.wrapper(lambda s:wizard.menu(s,'OKX GRID BOT — Архив',titles))
+        if selected is None or selected==len(names): return
+        name=names[selected]
+        while True:
+            choices=['Статистика','Настройки','Назад']
+            k=curses.wrapper(lambda s:wizard.menu(s,'АРХИВ — '+name,choices))
+            if k is None or k==2:break
+            try:
+                if k==0: curses.wrapper(lambda s:stats_screen(s,name))
+                elif k==1: curses.wrapper(lambda s:_text_screen(s,'Настройки — '+name,_capture_settings(name)))
+            except (OSError,RuntimeError,ValueError) as exc:
+                curses.wrapper(lambda s:_text_screen(s,'Архив — ошибка',str(exc)))
+
 def interactive_main(env_file):
     while True:
-        entries = load_registry()
-        titles = ['Создать нового бота', 'Список ботов',
-                  'Telegram Monitor: ' + telegram_monitor_label(),
-                  account_soft_menu_label()]
-        names = sorted(entries,key=lambda name: (not service_running(unit_name(entries[name])),name.casefold()))
-        titles.extend(f'{name} — {describe(entries[name])}' for name in names)
-        titles.append('Выход')
-        i = curses.wrapper(lambda s: wizard.menu(s, 'OKX GRID BOTS', titles))
-        if i is None or i == len(titles) - 1:
-            return
-        if i == 0:
-            try:
-                cmd_new(env_file)
-            except Exception as exc:
-                print('ОШИБКА:', exc, file=sys.stderr)
+        entries=load_registry()
+        live={name:entry for name,entry in entries.items() if not instance_terminal(entry)}
+        archive={name:entry for name,entry in entries.items() if instance_terminal(entry)}
+        names=sorted(live,key=lambda n:_menu_timestamp(n,live[n]),reverse=True)
+        def _live_label(name):
+            entry=live[name]
+            if not service_running(unit_name(entry)):
+                return '🔴 ERROR'
+            mode=control_desired(entry)
+            if mode in ('PAUSE','SOFT') or account_soft_active():
+                return '🟡 '+mode
+            return '🟢 RUN'
+        titles=[f'{_live_label(n)} {n} — {describe(live[n])}' for n in names]
+        titles.extend(['➕ Создать бота','📦 Архив',
+                       '📱 Telegram-монитор: '+telegram_monitor_label(),
+                       '⚙️ Управление аккаунтом','Выход'])
+        i=curses.wrapper(lambda s:wizard.menu(s,'OKX Grid Bot v0.7.15',titles))
+        if i is None or i==len(titles)-1:return
+        if i<len(names):
+            interactive_bot_menu(names[i]);continue
+        action=i-len(names)
+        if action==0:
+            try: cmd_new(env_file)
+            except Exception as exc:print('ОШИБКА:',exc,file=sys.stderr)
             _pause_return()
-        elif i == 1:
-            with io.StringIO() as buf, contextlib.redirect_stdout(buf):
-                cmd_list()
-                text = buf.getvalue()
-            curses.wrapper(lambda s: _text_screen(s, 'OKX GRID BOTS — список', text))
-        elif i == 2:
-            interactive_telegram_menu()
-        elif i == 3:
-            try:
-                cmd_account_reset()
-            except Exception as exc:
-                print('ОШИБКА:',exc,file=sys.stderr)
+        elif action==1: interactive_archive_menu(archive)
+        elif action==2: interactive_telegram_menu()
+        elif action==3:
+            try:cmd_account_reset()
+            except Exception as exc:print('ОШИБКА:',exc,file=sys.stderr)
             _pause_return()
-        else:
-            interactive_bot_menu(names[i - 4])
-
 
 def main(argv=None):
     p=argparse.ArgumentParser(description='Управление именованными OKX Grid ботами')
