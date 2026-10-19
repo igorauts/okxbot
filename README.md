@@ -1,3 +1,5 @@
+> **Current release: [v0.7.14](https://github.com/igorauts/okxbot/releases/tag/v0.7.14)** — versionless engine/manager; four live bots and eight observers verified. [Deployment verification](LIVE_POST_RELEASE_v0714.md). Legacy version documentation follows below.
+
 # OKX Grid Bot v0.7.11 — LIVE-tested release (18 октября 2026)
 
 **Актуальный релиз:** [v0.7.11](https://github.com/igorauts/okxbot/releases/tag/v0.7.11) · [Описание](README_v0711_RU.md) · [Release Notes](RELEASE_NOTES_v0711_RU.md).
