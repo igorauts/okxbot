@@ -1285,7 +1285,7 @@ def interactive_main(env_file):
         titles=[f'{_live_label(n)} {n} — {describe(live[n])}' for n in names]
         titles.extend(['➕ Создать бота','📦 Архив',
                        '📱 Telegram-монитор: '+telegram_monitor_label(),
-                       '⚙️ Управление аккаунтом','Выход'])
+                       '⚙️   Управление аккаунтом','Выход'])
         i=curses.wrapper(lambda s:wizard.menu(s,'OKX Grid Bot v0.7.15',titles))
         if i is None or i==len(titles)-1:return
         if i<len(names):
@@ -1306,7 +1306,7 @@ def main(argv=None):
     p=argparse.ArgumentParser(description='Управление именованными OKX Grid ботами')
     sub=p.add_subparsers(dest='action')
     n=sub.add_parser('new',help='создать нового бота через опросник')
-    n.add_argument('--env-file',default=str(BASE/'bot01/.env'))
+    n.add_argument('--env-file',default=str(BASE/'.okxbot_account.env'))
     for cmd in ('stats','status','show','start','stop','pause','resume','soft','hard','panic','logs','audit'):
         sp=sub.add_parser(cmd);sp.add_argument('name')
         if cmd=='logs':sp.add_argument('-f','--follow',action='store_true')
@@ -1326,9 +1326,9 @@ def main(argv=None):
         if not sys.stdin.isatty():
             p.print_help()
             return
-        interactive_main(getattr(opts, 'env_file', str(BASE/'bot01/.env')))
+        interactive_main(getattr(opts, 'env_file', str(BASE/'.okxbot_account.env')))
         return
-    if cmd=='new':cmd_new(getattr(opts,'env_file',str(BASE/'bot01/.env')))
+    if cmd=='new':cmd_new(getattr(opts,'env_file',str(BASE/'.okxbot_account.env')))
     elif cmd=='list':cmd_list()
     elif cmd=='account-reset':cmd_account_reset()
     elif cmd=='attach':cmd_attach(opts.name,opts.path,opts.service)
