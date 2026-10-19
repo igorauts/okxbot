@@ -799,7 +799,7 @@ def with_latest_bot_dd(report, path, expected_instrument):
 
     This is read-only and does not load the engine, keys, or contact OKX.
     """
-    file=path/'state'/'bot_drawdown_v067.json'
+    file=path/'state'/'bot_drawdown.json'
     if not file.is_file():
         return report
     try:
@@ -1286,7 +1286,7 @@ def interactive_main(env_file):
         titles.extend(['➕ Создать бота','📦 Архив',
                        '📱 Telegram-монитор: '+telegram_monitor_label(),
                        '⚙️   Управление аккаунтом','Выход'])
-        i=curses.wrapper(lambda s:wizard.menu(s,'OKX Grid Bot v0.7.15',titles))
+        i=curses.wrapper(lambda s:wizard.menu(s,'OKX Grid Bot v0.7.16',titles))
         if i is None or i==len(titles)-1:return
         if i<len(names):
             interactive_bot_menu(names[i]);continue

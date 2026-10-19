@@ -236,6 +236,99 @@ def zero_buy_scan(api,st,names):
             del incidents[name]
 
 
+def _state_mismatch_alert(api,st,name,obj):
+    """Open one incident per unresolved mismatch, ignoring observer re-alerts."""
+    incidents=st.setdefault('state_mismatch_incidents',{})
+    ts=date_epoch(obj.get('ts')) or time.time()
+    rec=incidents.get(name)
+    if rec is not None:
+        # One persistent mismatch. Invalidate recovery streak if another alert occurs.
+        rec['last_alert_at']=max(float(rec.get('last_alert_at',ts)),ts)
+        rec['matches']=0
+        rec['last_match_ts']=None
+        return
+    try:
+        duration=max(0.,min(3600.,float(obj.get('duration_sec') or 0.)))
+    except (ValueError,TypeError):
+        duration=0.
+    state_buy=obj.get('state_buy')
+    engine_buy=obj.get('engine_buy')
+    rec={'since':ts-duration,'last_alert_at':ts,'matches':0,
+         'last_match_ts':None,'state_buy':state_buy,'engine_buy':engine_buy}
+    # Don't store an active incident unless Telegram accepted its alert.
+    one(api,st,f'state_mismatch/open/{name}/{ts}',
+        f'⚠️ STATE MISMATCH | {name}\n'
+        f'State: {state_buy} BUY | Engine: {engine_buy} BUY\n'
+        f'Расхождение: {duration:.1f} с')
+    incidents[name]=rec
+
+
+def _state_mismatch_check_recovery(api,st,names):
+    """Check actual paired observer measurements, never silence as recovery.
+
+    Observer v0.7.14 writes summary.json every ~20s. Its `last_state`
+    is enriched IN MEMORY with engine_buy/engine_observed_ts; unlike
+    snapshots.jsonl, which is written before adding engine data.
+    Three distinct fresh, consecutive matching summary samples required.
+    """
+    incidents=st.setdefault('state_mismatch_incidents',{})
+    now=time.time()
+    for name in list(incidents):
+        if name not in names:
+            # Do not claim recovery from an inactive process or missing observer.
+            continue
+        rec=incidents[name]
+        root=names[name]
+        paths=list(root.glob('diagnostics/execution_*/summary.json'))
+        if not paths:
+            rec['matches']=0
+            continue
+        try:
+            newest=max(paths,key=lambda p:p.stat().st_mtime)
+            summary=read_json(newest)
+            if summary.get('mode')!='execution':
+                rec['matches']=0; continue
+            sample=summary.get('last_state')
+            if not isinstance(sample,dict):
+                rec['matches']=0; continue
+            summary_ts=date_epoch(summary.get('ts'))
+            sample_ts=date_epoch(sample.get('ts'))
+            engine_ts=date_epoch(sample.get('engine_observed_ts'))
+            if (summary_ts is None or sample_ts is None or engine_ts is None
+                or not (-2<=now-summary_ts<=45)
+                or not (-2<=now-sample_ts<=35)
+                or abs(sample_ts-engine_ts)>6
+                or sample_ts<=float(rec.get('last_alert_at',0))):
+                rec['matches']=0;continue
+            # Refuse unknown/stale engine reports; require numeric equality.
+            state_buy=sample.get('buy')
+            engine_buy=sample.get('engine_buy')
+            if (not isinstance(state_buy,int) or isinstance(state_buy,bool)
+                or not isinstance(engine_buy,int) or isinstance(engine_buy,bool)
+                or state_buy<0 or engine_buy<0 or state_buy!=engine_buy):
+                rec['matches']=0
+                rec['last_match_ts']=None
+                continue
+            last=rec.get('last_match_ts')
+            if last is not None and sample_ts<=float(last):
+                continue  # same observer sample on the next Telegram poll
+            if last is not None and sample_ts-float(last)>45:
+                rec['matches']=0  # missed too many summary intervals
+            rec['last_match_ts']=sample_ts
+            rec['matches']=int(rec.get('matches',0))+1
+            if rec['matches']>=3:
+                duration=max(0.,sample_ts-float(rec['since']))
+                one(api,st,f'state_mismatch/normal/{name}/{rec["since"]}',
+                    f'✅ BACK TO NORMAL | {name}\n'
+                    f'State и Engine снова совпадают\n'
+                    f'Длительность инцидента: {duration:.1f} с')
+                del incidents[name]
+        except (OSError,TypeError,ValueError,OverflowError):
+            rec['matches']=0
+            # Next monitoring iteration can retry reading a new summary.
+            continue
+
+
 def observer_fault_scan(api,st,names):
     offsets=st.setdefault('observer_offsets',{})
     for name,root in names.items():
@@ -254,9 +347,13 @@ def observer_fault_scan(api,st,names):
                         row=f.readline()
                         if not row or not row.endswith(b'\n'):break
                         obj=json.loads(row)
-                        if obj.get('kind') in OBSERVER_ALARMS:
-                            one(api,st,'observer/'+name+'/'+str(obj.get('kind'))+'/'+str(obj.get('event_ts') or obj.get('ts')),
-                                f'🚨 {obj["kind"]} | {name}')
+                        kind=obj.get('kind')
+                        if kind=='PERSISTED_STATE_DIFFERS_FROM_ENGINE':
+                            _state_mismatch_alert(api,st,name,obj)
+                        elif kind in OBSERVER_ALARMS:
+                            one(api,st,'observer/'+name+'/'+str(kind)+'/'+str(obj.get('event_ts') or obj.get('ts')),
+                                f'🚨 {kind} | {name}')
                         offsets[token]=f.tell()
             except (OSError,ValueError,KeyError):
                 continue
+    _state_mismatch_check_recovery(api,st,names)

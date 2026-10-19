@@ -383,12 +383,12 @@ def poll_commands(api,st):
                 send_report(api,status_report(parts[1] if len(parts)>1 else None))
             elif cmd=='/help':
                 api.send('🤖 OKX Grid Bot\n/status — статистика активных ботов'
-                         '\n/status ИМЯ — один бот\n/latency — последние 60 минут'
-                         '\n/latency 8h — последние 8 часов\n/help — команды')
-            elif cmd=='/latency':
-                hours=8 if len(parts)==2 and parts[1].casefold()=='8h' else 1
-                if len(parts)>1 and parts[1].casefold()!='8h':
-                    api.send('Допустимо: /latency или /latency 8h')
+                         '\n/latency — последние 60 минут'
+                         '\n/latency8h — последние 8 часов\n/help — команды')
+            elif cmd in ('/latency', '/latency8h'):
+                hours=8 if cmd=='/latency8h' or (len(parts)==2 and parts[1].casefold()=='8h') else 1
+                if ((cmd=='/latency8h' and len(parts)>1) or (cmd=='/latency' and len(parts)>1 and (len(parts)!=2 or parts[1].casefold()!='8h'))):
+                    api.send('Допустимо: /latency или /latency8h')
                 else:
                     refresh_bots(force=True)
                     active=[(name,Path(root)) for name,root in BOT_DIRS.items()

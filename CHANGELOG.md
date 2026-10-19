@@ -1,3 +1,13 @@
+## v0.7.16 — 2026-10-19 — DD + Telegram + version alignment
+
+- LIVE-движок и менеджер согласованы на v0.7.16; архивные экземпляры не изменены.
+- DD: каждые 5 секунд из оперативного PnL/позиции/BID, без дополнительных API/fills/retries; исторический минимум сохранён.
+- DD-файлы без суффиксов версий; свежая максимальная просадка доступна Telegram.
+- Telegram `/status`, `/latency`, `/latency8h`, STATE MISMATCH и BACK TO NORMAL: уточнены данные, формат и дедупликация.
+- Архив двух выведенных из эксплуатации исторических экземпляров размещён отдельно, без секретов.
+- Не изменены торговая стратегия, общий FIFO, Coverage Recovery, virtual_escape, funding.
+- Оставшиеся исторические имена SQLite, логов и compatibility-файлов требуют отдельной миграции.
+
 ## v0.7.14 — post-release operational verification (2026-10-19)
 
 All four engines, manager and eight versionless observer services verified on LIVE. Six v0.7.12 observer systemd drop-ins were removed after backups; the published v0.7.14 runtime code was already correct. See [verification](LIVE_POST_RELEASE_v0714.md).

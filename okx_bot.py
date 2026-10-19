@@ -44,7 +44,7 @@ STEP, TP, QTY = (Decimal(str(CFG.get(k,0))) for k in
 TARGET, CAP, EX_CAP = (int(CFG.get(k,0)) for k in
                        ('active_buy_orders','max_grids','max_exchange_orders'))
 INTERVAL = 1.0  # main safety loop; BID updates independently via public WS
-VER = '0.7.14'
+VER = '0.7.16'
 # REST orders-pending is paginated. Exchange-attached SELLs may temporarily
 # exceed the baseline real TP count during multiple simultaneous BUY fills.
 # Exchange-attached TP can grow during a burst. Surplus is trimmed only
@@ -90,8 +90,8 @@ ABSENCE_MAX_AGE_SEC = 6 * 24 * 3600  # within OKX 7-day history retention
 # their existing trading parameters with these defaults during migration.
 PARTIAL_AGE = int(CFG.get('partial_buy_timeout_sec',60))
 PARTIAL_STEPS = Decimal(str(CFG.get('partial_buy_distance_steps',5)))
-BOT_DD_DATA = ROOT / 'state' / 'bot_drawdown_v067.json'
-BOT_DD_ANCHOR = ROOT / 'state' / 'bot_drawdown_anchor_v067.json'
+BOT_DD_DATA = ROOT / 'state' / 'bot_drawdown.json'
+STATS_FINANCIAL_ANCHOR = ROOT / 'state' / 'stats_financial_anchor.json'
 BOT_DD_SAMPLE_INTERVAL = 5  # seconds; refreshed via live public WS BID, no account API
 BOT_DD_LOCK = threading.Lock()
 if not (30 <= PARTIAL_AGE <= 3600 and 1 <= PARTIAL_STEPS <= 100):
@@ -192,7 +192,7 @@ if (COIN not in ALLOWED or INST != f'{COIN}-USDT-SWAP'
             and BUY_CANCEL_PROTECT_STEPS==5) or EX_CAP != 500
     or D(CFG.get('buy_base_qty'))!=QTY*CONTRACT_VALUE
     or (UPPER and UPPER!=CAPITAL_REFERENCE)):
-    die('Invalid v0.7.14 BTC/ETH/SOL/NEAR/ZEC/SUI configuration. Refusing to start.')
+    die('Invalid v0.7.16 BTC/ETH/SOL/NEAR/ZEC/SUI configuration. Refusing to start.')
 
 ENV = {}
 for line in (ROOT / '.env').read_text().splitlines():
@@ -4141,8 +4141,8 @@ def print_full_stats(pnl=None, *, require_complete=False):
     if LIVE:
         # Existing complete PnL uses authoritative BUY/SELL fills and fees.
         # Only the running engine changes the monitoring baseline.
-        record_bot_drawdown(d['total_gain'],now=now,source='full_fills',bid=bid)
-        atomic_json(BOT_DD_ANCHOR, {'schema':1,'instrument':INST,
+        # DD sampled independently from in-memory state every 5s.
+        atomic_json(STATS_FINANCIAL_ANCHOR, {'schema':1,'instrument':INST,
             'signature':financial_signature(st),'total_pnl_usdt':str(d['total_gain']),
             'open_contracts':str(d['open_contracts']),'bid':str(bid),'at':now})
     report=format_okx_report(st,fills,d,now=now)
@@ -4183,85 +4183,66 @@ def trim_verified_fills_for_snapshot(rows, expected):
     return kept
 
 
-class BotDrawdownWorker(threading.Thread):
-    """Worker consumes snapshots of CONSISTENT exchange position/order state.
+class BotDrawdownSampler:
+    """Every ~5s: estimated realized net + open-position mark to cached BID.
 
-    No dependency on the ten-minute statistics report. Every ~5s, the trading
-    loop queues a frozen reconciled snapshot. New fills do NOT invalidate
-    already captured samples (they will be represented in a later sample).
-    Only real BUY/SELL prices and fees count; missing fills cause a retry,
-    never a fabricated or understated drawdown.
+    Not an independent accounting system. Reads the in-memory PnL ledger and
+    cycle state that the trading loop already has. A BUY's limit price is an
+    approximate execution price for DD purposes; momentary partial fills can
+    introduce small errors, as deliberately accepted by the operator.
+
+    No REST, no extra GET, no fills history, no anchor/fingerprint gating,
+    no retry, no queue, no threads. DD errors must never affect orders.
     """
-    def __init__(self,market,pnl):
-        super().__init__(daemon=True)
-        self.market=market
-        self.pnl=pnl
-        self.pending=queue.Queue(maxsize=256)
-        self.last_submitted=0.0
-        self.last_error=''
+    def __init__(self, market, pnl):
+        self.market = market
+        self.pnl = pnl
+        self.last_sample = 0.0
+        self.last_error_notice = 0.0
 
-    def submit_reconciled(self,st):
-        now=time.monotonic()
-        if now-self.last_submitted < BOT_DD_SAMPLE_INTERVAL:return
-        bid=self.market.cached_bid()
-        if bid is None or not FILL_STORE.initialized():return
-        # A PnL ledger entry may lag a finalized cycle by a second. Don't
-        # claim a total while one of its components is unaccounted.
-        closed=[c for c in self.pnl.all_cycles(st) if c.get('state') in ('CLOSED','EXITED')]
-        if any(not self.pnl.recorded(c) for c in closed):return
-        active={key:copy.deepcopy(c) for key,c in st.get('cycles',{}).items()
-                if c.get('state') not in ('CLOSED','CANCELED','EXITED')}
-        snapshot={'cycles':active,'archived_cycles':[], 'completed':0}
-        observed=(time.time(),bid,snapshot,self.pnl.total_all())
+    def submit_reconciled(self, st):
+        clock = time.monotonic()
+        if clock - self.last_sample < BOT_DD_SAMPLE_INTERVAL:
+            return
+        self.last_sample = clock
         try:
-            self.pending.put_nowait(observed)
-            self.last_submitted=now
-        except queue.Full:
-            # A prolonged API outage must not grow process memory without bound.
-            # The newest snapshot will be captured after the queue catches up.
-            pass
-
-    def _process(self, snapshot):
-        observed,bid,st,realized=snapshot[:4]
-        expected=expected_filled_orders(st,include_archive=False)
-        rows=FILL_STORE.ensure_expected(expected)
-        subset=trim_verified_fills_for_snapshot(rows,expected)
-        if subset is None:
-            raise ExchangeTemporary('Fill records still incomplete for recorded drawdown sample')
-        snap=full_stats_snapshot(st,subset,bid,CONTRACT_VALUE,
-                                 include_durable_archive=False)
-        if not snap['complete']:
-            raise ExchangeTemporary('Incomplete PnL sample awaiting fills')
-        net=realized+snap['total_gain']
-        record_bot_drawdown(net,now=observed,source='reconciled_live_fills',bid=bid)
-        self.last_error=''
-
-    def run(self):
-        while True:
-            try:
-                snapshot=self.pending.get(timeout=1)
-            except queue.Empty:
-                continue
-            try:
-                self._process(snapshot)
-            except Exception as exc:
-                text=f'{type(exc).__name__}: {str(exc)[:140]}'
-                if text!=self.last_error:
-                    log('BOT_DRAWDOWN_SAMPLE_FAILED',error=text)
-                    self.last_error=text
-                # Replay bounded number of times. Never block newer valid
-                # snapshots forever behind one irrecoverable order history.
-                attempt=snapshot[4]+1 if len(snapshot)>4 else 1
-                if attempt<=10:
-                    try:self.pending.put_nowait((*snapshot[:4],attempt))
-                    except queue.Full:pass
-                else:
-                    log('BOT_DRAWDOWN_SAMPLE_SKIPPED',reason=text,
-                        observed_at=snapshot[0],attempts=attempt)
-                time.sleep(2)
-            finally:
-                self.pending.task_done()
-
+            bid_value = self.market.cached_bid()  # Existing public WS cache ONLY
+            if bid_value is None:
+                return
+            bid = D(bid_value)
+            if bid <= 0 or not bid.is_finite():
+                return
+            realized = self.pnl.total_all()  # In-memory, no SQLite or API call
+            floating = Decimal(0)
+            for cycle in st.get('cycles', {}).values():
+                # Ignore closed/cancelled cycles; realized net is already in pnl.
+                if cycle.get('state') in ('CLOSED', 'CANCELED', 'EXITED'):
+                    continue
+                open_contracts = D(cycle.get('filledBuy')) - D(cycle.get('filledTP'))
+                if open_contracts < 0:
+                    return  # incoherent transient state: don't overwrite prior DD
+                if not open_contracts:
+                    continue
+                # Cycle BUY LIMIT price is a good enough entry approximation.
+                # It is already present in the local trading state.
+                entry = D(cycle.get('buyPx'))
+                if entry <= 0 or not entry.is_finite():
+                    return
+                floating += open_contracts * CONTRACT_VALUE * (bid - entry)
+            total = D(realized) + floating
+            if not total.is_finite():
+                return
+            record_bot_drawdown(total, now=time.time(),
+                                source='local_realized_plus_bid', bid=bid)
+        except Exception as exc:
+            # A diagnostic error must never interrupt trading.
+            if clock - self.last_error_notice >= 60:
+                self.last_error_notice = clock
+                try:
+                    log('BOT_DRAWDOWN_SAMPLE_FAILED',
+                        error=f'{type(exc).__name__}: {str(exc)[:120]}')
+                except Exception:
+                    pass
 
 class StatsWorker(threading.Thread):
     """Background verified fills; refresh promptly after executions, not every tick."""
@@ -4276,9 +4257,9 @@ class StatsWorker(threading.Thread):
             now=time.monotonic()
             try:
                 due=(not last or now-last>=STATS_INTERVAL)
-                if not due and now-last>=60 and DATA.exists() and BOT_DD_ANCHOR.exists():
+                if not due and now-last>=60 and DATA.exists() and STATS_FINANCIAL_ANCHOR.exists():
                     current=json.loads(DATA.read_text())
-                    anchor=json.loads(BOT_DD_ANCHOR.read_text())
+                    anchor=json.loads(STATS_FINANCIAL_ANCHOR.read_text())
                     due=financial_signature(current)!=anchor.get('signature')
                 if due:
                     last=now
@@ -4348,7 +4329,7 @@ def main():
         market=PublicBidWatcher(shared_wake=watcher.wake);market.start()
         pnl_worker=PnLWorker(pnl);pnl_worker.start()
         stats_worker=StatsWorker(pnl);stats_worker.start()
-        dd_worker=BotDrawdownWorker(market,pnl);dd_worker.start()
+        dd_worker=BotDrawdownSampler(market,pnl)
         live_loop(st,watcher,market,pnl,pnl_worker,dd_worker)
         if st.get('terminal_mode') in ('PANIC_DONE','RETIRED'):
             # Trading is ALREADY terminal. Only GETs / fill archive writes follow.
