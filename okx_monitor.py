@@ -5,6 +5,7 @@ Only local state, systemd metadata and read-only observer program are used.
 import subprocess
 from pathlib import Path
 import okx_monitor_compat078 as legacy
+from okx_monitor_compat074 import service_active as _service_active
 from okx_observers import supports_versionless, unit_name, monitor_action as _stable_action
 
 
@@ -26,7 +27,7 @@ def monitor_state(service,root,kind):
     if not _new(service,root):
         return old
     unit=unit_name(service,kind)
-    known=_enabled(unit) or legacy.service_active(unit)
+    known=_enabled(unit) or _service_active(unit)
     managed=tuple(x for x in old['managed'] if x!=unit)
     return {'managed':((unit,)+managed if known else managed),
             'external':old['external']}
@@ -42,9 +43,9 @@ def label(service,root,kind):
         return 'ON (встроенный + внешний!)' if unit in st['managed'] else 'ON (внешний)'
     if unit not in st['managed']:
         return 'OFF'
-    if legacy.service_active(unit):
+    if _service_active(unit):
         return 'ON'
-    if legacy.service_active(service+'.service'):
+    if _service_active(service+'.service'):
         return 'ERROR (монитор не работает)'
     return 'ARMED (автозапуск)' 
 
