@@ -1,4 +1,4 @@
-"""Read-only Telegram presentation and diagnostics for OKX Grid Bot v0.7.15.
+"""Read-only Telegram presentation and diagnostics for OKX Grid Bot v0.7.16.
 
 Never imports a trading engine, reads API credentials, mutates bot state or calls OKX.
 """
@@ -95,6 +95,35 @@ def value(values, *keys):
     return 'н/д'
 
 
+def highest_open_filled_buy_price(root, cfg):
+    """Highest entry price of an executed BUY with a still-open TP cycle.
+
+    Read only already-persisted bot cycle state; not active unfilled BUY limits,
+    config upper_price, or SELL TP limit price. No exchange queries.
+    """
+    state = read_json(Path(root) / 'state' / 'bot04_state.json')
+    instrument = state.get('instrument')
+    if instrument and instrument != cfg.get('instrument'):
+        return 'н/д'
+    cycles = state.get('cycles')
+    if not isinstance(cycles, dict):
+        return 'н/д'
+    prices = []
+    for cycle in cycles.values():
+        if not isinstance(cycle, dict):
+            continue
+        if cycle.get('state') not in ('TP_WAIT', 'TP_PARTIAL', 'VIRTUAL_TP'):
+            continue
+        bought = number(cycle.get('filledBuy'))
+        sold = number(cycle.get('filledTP') or '0')
+        px = number(cycle.get('buyPx'))
+        if bought is None or sold is None or px is None:
+            continue
+        if bought > sold >= 0 and px > 0:
+            prices.append(px)
+    return '$' + human_amount(max(prices), 2) if prices else '—'
+
+
 def status_one(name, root, age_text='н/д'):
     root = Path(root)
     stats = read_json(root/'state/stats.json')
@@ -102,13 +131,12 @@ def status_one(name, root, age_text='н/д'):
     if not stats.get('complete') or stats.get('instrument') != cfg.get('instrument'):
         return '<b>'+html.escape(name)+'</b>\nСтатистика недоступна/не подтверждена'
     values = report_map(stats.get('report', ''))
-    ver = str(stats.get('bot_version') or cfg.get('version') or '?').lstrip('v')
+    ver = str(cfg.get('version') or stats.get('bot_version') or '?').lstrip('v')
     first = ', '.join([name, 'v'+ver, age_text])
     def row(title, val):
         return title+': '+val
     bid = fmt_source(value(values,'Текущий BID'))
-    upper = number(cfg.get('upper_price', '0'))
-    up = '$'+human_amount(upper,2) if upper is not None and upper > 0 else 'без ограничения'
+    up = highest_open_filled_buy_price(root, cfg)
     pos = value(values, 'Открытая позиция')
     # Preserve valid instrument name; remove insignificant quantity trailing zeros.
     p = re.match(r'^\s*([+−-]?[\d,.]+)\s+(\S+)\s*$', pos)
@@ -117,9 +145,30 @@ def status_one(name, root, age_text='н/д'):
     subtotal = fmt_source(value(values,'ИТОГОВЫЙ PnL'))
     sub_n = number(re.search(r'[+\-−]?\$?([\d,.]+)',subtotal.replace('−','-')).group(0).replace('$','')) if re.search(r'[+\-−]?\$?([\d,.]+)',subtotal.replace('−','-')) else None
     icon = '🟩' if sub_n is not None and sub_n >= 0 else '🟥'
-    dd = fmt_source(value(values,'МАКС. ПРОСАДКА БОТА').replace(' от 1x',''))
+    # Read the authoritative local 5s DD record, not a stale 10-minute report.
+    # No exchange requests; schema/instrument checked before displaying.
+    dd_fallback = fmt_source(value(values,'МАКС. ПРОСАДКА БОТА').replace(' от 1x',''))
+    dd_record = read_json(root/'state/bot_drawdown.json')
+    dd = dd_fallback
+    if dd_record.get('schema') == 1 and dd_record.get('instrument') == cfg.get('instrument'):
+        amount = number(dd_record.get('max_drawdown_usdt'))
+        if amount is not None and amount >= 0:
+            dd = '−$'+human_amount(amount,2)
+            capital_text = value(values,'Расчётный капитал для 1x')
+            match = re.search(r'\$?([\d,]+(?:\.\d+)?)', capital_text)
+            capital = number(match.group(1)) if match else None
+            if capital is not None and capital > 0:
+                dd += ' (−'+human_amount(amount * 100 / capital,2)+'%)'
+    # Price difference from the highest executed, still-open BUY (not active BUY limit).
+    # Telegram view only: two already-persisted values, zero OKX requests.
+    _bid_num=number(bid.replace('$',''))
+    _grid_num=number(up.replace('$',''))
+    _price_change=None
+    if _bid_num is not None and _grid_num is not None and _grid_num>0:
+        _price_change=human_amount((_bid_num/_grid_num-1)*100,2,sign=True)+'%'
     main = [
-        row('Текущий bid',bid+', верх сетки: '+up),
+        row('Верх сетки',up),
+        row('Текущий bid',bid+(' ('+_price_change+')' if _price_change is not None else '')),
         row('Закрытых циклов',value(values,'Закрытых циклов')),
         row('Грид профит',fmt_source(value(values,'GRID PROFIT'))),
         row('Торговый объём',fmt_source(value(values,'Общий объём'))),
@@ -128,7 +177,7 @@ def status_one(name, root, age_text='н/д'):
         row('Открытая позиция',pos),
         row('Floating PnL',fmt_source(value(values,'Нереализованный PnL'))),
     ]
-    parts = ['<b>'+html.escape(first)+'</b>', '<pre>'+html.escape('\n'.join(main))+'</pre>',
+    parts = ['<b>'+html.escape(first)+'</b>', '\n'.join('<code>'+html.escape(line)+'</code>' for line in main),
              '<b>'+icon+' Итоговый PnL: '+html.escape(subtotal)+' '+icon+'</b>',
              '<code>'+html.escape('Максимальная просадка бота: '+dd)+'</code>']
     if time.time()-float(stats.get('generated_at_unix') or 0)>1200:
@@ -137,15 +186,17 @@ def status_one(name, root, age_text='н/д'):
 
 
 def quantiles(values):
+    """P50/P95/P99/MAX of existing local samples; no new measurements."""
     if not values:
         return 'н/д'
-    values.sort()
+    ordered = sorted(values)
     def pct(p):
-        at=(len(values)-1)*p
-        a=int(at)
-        v=values[a]+(values[min(a+1,len(values)-1)]-values[a])*(at-a)
-        return int(round(v))
-    return f'{pct(.50)} / {pct(.95)} мс'
+        at = (len(ordered) - 1) * p
+        lower = int(at)
+        val = ordered[lower] + (ordered[min(lower + 1, len(ordered) - 1)] - ordered[lower]) * (at - lower)
+        return round(val)
+    p50, p95, p99, maximum = (pct(.50), pct(.95), pct(.99), round(ordered[-1]))
+    return f'{p50:>5} / {p95:>5} / {p99:>5} / {maximum:>5} мс'
 
 
 def jsonl(path, start_epoch):
@@ -251,8 +302,8 @@ def latency_one(name, root, hours):
     warnings=len([x for x in alerts if x.get('kind') not in ('ENGINE_BUY_BELOW_TARGET','ENGINE_BUY_RECOVERED')])
     if sample_count == 0 and not bursts and not points:
         return f'<b>⚡ {html.escape(name)}</b>\nНет измерений за период (или журнал не сохранён).'
-    lines=[f'<b>⚡ {html.escape(name)}</b>', '<pre>'+html.escape('\n'.join([
-        'Цикл:    '+quantiles(phases['loop_pass']),
+    rows=[
+        'Цикл:     '+quantiles(phases['loop_pass']),
         'FIFO:     '+quantiles(phases['positions_gate_fifo_wait']),
         'BUY POST: '+quantiles(phases['buy_post']),
         'REST:     '+quantiles(phases['http']),
@@ -267,8 +318,10 @@ def latency_one(name, root, hours):
         f'Всего: {len(bursts)}, макс. BUY fills: {mx_fill}',
         f'Минимум BUY: {str(minburst)+"/"+str(target) if minburst is not None else "н/д"}',
         f'Execution: {warnings} предупреждений',
-        f'Измерений: {sample_count:,}',
-    ]))+'</pre>']
+        f'Записей latency: {sample_count:,}',
+    ]
+    lines=[f'<b>⚡ {html.escape(name)}</b>',
+           '\n'.join('<code>'+html.escape(row)+'</code>' if row else '' for row in rows)]
     if zeros:
         lines.append('<i>0/N и длительности — по наблюдавшимся строкам journald, не непрерывный биржевой замер.</i>')
     return '\n'.join(lines)
@@ -276,9 +329,9 @@ def latency_one(name, root, hours):
 
 def latency_report(bots, hours=1):
     if hours not in (1,8):
-        return 'Допустимо: /latency или /latency 8h'
+        return 'Допустимо: /latency или /latency8h'
     blocks=['<b>⚡ OKX LATENCY | '+('60 минут' if hours==1 else '8 часов')+'</b>',
-            '<i>Время: P50 / P95, локальные наблюдения</i>']
+            '<i>Время: P50 / P95 / P99 / MAX, локальные наблюдения</i>']
     for name,root in bots:
         blocks.append(latency_one(name,root,hours))
     if not bots:
