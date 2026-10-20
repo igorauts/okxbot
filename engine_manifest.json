@@ -1,57 +1,7 @@
 {
   "schema_version": 1,
   "engines": {
-    "0.7.7": {
-      "file": "okx_bot077.py",
-      "dependencies": [
-        "okx_terminal_accounting_v077.py"
-      ]
-    },
-    "0.7.8": {
-      "file": "okx_bot078.py",
-      "dependencies": [
-        "okx_terminal_accounting_v077.py"
-      ]
-    },
-    "0.7.9": {
-      "file": "okx_bot079.py",
-      "dependencies": [
-        "okx_terminal_accounting_v077.py"
-      ]
-    },
-    "0.7.10": {
-      "file": "okx_bot0710.py",
-      "dependencies": [
-        "okx_terminal_accounting_v077.py"
-      ]
-    },
-    "0.7.11": {
-      "file": "okx_bot0711.py",
-      "dependencies": [
-        "okx_terminal_accounting_v077.py",
-        "okx_latency_v0711.py"
-      ]
-    },
-    "0.7.12": {
-      "file": "okx_bot0712.py",
-      "dependencies": [
-        "okx_terminal_accounting_v077.py",
-        "okx_latency_v0711.py",
-        "okx_positions_fifo_v0712.py",
-        "okx_fill_singleflight_v0712.py"
-      ]
-    },
-    "0.7.14": {
-      "file": "okx_bot.py",
-      "dependencies": [
-        "okx_terminal_accounting.py",
-        "okx_latency.py",
-        "okx_positions_fifo.py",
-        "okx_fill_singleflight.py",
-        "okx_emergency_gate.py"
-      ]
-    },
-    "0.7.16": {
+    "0.7.17": {
       "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
@@ -62,5 +12,5 @@
       ]
     }
   },
-  "current_version": "0.7.16"
+  "current_version": "0.7.17"
 }

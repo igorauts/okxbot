@@ -44,7 +44,7 @@ STEP, TP, QTY = (Decimal(str(CFG.get(k,0))) for k in
 TARGET, CAP, EX_CAP = (int(CFG.get(k,0)) for k in
                        ('active_buy_orders','max_grids','max_exchange_orders'))
 INTERVAL = 1.0  # main safety loop; BID updates independently via public WS
-VER = '0.7.16'
+VER = '0.7.17'
 # REST orders-pending is paginated. Exchange-attached SELLs may temporarily
 # exceed the baseline real TP count during multiple simultaneous BUY fills.
 # Exchange-attached TP can grow during a burst. Surplus is trimmed only
@@ -192,7 +192,7 @@ if (COIN not in ALLOWED or INST != f'{COIN}-USDT-SWAP'
             and BUY_CANCEL_PROTECT_STEPS==5) or EX_CAP != 500
     or D(CFG.get('buy_base_qty'))!=QTY*CONTRACT_VALUE
     or (UPPER and UPPER!=CAPITAL_REFERENCE)):
-    die('Invalid v0.7.16 BTC/ETH/SOL/NEAR/ZEC/SUI configuration. Refusing to start.')
+    die('Invalid v0.7.17 BTC/ETH/SOL/NEAR/ZEC/SUI configuration. Refusing to start.')
 
 ENV = {}
 for line in (ROOT / '.env').read_text().splitlines():
