@@ -13,7 +13,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
-from okx_runtime_paths import state_file, pnl_db, fills_db, cycles_db, observer_dir
+from okx_paths import state_file, pnl_db, fills_db, cycles_db, observer_dir
 
 LINE = '────────────────────────'
 COUNTS = re.compile(r'\bBUY\s+(\d+)/(\d+)\s*\|\s*TP\s+(\d+)\s*\(реальных\s+(\d+)\)')

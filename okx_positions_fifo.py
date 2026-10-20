@@ -1,9 +1,6 @@
-"""OKX positions/fills shared FIFO; v0.7.14 isolated candidate.
+"""Shared positions/fills FIFO for a single OKX account.
 
-Cross-process FIFO for cooperative 0.7.12 engines. Keeps legacy v0.7.11
-schema=1 calls file unchanged so 0.7.11 processes keep respecting the same
-rolling 8 / 2.10 s quota during a sequential rollout. 0.7.11 participants
-cannot join FIFO: strict fairness is only guaranteed after all migrate.
+All bot instances share the same lock inode and conservative quota window.
 
 No local fallback. Recover only corrupt/schema-1 JSON and wall-clock drift
 under the original flock inode, conservatively refilling the quota window.

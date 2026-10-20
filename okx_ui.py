@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""OKX Grid Bot v0.7.8 — read-only presentation only.
-
-Never imports trading engine, accesses .env, submits OKX HTTP requests, or
-modifies live bot state. Every unavailable metric remains unknown rather than 0.
-"""
+"""Read-only OKX bot and archive presentation."""
 from __future__ import annotations
 import json
 import re
@@ -14,9 +10,10 @@ import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from okx_runtime_paths import state_file, fills_db, observer_dir
+from okx_archive_reader import state_file, fills_db, observer_dir
 
-MANAGER_VERSION='v0.7.14'
+from okx_version import VERSION
+MANAGER_VERSION='v'+VERSION
 ENGINE_PATTERN=re.compile(r'\bokx_bot(\d{3,4})\.py\b')
 GRID_LINE=re.compile(r'BID=([0-9.]+)\b')
 TERMINAL_AGG={'FILLED','CANCELED','REJECTED','DONE','CLOSED'}
@@ -209,10 +206,9 @@ def settings(name,root,unit):
     if cfg is None:return f'Бот {name}: настройки недоступны'
     info=systemd_info(unit);ver=engine_version(info) or (('v'+str(cfg.get('version'))) if cfg.get('version') else 'не определена')
     buy=int(cfg.get('active_buy_orders',25));real_tp=int(cfg.get('real_tp_target',min(25,int(cfg.get('active_tp_orders',25)))))
-    buy_buffer = 5 if version_at_least(ver,'0.7.4') else int(cfg.get('buy_buffer_orders', 5))
-    tp_buffer = buy+5 if version_at_least(ver,'0.7.4') else int(cfg.get('tp_buffer_orders', 30))
-    protect = 5 if version_at_least(ver,'0.7.4') else (int(cfg.get('buy_cancel_protect_steps',3))
-             if ver in ('v0.7.3','v0.7.2') else None)
+    buy_buffer = 5
+    tp_buffer = buy+5
+    protect = 5
     coin=str(cfg.get('instrument','')).split('-')[0]
     qty=dec(cfg.get('order_size'));contract=dec(cfg.get('contract_value'))
     amount=(qty*contract) if qty is not None and contract is not None else None
@@ -233,7 +229,7 @@ def settings(name,root,unit):
           table_row('Шаг сетки',fmt_price(step, cfg)),table_row('Take Profit',fmt_price(tp, cfg)+ratio),
           table_row('Размер BUY',f'{amount} {coin}' if amount is not None else '—'),
           table_row('Активные BUY',f'{buy} (макс. {buy+buy_buffer})'),
-          table_row('Реальные SELL TP',f'{real_tp} (макс. {150 if version_at_least(ver,'0.7.9') else real_tp+tp_buffer})'),
+          table_row('Реальные SELL TP',f'{real_tp} (макс. {150})'),
           table_row('Защита BUY возле BID',(f'{protect_text} ({fmt_price(step*protect, cfg)})' if step is not None else protect_text)),
           table_row('Максимум гридов',cfg.get('max_grids','—')),
           '\nЦЕНОВОЙ ДИАПАЗОН','─'*54,
@@ -268,9 +264,9 @@ def status(name,root,unit):
     state=read_json(state_file(root))
     counters=read_local_orders(state)
     buy=int(cfg.get('active_buy_orders',25));real_tp=int(cfg.get('real_tp_target',min(25,int(cfg.get('active_tp_orders',25)))))
-    buy_buffer = 5 if version_at_least(ver,'0.7.4') else int(cfg.get('buy_buffer_orders', 5))
-    tp_buffer = buy+5 if version_at_least(ver,'0.7.4') else int(cfg.get('tp_buffer_orders',30))
-    max_tp=150 if version_at_least(ver,'0.7.9') else real_tp+tp_buffer
+    buy_buffer = 5
+    tp_buffer = buy+5
+    max_tp=150
     mon=read_monitor(root)
     bid=mon.get('bid') if mon and mon.get('bid') else last_local_bid(unit)
     missing=(mon.get('state') or {}).get('missing_buy') if mon else None

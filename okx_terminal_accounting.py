@@ -216,7 +216,7 @@ def _finalize_locked(engine, *, max_wait_seconds=0):
             report=format_report(result,engine.COIN,closed_at)
             payload={'schema_version':1,'complete':True,'instrument':engine.INST,
                      'mode':mode,'source_bot_version':str(state.get('version','')),
-                     'calculated_by':'0.7.7','closed_at':closed_at,
+                     'calculated_by':engine.VER,'closed_at':closed_at,
                      'terminal_state_sha256':state_sha,
                      'generated_at_unix':time.time(),'report':report,
                      'values':{key:(str(val) if isinstance(val,Decimal) else val)

@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""v0.7.12 independent, local-only execution/burst observer.
-
-Reads ONLY bot state, bot event log, and trading service journald.
-NEVER imports a trading module, reads .env, calls OKX, or writes bot state.
-"""
+"""Read-only burst/execution observer. No exchange API or trading state writes."""
 import argparse
 import json
 import os
@@ -15,9 +11,9 @@ from collections import Counter, defaultdict, deque
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from okx_runtime_paths import state_file, events_file, observer_dir
+from okx_paths import state_file, events_file, observer_dir
 
-OBSERVER_VERSION = '0.7.14'
+from okx_version import VERSION as OBSERVER_VERSION
 BID_PATTERN = re.compile(r'РЕЖИМ=[A-Z_]+\s*\|\s*BID=([0-9]+(?:\.[0-9]+)?)')
 ENGINE_COUNTS = re.compile(r'\bBUY\s+(\d+)/(\d+)\s*\|\s*TP\s+(\d+)\s*\(реальных\s+(\d+)\)')
 JOURNAL_TIME = re.compile(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2}|Z))')
@@ -130,11 +126,11 @@ class Tail:
 
 
 def _observer_supported_version(cfg, st):
-    """Allow same-version state/config >= 0.7.7, without hardcoded latest release."""
-    a=cfg.get('version');b=st.get('version')
-    if not isinstance(a,str) or a!=b or not re.fullmatch(r'\d+\.\d+\.\d+',a):
-        return False
-    return tuple(int(p) for p in a.split('.')) >= (0,7,7)
+    """Observer accepts only the current state schema, never old state upgrades."""
+    from okx_version import STATE_SCHEMA
+    return (isinstance(cfg, dict) and isinstance(st, dict)
+            and st.get('schema_version') == STATE_SCHEMA
+            and cfg.get('instrument') == st.get('instrument'))
 
 class Observer:
     def __init__(self, root, service, mode):
@@ -142,7 +138,7 @@ class Observer:
         cfg = read_json(root / 'config.json')
         st = read_json(state_file(root))
         if cfg is None or st is None or not _observer_supported_version(cfg, st):
-            raise RuntimeError('Observer requires consistent state/config version >= 0.7.7')
+            raise RuntimeError('Observer requires current state schema')
         if cfg.get('instrument') != st.get('instrument'):
             raise RuntimeError('Instrument does not match')
         self.target_buy = int(cfg['active_buy_orders'])

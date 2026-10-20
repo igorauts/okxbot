@@ -8,7 +8,7 @@ Requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in a mode-0600 env file.
 import json
 import os
 from pathlib import Path
-from okx_runtime_paths import state_file, events_file
+from okx_paths import state_file, events_file
 import re
 import subprocess
 import time

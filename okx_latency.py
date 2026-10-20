@@ -1,4 +1,4 @@
-"""v0.7.11 non-blocking, local-only latency telemetry.
+"""Non-blocking, local-only latency telemetry.
 
 No network, no order management and no secrets. Drop metrics on overload;
 trading must never wait for filesystem I/O from this component.

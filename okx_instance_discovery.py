@@ -1,4 +1,4 @@
-"""Dynamic single-account OKX bot registry discovery (v0.7.14 candidate).
+"""Dynamic single-account OKX bot registry discovery.
 
 No hardcoded instance list; read-only. Manager must refuse sensitive
 account-wide actions when any running bot is absent from its registry.

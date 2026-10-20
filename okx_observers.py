@@ -1,11 +1,7 @@
 #!/usr/bin/env python3
-"""Versionless, read-only observer unit provisioning for ONE OKX VPS account.
-
-Unit auto-starts only WHEN its trading systemd service starts, not at bot creation.
-Installing observer units never starts the trading bot. Only new v0.7.14 bots
-are provisioned; legacy instances are handled by the compatibility adapter.
-"""
+"""One observer pair per active bot; never starts trading services."""
 from __future__ import annotations
+from okx_version import VERSION
 import json
 import os
 from pathlib import Path
@@ -43,9 +39,7 @@ def validate_root(root,service,base=Path('/root/okx')):
 def supports_versionless(root, service, base=Path('/root/okx')):
     resolved,cfg=validate_root(root,service,base)
     ver=cfg['version']
-    if not re.fullmatch(r'\d+\.\d+\.\d+',ver):
-        return False
-    if tuple(int(x) for x in ver.split('.')) < (0,7,14):
+    if ver != VERSION:
         return False
     engine=resolved/'okx_bot.py'
     return engine.is_file() and not engine.is_symlink()
@@ -109,7 +103,7 @@ def provision_observers(root,service,source,systemd_dir=Path('/etc/systemd/syste
         raise RuntimeError('Root required to provision observer systemd units')
     root,cfg=validate_root(root,service,base)
     if not supports_versionless(root,service,base):
-        raise RuntimeError('Versionless observer provisioning requires v0.7.14+ engine')
+        raise RuntimeError('Observer provisioning requires the current engine')
     systemd_dir=Path(systemd_dir)
     if not systemd_dir.is_dir() or systemd_dir.is_symlink():
         raise RuntimeError('Unsafe systemd directory')

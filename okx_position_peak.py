@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from contextlib import closing
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from okx_runtime_paths import fills_db
+from okx_paths import fills_db
 from urllib.parse import quote
 
 RECORD = 'bot_max_position_v1.json'
