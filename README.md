@@ -2,7 +2,7 @@
 
 Алгоритмический LONG Grid Bot для бессрочных USDT-фьючерсов OKX.
 
-**Последний опубликованный релиз: [v0.7.17](https://github.com/igorauts/okxbot/releases/tag/v0.7.17)**
+**Последний опубликованный релиз: [v0.7.18](https://github.com/igorauts/okxbot/releases/tag/v0.7.18)**
 
 ## Возможности
 

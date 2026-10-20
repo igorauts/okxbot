@@ -238,7 +238,7 @@ def _finalize_locked(engine, *, max_wait_seconds=0):
 
 def finalize(engine, *, max_wait_seconds=0):
     """Serialize manual and periodic GET-only finalizers per retired instance."""
-    lockfile=engine.ROOT/'state'/'terminal_accounting_v077.lock'
+    lockfile=engine.ROOT/'state'/'terminal_accounting.lock'
     fd=os.open(lockfile,os.O_CREAT|os.O_RDWR,0o600)
     try:
         fcntl.flock(fd,fcntl.LOCK_EX)

@@ -14,6 +14,7 @@ import time
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from okx_runtime_paths import state_file, fills_db, observer_dir
 
 MANAGER_VERSION='v0.7.14'
 ENGINE_PATTERN=re.compile(r'\bokx_bot(\d{3,4})\.py\b')
@@ -138,7 +139,7 @@ def read_monitor(root,now=None):
     """Best-effort local v078 diagnostic summary (no OKX API)."""
     now=time.time() if now is None else now
     root=Path(root)
-    for path in (root/'diagnostics/execution_v078/summary.json',
+    for path in (observer_dir(root,'execution')/'summary.json',
                  root/'diagnostics/execution_v077/summary.json'):
         item=read_json(path)
         if not item:continue
@@ -188,7 +189,7 @@ def history_multifill(path):
     Multiple trades != necessarily an unfilled remainder. Only show when the
     full historical bootstrap flag is set and the read-only DB is available.
     """
-    dbpath=Path(path)/'state/fills_v068.sqlite'
+    dbpath=fills_db(path)
     if not dbpath.is_file():return None
     try:
         with closing(sqlite3.connect(dbpath.resolve().as_uri()+'?mode=ro',uri=True,timeout=0.25)) as db:
@@ -264,7 +265,7 @@ def status(name,root,unit):
     if mode=='HARD' or mode=='PANIC':label='ЗАВЕРШАЕТ РАБОТУ' if running else 'ЗАВЕРШЁН'
     proc,host=uptimes(info)
     started=info.get('ActiveEnterTimestamp','—') if running else '—'
-    state=read_json(Path(root)/'state/bot04_state.json')
+    state=read_json(state_file(root))
     counters=read_local_orders(state)
     buy=int(cfg.get('active_buy_orders',25));real_tp=int(cfg.get('real_tp_target',min(25,int(cfg.get('active_tp_orders',25)))))
     buy_buffer = 5 if version_at_least(ver,'0.7.4') else int(cfg.get('buy_buffer_orders', 5))

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from okx_runtime_paths import state_file
 """v0.7.8 read-only monitor switch; preserve historical pre-078 monitors."""
 import json
 import subprocess
@@ -10,7 +11,7 @@ from okx_monitor078 import monitor_unit
 
 def is_078(root):
     try:
-        st=json.loads((Path(root)/'state/bot04_state.json').read_text(encoding='utf-8'))
+        st=json.loads(state_file(root).read_text(encoding='utf-8'))
         return st.get('version') in ('0.7.7','0.7.8')
     except (ValueError,OSError):
         return False
@@ -85,7 +86,7 @@ _previous_monitor_action = monitor_action
 def _is079(root):
     try:
         st = json.loads(
-            (Path(root) / 'state/bot04_state.json').read_text()
+            state_file(root).read_text()
         )
         return st.get('version') == '0.7.9'
     except (OSError, ValueError):
@@ -166,7 +167,7 @@ _previous_monitor_action_0711 = monitor_action
 
 def _is0711(root):
     try:
-        st = json.loads((Path(root) / 'state/bot04_state.json').read_text())
+        st = json.loads(state_file(root).read_text())
         return st.get('version') == '0.7.11'
     except (OSError, ValueError, TypeError):
         return False
@@ -225,7 +226,7 @@ def _stable0712(service, root, kind):
     if kind not in ('burst','execution') or not _stable_re.fullmatch(r'okx-grid-[a-z0-9-]+',str(service)):
         raise ValueError('Invalid observer kind or trading service')
     try:
-        st=json.loads((root/'state/bot04_state.json').read_text(encoding='utf-8'))
+        st=json.loads((state_file(root)).read_text(encoding='utf-8'))
     except (OSError,ValueError,TypeError):
         return None
     if st.get('version') != '0.7.12':

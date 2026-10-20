@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from okx_runtime_paths import state_file
 """Enable per-instance LOCAL READ-ONLY v0.7.8 monitors without restarting trading bots."""
 import argparse
 import json
@@ -72,7 +73,7 @@ def main():
     if not running(service+'.service'):
         raise RuntimeError('Trading bot service not active')
     cfg=json.loads((root/'config.json').read_text())
-    st=json.loads((root/'state/bot04_state.json').read_text())
+    st=json.loads((state_file(root)).read_text())
     if st.get('version') not in ('0.7.7','0.7.8') or st.get('instrument')!=cfg.get('instrument'):
         raise RuntimeError('Invalid bot version/state/instrument for observer v0.7.8')
     info=subprocess.run(['systemctl','show',service+'.service','-p','ExecStart','--value'],

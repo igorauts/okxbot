@@ -13,6 +13,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
+from okx_runtime_paths import state_file, pnl_db, fills_db, cycles_db, observer_dir
 
 LINE = '────────────────────────'
 COUNTS = re.compile(r'\bBUY\s+(\d+)/(\d+)\s*\|\s*TP\s+(\d+)\s*\(реальных\s+(\d+)\)')
@@ -101,7 +102,7 @@ def highest_open_filled_buy_price(root, cfg):
     Read only already-persisted bot cycle state; not active unfilled BUY limits,
     config upper_price, or SELL TP limit price. No exchange queries.
     """
-    state = read_json(Path(root) / 'state' / 'bot04_state.json')
+    state = read_json(state_file(root))
     instrument = state.get('instrument')
     if instrument and instrument != cfg.get('instrument'):
         return 'н/д'
@@ -278,6 +279,8 @@ def latency_one(name, root, hours):
     root=Path(root)
     cutoff=time.time()-hours*3600
     sources=sorted(root.glob('logs/latency*.jsonl*'))
+    if (root/'logs/latency.jsonl').is_file():
+        sources=[p for p in sources if not p.name.startswith('latency_v0711') or p.name.startswith('latency.jsonl')]
     phases=defaultdict(list)
     sample_count=0
     for src in sources:
@@ -288,9 +291,9 @@ def latency_one(name, root, hours):
                 if isinstance(n,(int,float)) and math.isfinite(n) and 0<=n<1_000_000:
                     phases[phase].append(float(n))
                     sample_count+=1
-    paths = list(root.glob('diagnostics/burst_*/bursts.jsonl'))
+    paths = list([observer_dir(root,'burst')/'bursts.jsonl'] if (observer_dir(root,'burst')/'bursts.jsonl').is_file() else list(root.glob('diagnostics/burst_*/bursts.jsonl')))
     bursts=[x for p in paths for x in jsonl(p,cutoff)]
-    paths = list(root.glob('diagnostics/execution_*/alerts.jsonl'))
+    paths = list([observer_dir(root,'execution')/'alerts.jsonl'] if (observer_dir(root,'execution')/'alerts.jsonl').is_file() else list(root.glob('diagnostics/execution_*/alerts.jsonl')))
     alerts=[x for p in paths for x in jsonl(p,cutoff)]
     points=engine_count_history(name,hours,cutoff)
     mincov,episodes,zeros,zero_durations,recoveries=deficit_summary(points)
@@ -355,7 +358,7 @@ def market_ledger(root, event):
     oid=str(event.get('ordId') or '')
     if not oid or event.get('state')!='FILLED':
         return None
-    state=read_json(root/'state/bot04_state.json')
+    state=read_json(state_file(root))
     cfg=read_json(root/'config.json')
     groups=[g for g in state.get('aggregate_exits',[]) if str(g.get('ordId'))==oid]
     if len(groups)!=1 or groups[0].get('phase')!='FILLED':
@@ -371,7 +374,7 @@ def market_ledger(root, event):
         return None
     rows=[]
     try:
-        with _readonly_connect(root/'state/pnl_v068.sqlite') as db:
+        with _readonly_connect(pnl_db(root)) as db:
             for raw, in db.execute('SELECT data FROM accounted'):
                 data=json.loads(raw)
                 if oid in list(map(str,data.get('sell_ids',[]))):
@@ -387,7 +390,7 @@ def market_ledger(root, event):
     # Sum each BUY order's real fee ONCE, verified by stored exchange fills.
     buy_fees=Decimal(0)
     try:
-        with _readonly_connect(root/'state/fills_v068.sqlite') as db:
+        with _readonly_connect(fills_db(root)) as db:
             for result in rows:
                 buyid=str(result.get('buy_id') or '')
                 if not buyid:
@@ -423,7 +426,7 @@ def market_ledger(root, event):
     # cycles absent from bot04_state.json; look them up READ ONLY in the archive.
     missing={str(r.get('buy_id') or '') for r in rows} - set(by_buy)
     if missing:
-        archive=root/'state/cycles_v068.sqlite'
+        archive=cycles_db(root)
         if not archive.is_file():
             return None
         try:

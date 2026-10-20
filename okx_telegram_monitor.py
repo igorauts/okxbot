@@ -8,6 +8,7 @@ Requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in a mode-0600 env file.
 import json
 import os
 from pathlib import Path
+from okx_runtime_paths import state_file, events_file
 import re
 import subprocess
 import time
@@ -209,7 +210,7 @@ def _launch_epoch(root,values):
             possible.append(dt.replace(tzinfo=timezone.utc).timestamp())
         except ValueError:pass
     for file,key in (
-        (root/'state/bot04_state.json','started_at'),
+        (state_file(root),'started_at'),
         (root/'state/okx_stats_grid_reference_v059.json','started_at'),
     ):
         try:
@@ -339,7 +340,7 @@ def format_alert(name,obj):
 def ingest_events(api,st):
     for name,root_s in BOT_DIRS.items():
         root=Path(root_s)
-        path=root/'logs/bot04_events.jsonl'
+        path=events_file(root)
         if not path.is_file(): continue
         key=name
         start=st.setdefault('offsets',{}).get(key)
