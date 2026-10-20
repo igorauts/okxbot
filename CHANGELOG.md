@@ -1,3 +1,12 @@
+## v0.7.20 — Telegram monitoring (2026-10-20)
+
+- Telegram PANIC notifications: confirmed closure, then verified terminal PnL.
+- Partial BUY/SELL alerts: contracts, base-coin equivalent and price.
+- Partial-cycle follow-ups after final closing: LIMIT/MARKET and verified net PnL.
+- Existing daily report and Market SELL format unchanged.
+- Trading strategy, trading-engine code, orders, risk controls and schema unchanged.
+- Includes v0.7.19.1 Telegram import-path hotfix.
+
 ## v0.7.19 — 2026-10-20 — Clean-engine baseline
 
 - Removed historical state/cycle/fill migrations and old monitoring adapters.
