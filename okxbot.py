@@ -1286,7 +1286,7 @@ def interactive_main(env_file):
         titles.extend(['➕ Создать бота','📦 Архив',
                        '📱 Telegram-монитор: '+telegram_monitor_label(),
                        '⚙️   Управление аккаунтом','Выход'])
-        i=curses.wrapper(lambda s:wizard.menu(s,'OKX Grid Bot v0.7.16',titles))
+        i=curses.wrapper(lambda s:wizard.menu(s,'OKX Grid Bot v0.7.17',titles))
         if i is None or i==len(titles)-1:return
         if i<len(names):
             interactive_bot_menu(names[i]);continue
