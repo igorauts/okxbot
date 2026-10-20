@@ -8,6 +8,12 @@ Requires TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in a mode-0600 env file.
 import json
 import os
 from pathlib import Path
+import sys
+# Telegram lives in /root/okx; shared, versionless modules live separately.
+_SHARED_CODE = Path('/opt/okx-grid-live')
+if not (_SHARED_CODE / 'okx_paths.py').is_file():
+    raise RuntimeError('OKX shared runtime missing: ' + str(_SHARED_CODE))
+sys.path.insert(0, str(_SHARED_CODE))
 from okx_paths import state_file, events_file
 import re
 import subprocess
