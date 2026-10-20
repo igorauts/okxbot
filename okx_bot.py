@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""OKX BTC/ETH/SOL/NEAR/ZEC/SUI-USDT-SWAP LONG grid v0.7.12, BUY-refill priority and relaxed TP buffer.
-
-Never assumes a TP has completed without a terminal filled SELL order that can
-be linked to its attached algo client ID. Unknown states fail closed.
-"""
+"""OKX USDT linear SWAP LONG grid: verified fills and fail-closed orders."""
 import base64
 import hashlib
 import hmac
@@ -31,20 +27,21 @@ from pathlib import Path
 
 import websocket
 from okx_latency import LatencyJournal
+from okx_version import VERSION as VER, STATE_SCHEMA
+from okx_state import validate as validate_state, empty as empty_state
+from okx_contracts import base_coin, validate_spec
 
 ROOT = Path(__file__).resolve().parent
 CFG = json.loads((ROOT / 'config.json').read_text())
 DATA = ROOT / 'state' / 'bot_state.json'
 EVENTS = ROOT / 'logs' / 'bot_events.jsonl'
 INST = str(CFG.get('instrument',''))
-COIN = INST.split('-',1)[0]
-ALLOWED = {'BTC','ETH','SOL','NEAR','ZEC','SUI'}
+COIN = base_coin(INST)
 STEP, TP, QTY = (Decimal(str(CFG.get(k,0))) for k in
                  ('grid_step','take_profit','order_size'))
 TARGET, CAP, EX_CAP = (int(CFG.get(k,0)) for k in
                        ('active_buy_orders','max_grids','max_exchange_orders'))
 INTERVAL = 1.0  # main safety loop; BID updates independently via public WS
-VER = '0.7.18'
 # REST orders-pending is paginated. Exchange-attached SELLs may temporarily
 # exceed the baseline real TP count during multiple simultaneous BUY fills.
 # Exchange-attached TP can grow during a burst. Surplus is trimmed only
@@ -54,14 +51,14 @@ REAL_TP_CONFIG = int(CFG.get('active_tp_orders',0))
 # Legacy active_tp_orders=75 remains accepted for state migration, but no longer
 # controls live real TP count. New config uses 1..25 real TP baseline.
 REAL_TP_TARGET = int(CFG.get('real_tp_target', min(25, REAL_TP_CONFIG)))
-# v0.7.4: independent user settings are base BUY (1..25) and base TP (1..25).
+# independent user settings are base BUY (1..25) and base TP (1..25).
 # All safety margins are FIXED constants, not user-editable config settings.
-# Ignore legacy v0.7.3 buffer/protection keys; never inherit unsafe overrides.
+# Ignore legacy buffer/protection keys; never inherit unsafe overrides.
 BUY_BUFFER = 5
 BUY_MAX = TARGET + BUY_BUFFER
 BUY_CANCEL_PROTECT_STEPS = 5
 REAL_TP_RESERVE = TARGET + BUY_BUFFER
-REAL_TP_MAX = 150  # v0.7.9: hard TP safety limit, NOT a cleanup threshold
+REAL_TP_MAX = 150  # hard TP safety limit, NOT a cleanup threshold
 TP_BUFFER_COOLDOWN = 1.5
 TP_BUFFER_CANCEL_INTERVAL = 0.1
 BUY_BUFFER_COOLDOWN = 1.5
@@ -71,7 +68,6 @@ ESCAPE_COALESCE_SEC = 0.15
 REDUCE_ONLY_HARD_CAP = 150
 TP_ACTIONS_PER_PASS = 5  # normal TP recovery; burst cleanup uses 1
 TP_JOURNAL = ROOT / 'logs' / 'tp_transitions.jsonl'
-PNL_DATA = ROOT / 'state' / 'pnl.json'
 PNL_DB = ROOT / 'state' / 'pnl.sqlite'
 CONTRACT_VALUE = Decimal(str(CFG.get('contract_value',0)))
 PRICE_STEP = Decimal(str(CFG.get('tick_size',0)))
@@ -98,7 +94,7 @@ if not (30 <= PARTIAL_AGE <= 3600 and 1 <= PARTIAL_STEPS <= 100):
     raise RuntimeError('Invalid partial BUY cleanup thresholds')
 
 
-# v0.7.0-dev1 instrumentation: opt-in, no trading-control changes.
+# dev1 instrumentation: opt-in, no trading-control changes.
 # Enable with OKX_RECON_PROFILE=1, recording to logs/reconcile_profile.jsonl.
 # Samples are diagnostic only, intentionally not fsynced to avoid slowing trading.
 _PERF_RECON_ENABLED = False  # Set after LIVE guard evaluation, below.
@@ -176,7 +172,7 @@ def fmt(x):
 def D(v):
     return Decimal(str(v or '0'))
 
-if (COIN not in ALLOWED or INST != f'{COIN}-USDT-SWAP'
+if (INST != f'{COIN}-USDT-SWAP'
     or CFG.get('direction') != 'long' or CFG.get('td_mode') != 'cross'
     or CFG.get('buy_type') != 'post_only' or CFG.get('tp_type') != 'attached_limit'
     or STEP<=0 or TP<=0 or QTY<=0 or CONTRACT_VALUE<=0 or PRICE_STEP<=0
@@ -192,7 +188,7 @@ if (COIN not in ALLOWED or INST != f'{COIN}-USDT-SWAP'
             and BUY_CANCEL_PROTECT_STEPS==5) or EX_CAP != 500
     or D(CFG.get('buy_base_qty'))!=QTY*CONTRACT_VALUE
     or (UPPER and UPPER!=CAPITAL_REFERENCE)):
-    die('Invalid v0.7.18 BTC/ETH/SOL/NEAR/ZEC/SUI configuration. Refusing to start.')
+    die('Invalid USDT linear SWAP configuration. Refusing to start.')
 
 ENV = {}
 for line in (ROOT / '.env').read_text().splitlines():
@@ -207,20 +203,20 @@ if ENV.get('OKX_DEMO','0') != '0':
 # Intentional separate live activation guard. Setting config alone is NOT enough.
 # Audit mode may be used even when live_trading=true in the config.
 # It cannot submit or cancel orders: API.req prevents non-GET methods.
-STATS_ONLY = os.getenv('OKX_BOT05_STATS') == 'ONCE'
+STATS_ONLY = os.getenv('OKX_GRID_STATS') == 'ONCE'
 TERMINAL_ONLY = '--terminal-finalize' in sys.argv
-AUDIT = os.getenv('OKX_BOT04_AUDIT') == 'READ_ONLY' or STATS_ONLY or TERMINAL_ONLY
+AUDIT = os.getenv('OKX_GRID_AUDIT') == 'READ_ONLY' or STATS_ONLY or TERMINAL_ONLY
 LIVE = (not AUDIT and CFG.get('live_trading') is True
-        and os.getenv('OKX_BOT04_LIVE') == 'CONFIRM')
-FULL = os.getenv('OKX_BOT04_PROBE') == 'FULL_25'
+        and os.getenv('OKX_GRID_LIVE') == 'CONFIRM')
+FULL = os.getenv('OKX_GRID_PROBE') == 'FULL_25'
 if CFG.get('live_trading') is True and not LIVE and not AUDIT:
-    die('Live config requires explicit OKX_BOT04_LIVE=CONFIRM')
+    die('Live config requires explicit OKX_GRID_LIVE=CONFIRM')
 if LIVE and not FULL:
-    die('LIVE requires OKX_BOT04_PROBE=FULL_25 confirmation.')
+    die('LIVE requires OKX_GRID_PROBE=FULL_25 confirmation.')
 
 
 
-# v0.7.11: local asynchronous latency journal, enabled for LIVE by default.
+# local asynchronous latency journal, enabled for LIVE by default.
 # Disable with OKX_LATENCY_PROFILE=0. Never writes to trading state/SQLite.
 _PERF_RECON_ENABLED = LIVE and os.getenv('OKX_RECON_PROFILE', '1') != '0'
 LATENCY = LatencyJournal(ROOT / 'logs' / 'latency.jsonl',
@@ -316,7 +312,7 @@ def log(event, **details):
     fd=os.open(EVENTS,os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)
     with os.fdopen(fd,'a') as f: f.write(json.dumps(record,ensure_ascii=False)+'\n')
     t = record['ts'][11:19]
-    # Full structured events remain in logs/bot04_events.jsonl, even when
+    # Full structured events remain in logs/bot_events.jsonl, even when
     # we suppress redundant terminal messages from the WebSocket stream.
     if event == 'WS_ORDER':
         return
@@ -534,277 +530,25 @@ from okx_positions_fifo import FillsHistoryFIFO
 FILL_HISTORY_GATE=FillsHistoryFIFO(Path(ENV.get('OKX_FILL_HISTORY_GATE_PATH',
                                   '/root/okx/.account_fills_history_gate_v0712.json')))
 
-class API:
-    """One verified TLS keep-alive connection PER THREAD, never shared across threads.
-
-    Network errors on GET are safe to retry. POST/DELETE always have ONE
-    network attempt, with durable intent and next-pass clOrdId reconciliation.
-    """
-    _local=threading.local()
-
-    def _connect(self):
-        conn=getattr(self._local,'conn',None)
-        if conn is None:
-            conn=http.client.HTTPSConnection('www.okx.com',timeout=12,
-                    context=ssl.create_default_context())
-            self._local.conn=conn
-        return conn
-
-    def _close(self):
-        conn=getattr(self._local,'conn',None)
-        self._local.conn=None
-        if conn is not None:
-            try:conn.close()
-            except Exception:pass
-
-    def _http(self, method,path,payload,headers):
-        conn=self._connect()
-        try:
-            conn.request(method,path,body=payload.encode() if payload else None,
-                         headers=headers)
-            response=conn.getresponse()
-            raw=response.read()
-            status=response.status
-            # Do not reuse a connection the server decided to close.
-            if response.will_close:self._close()
-            try:result=json.loads(raw.decode('utf-8'))
-            except (ValueError,UnicodeError):
-                if status>=500:raise ExchangeTemporary(f'HTTP {status} invalid JSON')
-                raise ExchangeUnresolved(f'Unexpected OKX response HTTP {status}')
-            return status,result
-        except (OSError,TimeoutError,ConnectionError,http.client.HTTPException,
-                ssl.SSLError):
-            self._close()
-            raise
-
-    def req(self, method, path, params=None, body=None, *, background=False, exp_time_ms=None):
-        if method != 'GET' and not LIVE:
-            die('Write operations disabled in DRY RUN')
-        if method != 'GET':
-            # Trading intents must already be durable; flush any older facts too.
-            _flush_confirmed_facts()
-        if params:path += '?' + urllib.parse.urlencode(params)
-        route=path.split('?',1)[0]
-        if exp_time_ms is not None:
-            if method!='POST' or route!='/api/v5/trade/order' or not isinstance(exp_time_ms,int):
-                raise ValueError('expTime allowed only for an order placement')
-            if int(time.time()*1000)>=exp_time_ms:
-                raise OrderExpiredBeforeSend('Order deadline expired locally before HTTP send')
-        payload=json.dumps(body,separators=(',',':')) if body is not None else ''
-        attempts=4 if method=='GET' else 1
-        for attempt in range(attempts):
-            p=getattr(_PERF_LOCAL,'current',None) if globals().get('_PERF_RECON_ENABLED',False) else None
-            gate_start=time.perf_counter_ns()
-            urgent=(p.run('rest_governor',REST_GATE.begin,method,route,background=background)
-                    if p is not None else REST_GATE.begin(method,route,background=background))
-            latency_ms('rest_gate',gate_start,method=method,route=route)
-            limited=False
-            try:
-                if method=='GET' and route=='/api/v5/trade/fills-history':
-                    history_gate_start=time.perf_counter_ns()
-                    try:
-                        FILL_HISTORY_GATE.take()
-                    except GateUnavailable as exc:
-                        raise ExchangeTemporary('Account fills history gate unavailable') from exc
-                    finally:
-                        latency_ms('fills_history_shared_wait',
-                                   history_gate_start,method=method,route=route)
-                if method=='GET' and route=='/api/v5/account/positions':
-                    position_gate_start=time.perf_counter_ns()
-                    try:
-                        ACCOUNT_POSITIONS_GATE.take()
-                    finally:
-                        latency_ms('positions_gate',position_gate_start,method=method,route=route)
-                ts=datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00','Z')
-                sig=base64.b64encode(hmac.new(ENV['OKX_API_SECRET'].encode(),
-                    (ts+method+path+payload).encode(),hashlib.sha256).digest()).decode()
-                headers={'User-Agent':'okxbot/0.7.6','Content-Type':'application/json',
-                    'OK-ACCESS-KEY':ENV['OKX_API_KEY'],'OK-ACCESS-SIGN':sig,
-                    'OK-ACCESS-TIMESTAMP':ts,'OK-ACCESS-PASSPHRASE':ENV['OKX_API_PASSPHRASE']}
-                if exp_time_ms is not None:headers['expTime']=str(exp_time_ms)
-                try:
-                    p=getattr(_PERF_LOCAL,'current',None) if globals().get('_PERF_RECON_ENABLED',False) else None
-                    http_start=time.perf_counter_ns()
-                    try:
-                        if p is not None:
-                            status,result=p.run('rest_http',self._http,method,path,payload,headers)
-                        else:
-                            status,result=self._http(method,path,payload,headers)
-                    finally:
-                        latency_ms('http',http_start,method=method,route=route)
-                except ExchangeTemporary:
-                    if method!='GET':raise ExchangeUnresolved('Uncertain POST response; saved intent must reconcile')
-                    if attempt==attempts-1:raise
-                    REST_GATE.throttle(route,min(12,2*(2**attempt)))
-                    continue
-                except (OSError,TimeoutError,ConnectionError,http.client.HTTPException,
-                        ssl.SSLError) as exc:
-                    if method!='GET':
-                        raise ExchangeUnresolved(
-                            f'UNKNOWN {method} OUTCOME: {type(exc).__name__}; reconcile stored intent') from exc
-                    if attempt==attempts-1:
-                        raise ExchangeTemporary(f'GET {route} transport unavailable: {type(exc).__name__}') from exc
-                    self._close()
-                    REST_GATE.throttle(route,min(12,2*(2**attempt)))
-                    continue
-                if status==429 or status>=500 or result.get('code')=='50011':
-                    limited=True
-                elif status>=400:
-                    raise ExchangeUnresolved(f'HTTP {status} {str(result.get("msg",""))[:120]}')
-                elif result.get('code')=='51603' and method=='GET' and route=='/api/v5/trade/order':
-                    return []
-                elif (method=='POST' and route=='/api/v5/trade/order'
-                      and isinstance(result.get('data'),list)
-                      and len(result['data'])==1
-                      and isinstance(result['data'][0],dict)
-                      and str(result['data'][0].get('sCode','')) not in ('','0')):
-                    # Definitive, explicit per-order rejection. Never classify a
-                    # 5xx/429/transport timeout as a rejection. Check identity.
-                    row=result['data'][0]
-                    if (not body or not body.get('clOrdId') or
-                        row.get('clOrdId')!=str(body['clOrdId']) or
-                        row.get('ordId') not in (None, '')):
-                        raise ExchangeUnresolved('Contradictory order rejection identity/ordId')
-                    return result['data']
-                elif (method=='POST' and route=='/api/v5/trade/cancel-order'
-                      and isinstance(result.get('data'),list)
-                      and len(result['data'])==1
-                      and isinstance(result['data'][0],dict)
-                      and str(result['data'][0].get('sCode','')) not in ('','0')):
-                    row=result['data'][0]
-                    if (not body or not body.get('ordId') or
-                        str(row.get('ordId'))!=str(body['ordId'])):
-                        raise ExchangeUnresolved('Cancel rejection order ID mismatch')
-                    return result['data']
-                elif result.get('code')!='0':
-                    raise ExchangeUnresolved(f'OKX API {result.get("code")}: {str(result.get("msg"))[:120]}')
-                else:
-                    return result.get('data',[])
-            finally:
-                REST_GATE.end(urgent)
-            if limited:
-                REST_GATE.throttle(route,min(20,2*(2**attempt)))
-                if method!='GET':
-                    raise ExchangeUnresolved(f'Uncertain {method} response HTTP 5xx/429; durable intent remains')
-                if attempt==attempts-1:
-                    raise RateLimitedError(f'GET {route} unavailable HTTP 5xx/429 after retries')
-        raise ExchangeTemporary(f'GET {route} retry exhausted')
-
-    def server_time_ms(self):
-        rows=self.req('GET', '/api/v5/public/time')
-        if len(rows)!=1 or not str(rows[0].get('ts') or '').isdigit():
-            raise ExchangeTemporary('OKX server time unavailable')
-        return int(rows[0]['ts'])
-
-    def pending(self):
-        # Return ALL relevant orders; fail closed if pagination looks strange.
-        result=[]; after=None
-        for _ in range(8):
-            p={'instType':'SWAP','instId':INST,'limit':'100'}
-            if after: p['after']=after
-            page=self.req('GET','/api/v5/trade/orders-pending',p)
-            result.extend(page)
-            if len(page)<100: return result
-            nxt=page[-1].get('ordId')
-            if not nxt or nxt==after: die('Cannot paginate open orders')
-            after=nxt
-        die('Pending-order pagination overflow')
-
-    def order(self, oid='', cid=''):
-        p={'instId':INST}
-        if oid: p['ordId']=oid
-        else: p['clOrdId']=cid
-        data=self.req('GET','/api/v5/trade/order',p)
-        return data[0] if data else None
-
-    def positions(self):
-        return self.req('GET','/api/v5/account/positions',{'instId':INST})
-
-    def ticker(self):
-        data=self.req('GET','/api/v5/market/ticker',{'instId':INST})
-        if not data: die('Ticker missing')
-        return D(data[0]['bidPx'])
-
-    def maker_fee(self):
-        # OKX uses NEGATIVE values for commissions; POSITIVE for rebates.
-        # For SWAP contracts fees are scoped by instFamily, not instId.
-        params={'instType':'SWAP','instFamily':f'{COIN}-USDT'}
-        rows=self.req('GET','/api/v5/account/trade-fee',params)
-        if len(rows)!=1:die('Cannot read account VIP fees')
-        groups=rows[0].get('feeGroup') or []
-        group_id=str(CFG.get('fee_group_id') or '')
-        if group_id and groups:
-            matches=[g for g in groups if str(g.get('groupId'))==group_id]
-            if len(matches)!=1:die('Account fee group has changed')
-            tier=matches[0]
-        elif len(groups)==1:
-            tier=groups[0]
-        elif not groups:
-            tier=rows[0]
-        else:die('Ambiguous OKX VIP fee group')
-        raw=tier.get('maker')
-        if raw in (None,''):die('Missing maker commission')
-        rate=-D(raw)
-        if rate>=1:die('Invalid maker commission')
-        return max(Decimal(0),rate)
-
-    def instrument(self):
-        data=self.req('GET','/api/v5/public/instruments',{'instType':'SWAP','instId':INST})
-        if len(data)!=1: die('Instrument missing')
-        v=data[0]
-        if (v.get('state')!='live' or v.get('ctType')!='linear'
-            or v.get('ctValCcy')!=COIN or D(v.get('ctVal'))!=CONTRACT_VALUE
-            or D(v.get('tickSz'))!=PRICE_STEP or STEP%PRICE_STEP or TP%PRICE_STEP
-            or QTY<D(v['minSz']) or QTY%D(v['lotSz'])
-            or D(v['lotSz'])!=CONTRACT_LOT or D(v['minSz'])!=CONTRACT_MIN
-            or QTY*CONTRACT_VALUE!=D(CFG['buy_base_qty'])):
-            die('Instrument specs changed/incompatible; STOP before writes')
-        return v
-
-    def history(self):
-        # Only use this for strong, exact TP ID correlation, never price matching.
-        return self.req('GET','/api/v5/trade/orders-history',{'instType':'SWAP','instId':INST,'limit':'100'})
-
-    def fills_by_order(self, order_id, expected_qty=None):
-        """Actual fills by exact ordId; use durable verified records if complete.
-
-        A BUY may remain open more than 90d and its fill disappear from OKX
-        history before the TP closes. The locally persisted row stays valid.
-        """
-        if expected_qty is not None and 'FILL_STORE' in globals() and FILL_STORE.initialized():
-            saved=FILL_STORE.get_rows([order_id])
-            if sum((D(f['fillSz']) for f in saved),Decimal(0)) == D(expected_qty):
-                return saved
-        def fetch_one():
-            result=self.req('GET','/api/v5/trade/fills-history',{
-                'instType':'SWAP','instId':INST,'ordId':order_id,'limit':'100'
-            },background=True)
-            if len(result)>=100:
-                raise RuntimeError('100+ fills for one order; detailed pagination required')
-            if any(str(f.get('ordId'))!=str(order_id) or f.get('instId')!=INST
-                   for f in result):
-                raise RuntimeError('Order fill filter mismatch; financial record unsafe')
-            if 'FILL_STORE' in globals():FILL_STORE.insert(result)
-            return result
-        result=FILL_FETCH_FLIGHT.run(order_id, fetch_one)
-        # A waiting worker uses durable rows rather than another HTTP GET.
-        if 'FILL_STORE' in globals():
-            stored=FILL_STORE.get_rows([order_id])
-            if (expected_qty is None or
-                    sum((D(f['fillSz']) for f in stored),Decimal(0))==D(expected_qty)):
-                return stored
-        return result
-
-    def algo(self,cid):
-        # The attached algo is only registered after parent BUY fully fills.
-        data=self.req('GET','/api/v5/trade/order-algo',{'algoClOrdId':cid})
-        return data[0] if data else None
-
 from okx_fill_singleflight import FillSingleFlight
+from okx_api import build_api
 FILL_FETCH_FLIGHT=FillSingleFlight()
+API=build_api(
+    ENV=ENV, CFG=CFG, COIN=COIN, INST=INST, LIVE=LIVE, VER=VER, D=D, die=die,
+    CONTRACT_LOT=CONTRACT_LOT, CONTRACT_MIN=CONTRACT_MIN,
+    CONTRACT_VALUE=CONTRACT_VALUE, PRICE_STEP=PRICE_STEP,
+    QTY=QTY, STEP=STEP, TP=TP, ExchangeTemporary=ExchangeTemporary,
+    ExchangeUnresolved=ExchangeUnresolved, OrderExpiredBeforeSend=OrderExpiredBeforeSend,
+    RateLimitedError=RateLimitedError, GateUnavailable=GateUnavailable,
+    REST_GATE=REST_GATE, FILL_HISTORY_GATE=FILL_HISTORY_GATE,
+    ACCOUNT_POSITIONS_GATE=ACCOUNT_POSITIONS_GATE,
+    FILL_FETCH_FLIGHT=FILL_FETCH_FLIGHT, _PERF_LOCAL=_PERF_LOCAL,
+    _PERF_RECON_ENABLED=_PERF_RECON_ENABLED,
+    _flush_confirmed_facts=lambda: _flush_confirmed_facts(),
+    latency_ms=latency_ms, fill_store=lambda: globals().get('FILL_STORE'))
 A=API()
 
-# v0.6.9 account-wide safety latch. Each bot trading the SAME margin account
+# account-wide safety latch. Each bot trading the SAME margin account
 # MUST use the SAME persistent absolute path. Default assumes a shared VPS.
 ACCOUNT_SOFT_STOP = Path(ENV.get('OKX_ACCOUNT_SOFT_STOP_PATH',
                                    '/var/lib/okxbot/account_soft_stop.json'))
@@ -955,20 +699,12 @@ class FillStore:
             return bool(row and row[0]=='1')
 
     def bootstrap(self,st):
-        # Mandatory one-off full-history migration. Do not start LIVE with an
-        # incomplete lifetime history, as old fills may soon leave OKX's 90d API.
+        # Fresh engine: an uninitialized fill archive must not accompany filled cycles.
         if self.initialized():return
-        rows=_legacy_exchange_fills(st)
-        d=full_stats_snapshot(st,rows,Decimal('1'),CONTRACT_VALUE)
-        if not d['complete']:
-            raise ExchangeUnresolved('Cannot bootstrap complete fill archive: '+str(d['missing']))
+        if expected_filled_orders(st):
+            raise ExchangeUnresolved('Fill archive missing for populated state')
         with self.lock,self._managed_conn() as db:
-            for f in rows:
-                oid,bill=self._validate(f)
-                db.execute('INSERT OR IGNORE INTO fills VALUES (?,?,?,?)',
-                    (oid,bill,str(f['fillSz']),json.dumps(f,ensure_ascii=False,separators=(',',':'))))
             db.execute('INSERT OR REPLACE INTO meta VALUES (?,?)',('complete_bootstrap','1'))
-        log('FILL_ARCHIVE_BOOTSTRAPPED',rows=len(rows),db=str(FILL_DB))
 
     def get_rows(self,order_ids):
         order_ids=[str(x) for x in order_ids if x]
@@ -1378,9 +1114,6 @@ def validate_buy_buffer(active):
         die('More active BUYs than buffer maximum: '+str(len(active))+'>'+str(BUY_MAX))
 
 
-def level_free(state,price):
-    key=fmt(price)
-    return key not in state['cycles'] or state['cycles'][key]['state'] in ('CLOSED','CANCELED','EXITED')
 
 def money(value, places=6):
     x=Decimal(str(value)).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
@@ -1396,304 +1129,30 @@ def bold(value):
     return ('\033[1m'+value+'\033[0m') if sys.stdout.isatty() else value
 
 
-class PnLLedger:
-    """Non-trading cycle PnL ledger. All entries sourced from real OKX fills.
+from okx_strategy import build_grid_rules
+(level_free, tp_quantity_placeable, required_safe_tp, grid_top,
+ desired_buy_levels, missing_buy_levels_for_addition,
+ plan_buy_buffer_cleanup, tp_buffer_candidates) = build_grid_rules(
+    STEP=STEP, TARGET=TARGET, PRICE_STEP=PRICE_STEP,
+    BUY_CANCEL_PROTECT_STEPS=BUY_CANCEL_PROTECT_STEPS,
+    REAL_TP_TARGET=REAL_TP_TARGET, CONTRACT_MIN=CONTRACT_MIN,
+    CONTRACT_LOT=CONTRACT_LOT, D=D, fmt=fmt, die=die,
+    ExchangeUnresolved=ExchangeUnresolved)
 
-    Separate state file prevents a stats bug from mutating trading positions.
-    Stored cycle keys are unique BUY+TP IDs; rearming a grid never double-counts.
-    """
-    def __init__(self, contract_value):
-        self.contract_value=contract_value
-        self.lock=threading.RLock()
-        if self.contract_value<=0: die('Invalid contract size for profit accounting')
-        self.tried={}
-        self.retry_after={}
-        self.initial_ids=set()
-        # v0.6.7 JSON is kept READ-ONLY forever. Import into SQLite only once.
-        # New closed cycles use one durable INSERT instead of rewriting all PnL.
-        self._initialize()
-        self.recent_total=self.total()
+from okx_accounting import build_pnl_ledger
+PnLLedger = build_pnl_ledger(
+    D=D, STEP=STEP, A=A, RateLimitedError=RateLimitedError,
+    allocated_market_fills=allocated_market_fills,
+    fmt_accounted_price=fmt_accounted_price, money=money,
+    money_usdt=money_usdt, bold=bold, die=die, PNL_DB=PNL_DB)
 
-    def _conn(self):
-        PNL_DB.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
-        db=sqlite3.connect(str(PNL_DB),timeout=20)
-        db.execute('PRAGMA journal_mode=WAL')
-        db.execute('PRAGMA synchronous=FULL')
-        db.execute('CREATE TABLE IF NOT EXISTS accounted ('
-                   'id TEXT PRIMARY KEY, kind TEXT NOT NULL, net TEXT NOT NULL, '
-                   'data TEXT NOT NULL)')
-        db.execute('CREATE TABLE IF NOT EXISTS meta (name TEXT PRIMARY KEY, value TEXT NOT NULL)')
-        os.chmod(PNL_DB,0o600)
-        return db
-
-    @contextlib.contextmanager
-    def _managed_conn(self):
-        db=self._conn()
-        try:
-            with db:yield db
-        finally:db.close()
-
-    def _initialize(self):
-        with self.lock,self._managed_conn() as db:
-            migrated=db.execute('SELECT value FROM meta WHERE name="migrated"').fetchone()
-            if not migrated:
-                old=json.loads(PNL_DATA.read_text()) if PNL_DATA.exists() else {
-                    'schema':1,'instrument':INST,'accounted':{}}
-                if old.get('schema')!=1 or old.get('instrument')!=INST:
-                    raise RuntimeError('PnL ledger version/instrument mismatch')
-                for key,result in old['accounted'].items():
-                    db.execute('INSERT OR IGNORE INTO accounted VALUES (?,?,?,?)',
-                        (key,result.get('kind','CLOSED'),str(result['net']),
-                         json.dumps(result,ensure_ascii=False)))
-                db.execute('INSERT INTO meta VALUES (?,?)',('migrated','1'))
-            self.closed_sum=Decimal(0)
-            self.all_sum=Decimal(0)
-            self.known_ids=set()
-            for key,kind,net in db.execute('SELECT id,kind,net FROM accounted'):
-                self.known_ids.add(key)
-                amount=D(net)
-                self.all_sum+=amount
-                if kind=='CLOSED':self.closed_sum+=amount
-
-    def total(self):
-        with self.lock:return self.closed_sum
-
-    def total_all(self):
-        with self.lock:return self.all_sum
-
-    def recorded(self, cycle):
-        key=self.identity(cycle)
-        if not key:return False
-        with self.lock:return key in self.known_ids
-
-    @staticmethod
-    def identity(cycle):
-        if not cycle.get('ordId'):return None
-        legs=[r for r in cycle.get('tpOrders',[]) if D(r.get('filled'))>0]
-        if len(cycle.get('tpOrders',[]))>1:
-            # Stable across TP replacement; distinct from pre-v0.5.7 ledger keys.
-            return 'chain:'+str(cycle['ordId'])
-        if not legs and not cycle.get('tpOrdId'):return None
-        oid=(legs[0]['ordId'] if legs else cycle.get('tpOrdId'))
-        return str(cycle['ordId'])+':'+str(oid)
-
-    def all_cycles(self, st):
-        # Includes previously replaced grid levels: completed cycles are
-        # archived by place() so their realized PnL must never disappear.
-        previous=list(st.get('archived_cycles',[]))
-        current=list(st['cycles'].values())
-        return [x for x in previous+current if x.get('state') in ('CLOSED','EXITED')]
-
-    @staticmethod
-    def aggregate(fills, oid, size, side):
-        if not fills: raise ValueError('Fills not yet available')
-        q=Decimal('0'); amt=Decimal('0'); fee=Decimal('0'); liquidity=set(); ids=set()
-        for f in fills:
-            if str(f.get('ordId'))!=str(oid): raise ValueError('Unexpected fill order ID')
-            if f.get('side') != side: raise ValueError('Wrong side for order fills')
-            tid=f.get('tradeId')
-            if not tid or tid in ids: raise ValueError('Missing/duplicate tradeId')
-            ids.add(tid)
-            fs=D(f.get('fillSz')); fp=D(f.get('fillPx'))
-            if fs<=0 or fp<=0: raise ValueError('Invalid fill price or size')
-            if f.get('feeCcy')!='USDT':
-                raise ValueError('Commission currency not USDT; cannot calculate USDT net')
-            if f.get('fee') in (None,''): raise ValueError('Missing actual exchange fee')
-            if f.get('execType') not in ('M','T'):
-                raise ValueError('Missing Maker/Taker execution type')
-            q+=fs; amt+=fs*fp; fee+=D(f['fee']);liquidity.add(f['execType'])
-        if q!=size: raise ValueError(f'Fill volume differs: {q} != {size}')
-        return {'qty':q,'avg_px':amt/q,'fee':fee,'liquidity':'/'.join(sorted(liquidity))}
-
-    def compute(self, cycle, buy_fills, sell_fills):
-        amount=D(cycle.get('filledBuy'))
-        if amount<=0 or amount!=D(cycle.get('filledTP')):
-            raise ValueError('Incomplete cycle cannot have realized profit')
-        b=self.aggregate(buy_fills,cycle['ordId'],amount,'buy')
-        grouped={}
-        for f in sell_fills:
-            grouped.setdefault(str(f.get('ordId')),[]).append(f)
-        legs=[r for r in cycle.get('tpOrders',[])
-              if D(r.get('filled'))>0]
-        if not legs:
-            legs=[{'ordId':cycle['tpOrdId'],'filled':str(amount)}]
-        sold_qty=Decimal(0); sold_amt=Decimal(0); sell_fee=Decimal(0); liq=set()
-        for leg in legs:
-            oid=leg['ordId']; qty=D(leg['filled'])
-            rows=grouped.get(str(oid),[])
-            if leg.get('source')=='aggregate_exit':
-                rows=allocated_market_fills(rows,leg['aggregatePlan'],cycle['cycleId'])
-            x=self.aggregate(rows,oid,qty,'sell')
-            sold_qty+=qty;sold_amt+=x['avg_px']*qty
-            sell_fee+=x['fee'];liq.update(x['liquidity'].split('/'))
-        if sold_qty!=amount:
-            raise ValueError('SELL chain volume mismatch')
-        sell_avg=sold_amt/sold_qty
-        base_qty=amount*self.contract_value
-        gross=(sell_avg-b['avg_px'])*base_qty
-        plan=(D(cycle['tpPx'])-D(cycle['buyPx']))*base_qty
-        execution=gross-plan
-        fees=b['fee']+sell_fee
-        net=gross+fees
-        return {'buy_id':cycle['ordId'],'sell_id':legs[-1]['ordId'],
-                'sell_ids':[x['ordId'] for x in legs],
-                'buy_px':str(b['avg_px']),'sell_px':str(sell_avg),
-                'qty_contracts':str(amount),'qty_base':str(base_qty),
-                'gross':str(gross),'planned_gross':str(plan),
-                'execution':str(execution),'fees':str(fees),'net':str(net),
-                'buy_liquidity':b['liquidity'],'sell_liquidity':'/'.join(sorted(liq)),
-                'kind':cycle.get('state','CLOSED'),
-                'accounted_at':datetime.now(timezone.utc).isoformat()}
-
-    def print_closed(self, result, historical=False):
-        buy=D(result['buy_px']); sell=D(result['sell_px'])
-        steps=(sell-buy)/STEP
-        total=self.total()
-        earned=bold(money_usdt(result['net']))
-        overall=bold(money_usdt(total))
-        note=' | история' if historical else ''
-        buy_s=fmt_accounted_price(buy); sell_s=fmt_accounted_price(sell)
-        if result.get('kind')=='EXITED':
-            print(f"🧹 PARTIAL MARKET EXIT {buy_s} → {sell_s} | "
-                  f"realized {money_usdt(result['net'])} | not a GRID TP",flush=True)
-            return
-        print(f"💰 TP {buy_s} → {sell_s} | {money(steps,2)} шага "
-              f"| в копилку {earned} | всего {overall}{note}",flush=True)
-        print(f"   факт {money(result['gross'])} "
-              f"(план {money(result['planned_gross'])}, "
-              f"execution {money(result['execution'])}, "
-              f"комиссия {money(result['fees'])}) "
-              f"| {result['buy_liquidity']}/{result['sell_liquidity']}",flush=True)
-
-    def commit_completed(self, cycle, result, historical=False):
-        """Durable idempotent INSERT of verified exchange fills and exact net."""
-        key=self.identity(cycle)
-        if not key:raise ValueError('Cannot account a closed cycle without order identity')
-        with self.lock:
-            if key in self.known_ids:return False
-            kind=result.get('kind','CLOSED')
-            with self._managed_conn() as db:
-                db.execute('INSERT INTO accounted VALUES (?,?,?,?)',
-                    (key,kind,str(result['net']),json.dumps(result,ensure_ascii=False)))
-            # Caches are changed ONLY after the SQL transaction is committed.
-            self.known_ids.add(key)
-            self.all_sum+=D(result['net'])
-            if kind=='CLOSED':self.closed_sum+=D(result['net'])
-            self.tried.pop(key,None)
-            self.retry_after.pop(key,None)
-            self.print_closed(result,historical=historical)
-            return True
-
-    def ingest_history(self, st, fills):
-        """Re-use fills already fetched by the full statistics report.
-
-        No extra REST traffic. Only CLOSE cycles with complete matched BUY/TP
-        fills are committed; never infer a missing commission or quantity.
-        """
-        indexed={}
-        for f in fills:
-            indexed.setdefault(str(f.get('ordId')),[]).append(f)
-        recovered=0
-        for c in self.all_cycles(st):
-            if not self.identity(c) or self.recorded(c):continue
-            try:
-                sell_ids=[r['ordId'] for r in c.get('tpOrders',[]) if D(r.get('filled'))>0]
-                if not sell_ids:sell_ids=[c['tpOrdId']]
-                all_sell=[f for oid in sell_ids for f in indexed.get(str(oid),[])]
-                result=self.compute(c,indexed.get(str(c['ordId']),[]),all_sell)
-            except ValueError:
-                continue  # Late fills: leave for normal worker retry.
-            if self.commit_completed(c,result,historical=True):
-                recovered+=1
-        return recovered
-
-    def work(self, st, max_cycles=1, historical=True):
-        # Read-only fill requests. All other threads may keep trading; only
-        # the small file commit is serialized with full-stats ingestion.
-        pending=[c for c in self.all_cycles(st) if self.identity(c) and not self.recorded(c)]
-        if not pending:return
-        pending.sort(key=lambda x: str(x.get('tpOrdId','')),reverse=True)
-        checked=0
-        for c in pending:
-            key=self.identity(c)
-            now=time.monotonic()
-            with self.lock:
-                if now<self.retry_after.get(key,0): continue
-            try:
-                buy=A.fills_by_order(c['ordId'],D(c['filledBuy']))
-                sell_legs=[(r['ordId'],D(r.get('aggregateFilledTotal',r['filled'])))
-                           for r in c.get('tpOrders',[]) if D(r.get('filled'))>0]
-                if not sell_legs:sell_legs=[(c['tpOrdId'],D(c['filledTP']))]
-                sell=[f for oid,qty in sell_legs for f in A.fills_by_order(oid,qty)]
-                r=self.compute(c,buy,sell)
-                self.commit_completed(c,r,historical=key in self.initial_ids)
-            except Exception as e:
-                with self.lock:
-                    count=self.tried.get(key,0)+1
-                    self.tried[key]=count
-                    wait=min(120,5*count)
-                    if isinstance(e,RateLimitedError):wait=max(wait,30)
-                    self.retry_after[key]=time.monotonic()+wait
-                bp=c.get('buyPx','?');tp=c.get('tpPx','?')
-                transient=(isinstance(e,RateLimitedError) or
-                    (isinstance(e,ValueError) and
-                     ('Fills not yet available' in str(e) or
-                      'Fill volume differs' in str(e))))
-                if count==1:
-                    print(f'⏳ TP {bp} → {tp} закрыт | ждём комиссии',flush=True)
-                if (not transient and (count==1 or count%10==0)):
-                    print(f'⚠️ PnL {bp} → {tp}: данные требуют проверки: '
-                          f'{type(e).__name__} {str(e)[:120]}',flush=True)
-                elif isinstance(e,RateLimitedError) and count==1:
-                    print('⏳ OKX ограничил запросы истории; PnL продолжит расчёт позже',flush=True)
-            checked+=1
-            if checked>=max_cycles:break
-
-    def status(self, st):
-        unaccounted=sum(bool(self.identity(c)) and not self.recorded(c)
-                        for c in self.all_cycles(st))
-        return f'всего {money_usdt(self.total())} | PnL не рассчитан {unaccounted}'
-
-
-def run_tests():
-    # Exact rule requested: a partially filled TP NEVER releases its level.
-    probe_price=Decimal('2500')
-    probe_key=fmt(probe_price)
-    demo={'cycles': {probe_key:{'state':'TP_PARTIAL'}}}
-    assert not level_free(demo,probe_price)
-    demo['cycles'][probe_key]['state']='TP_WAIT'
-    assert not level_free(demo,probe_price)
-    demo['cycles'][probe_key]['state']='CLOSED'
-    assert level_free(demo,probe_price)
-    test_bid=STEP*Decimal(1000)+STEP/2
-    assert grid_top(test_bid)==STEP*1000
-    assert grid_top(STEP*1000)==STEP*999
-    desired=desired_buy_levels(STEP*1000,set())
-    assert len(desired)==TARGET
-    assert max(desired)==STEP*1000
-    assert min(desired)==STEP*(1001-TARGET)
-    assert STEP*1000 not in desired_buy_levels(STEP*1000,{STEP*1000})
-    c={'cycleId':'X','buyPx':'2500.00','tpPx':'2501.75','ordId':'B1',
-       'filledBuy':'0.03','filledTP':'0.01','state':'VIRTUAL_TP',
-       'tpOrders':[{'ordId':'S1','clOrdId':'old','sz':'0.03',
-                    'filled':'0.01','phase':'CANCELED'}]}
-    assert remaining_tp(c)==Decimal('0.02')
-    assert not active_tp_records(c)
-    c['tpOrders'].append({'ordId':'S2','clOrdId':'new','sz':'0.02',
-                          'filled':'0.01','phase':'ACTIVE'})
-    assert remaining_tp(c)==Decimal('0.01')
-    assert len(active_tp_records(c))==1
-    c['tpOrders'][-1]['filled']='0.02';c['tpOrders'][-1]['phase']='FILLED'
-    assert remaining_tp(c)==0
-    assert not active_tp_records(c)
-    log('UNIT_TESTS_OK', rule='Virtual TP identity, partial fill, residual size')
 
 def initial_state():
     pos=A.positions(); pending=A.pending()
     if any(D(p.get('pos'))!=0 for p in pos) or pending:
         die('Untracked instrument position/orders: refusing initialization. '             'Use dedicated instrument per bot; net mode position is shared.')
-    st={'version':VER,'instrument':INST,'cycles':{},'completed':0,'bootstrapped':True,
-        'started_at':time.time()}
+    st=empty_state(VER, INST)
+    st.update(bootstrapped=True, started_at=time.time())
     save(st); return st
 
 # Every historical SELL remains associated with its original BUY via cycleId.
@@ -1739,40 +1198,11 @@ def unprotected_partial_buy(st):
                Decimal('0'))
 
 
-def tp_quantity_placeable(quantity):
-    return (quantity >= CONTRACT_MIN and quantity % CONTRACT_LOT == 0)
 
 
 def unplaceable_virtual_tp(st):
     return [(k,c) for k,c in virtual_cycles(st)
             if not tp_quantity_placeable(remaining_tp(c))]
-
-def migrate_cycle_records(st):
-    changed=False
-    for c in list(st.get('cycles',{}).values()) + st.get('archived_cycles',[]):
-        if 'cycleId' not in c:
-            if not c.get('ordId') and c.get('state') not in ('PLACING',):
-                # A never-accepted BUY cannot be tracked as a verified cycle.
-                c['cycleId']='pending-'+str(c.get('clOrdId') or secrets.token_hex(8))
-            else:
-                c['cycleId']=COIN.lower()+'-'+str(c.get('ordId') or c.get('clOrdId'))
-            changed=True
-        if c.get('state')=='BUY_PARTIAL' and D(c.get('filledBuy'))>0 and not c.get('partial_since'):
-            c['partial_since']=time.time()
-            changed=True
-        if 'tpOrders' in c:continue
-        orders=[]
-        if c.get('tpClOrdId') and c.get('state') not in ('CANCELED',):
-            if c.get('state')=='CLOSED': phase='FILLED'
-            elif c.get('tpOrdId'):phase='ACTIVE'
-            else: phase='PENDING'
-            orders=[{'clOrdId':c['tpClOrdId'],'ordId':c.get('tpOrdId',''),
-                     'sz':str(c.get('filledBuy') or c.get('sz') or QTY),
-                     'filled':str(c.get('filledTP') or '0'),
-                     'phase':phase,'source':'attached','placedAt':0}]
-        c['tpOrders']=orders
-        changed=True
-    if changed:save(st)
 
 def paged_order(cid, pages=12):
     """Exact client ID match; NEVER use price/quantity coincidence."""
@@ -1809,7 +1239,7 @@ def register_cancel_attached(st,pending):
                 or D(o.get('sz'))<=0 or D(o.get('sz'))>D(c['sz'])):
                 die('Attached partial TP identity/size/side/price mismatch')
             if c.get('state')=='VIRTUAL_TP':
-                # Migration of a v0.6.5 canceled-partial BUY: old engine
+                # Migration of a canceled-partial BUY: old engine
                 # wrongly assumed the attached TP would never materialize.
                 # Exact clOrdId proves this live SELL belongs to that cycle.
                 c['state']='TP_WAIT'
@@ -2108,7 +1538,6 @@ def virtual_escape(st,bid,actual,pending,mode):
 
 def track(st,pending):
     """All TP replacements + fills are tracked under the original CycleID."""
-    migrate_cycle_records(st)
     all_resolved=reconcile_aggregate(st)
     byid={o.get('ordId'):o for o in pending}
     bycid={o.get('clOrdId'):o for o in pending}
@@ -2218,7 +1647,7 @@ def track(st,pending):
                     if filled and not D(c.get('filledBuy')):
                         c.setdefault('partial_since',time.time())
                     elif filled and not c.get('partial_since'):
-                        # Migration of an already partially-filled v0.6.5 BUY.
+                        # Migration of an already partially-filled BUY.
                         c['partial_since']=time.time()
                     c['state']=target;c['filledBuy']=str(filled);save(st)
                     if filled:
@@ -2502,22 +1931,6 @@ def partial_cleanup_action(st,bid,actual,mode):
     return 'NONE'
 
 
-def tp_buffer_candidates(active,bid):
-    """Only excess REAL TP are eligible for burst cleanup.
-
-    The 25 closest active SELL LIMITs to current BID are protected.  This
-    ranking is recalculated from each reconciled snapshot (the 'base' is not
-    a permanent tag on a cycle).  Ties are deterministic by price/order ID.
-    Returns the surplus sorted farthest-first.
-    """
-    bid=D(bid)
-    ranked=sorted(active,key=lambda row:(abs(D(row[1]['tpPx'])-bid),
-                    D(row[1]['tpPx']),str(row[2].get('ordId') or '')))
-    base_ids={id(rec) for _,_,rec in ranked[:REAL_TP_TARGET]}
-    return sorted((row for row in active if id(row[2]) not in base_ids),
-                  key=lambda row:(abs(D(row[1]['tpPx'])-bid),
-                      D(row[1]['tpPx']),str(row[2].get('ordId') or '')),
-                  reverse=True)
 
 
 class TPBufferScheduler:
@@ -2875,72 +2288,14 @@ class PublicBidWatcher(threading.Thread):
         return A.ticker()
 
 
-def required_safe_tp(buy_price, maker_cost):
-    if maker_cost<0 or maker_cost>=1:die('Invalid maker fee')
-    exact=buy_price*(maker_cost*2)/(1-maker_cost)*Decimal('1.20')
-    return max(PRICE_STEP,(exact/PRICE_STEP).to_integral_value(rounding=ROUND_CEILING)*PRICE_STEP)
 
 
-def grid_top(bid):
-    top=(bid/STEP).to_integral_value(rounding=ROUND_FLOOR)*STEP
-    if top>=bid: top-=STEP
-    return top
 
 
-def desired_buy_levels(top,occupied_tp):
-    wanted=set()
-    price=top
-    while len(wanted)<TARGET and price>0:
-        if price not in occupied_tp: wanted.add(price)
-        price-=STEP
-    if len(wanted)<TARGET: die('Insufficient valid grid levels')
-    return wanted
 
 
-def missing_buy_levels_for_addition(desired, active):
-    """Only add BUYs which can survive the bottom-up 25-BUY cleanup.
-
-    At/above target capacity, the 25 HIGHEST existing BUY prices are
-    the retained grid. A candidate at/below its lowest price would be
-    canceled immediately by bottom-up cleanup: never POST that churn.
-    Below target capacity, keep normal full grid replenishment.
-    """
-    active_prices={D(c['buyPx']) for c in active}
-    missing=sorted((px for px in desired if px not in active_prices),reverse=True)
-    if len(active)>=TARGET:
-        floor=sorted(active_prices,reverse=True)[TARGET-1]
-        missing=[px for px in missing if px>floor]
-    return missing
 
 
-def plan_buy_buffer_cleanup(active,fresh_bid,max_cancels):
-    """Select the LOWEST priced, confirmed BUYs for excess-buffer cleanup.
-
-    The existing exchange grid is authoritative when removing surplus BUYs.
-    Desired levels are used only to decide where to ADD new BUYs, NEVER to
-    select which existing BUY to cancel. The 5-step near-BID guard is a
-    fail-closed safety check, not the order-selection strategy.
-
-    Skip partially filled, PLACING, CANCELING and unknown-ID orders. Only
-    fully live BUYs strictly BELOW (fresh BID - guard) may be canceled.
-    """
-    if fresh_bid is None or D(fresh_bid)<=0:
-        raise ExchangeUnresolved('Missing fresh BID for BUY buffer cleanup')
-    if max_cancels<=0:return [],[]
-    protected=[]
-    safe=[]
-    cutoff=D(fresh_bid)-STEP*BUY_CANCEL_PROTECT_STEPS
-    for c in active:
-        if c.get('state')!='BUY_LIVE' or not c.get('ordId'):
-            continue
-        px=D(c['buyPx'])
-        if px>=cutoff:
-            protected.append(c)
-        else:
-            safe.append(c)
-    # Always cancel bottom-up: smallest numerical BUY price first.
-    safe.sort(key=lambda c:D(c['buyPx']))
-    return safe[:max_cancels],protected
 
 
 class PnLWorker(threading.Thread):
@@ -2988,133 +2343,11 @@ def acquire_lock():
 
 def ensure_state():
     if DATA.exists():
-        st=json.loads(DATA.read_text())
-        if st.get('instrument') != INST: die('Wrong state instrument')
-        previous_version=st.get('version')
-        if previous_version in ('0.7.5','0.7.6','0.7.7','0.7.8','0.7.9','0.7.10','0.7.11','0.7.12') and AUDIT:
-            # GET-only audit must not upgrade persistent LIVE state.
-            st['version']=VER
-        elif previous_version == '0.7.12':
-            # Version upgrade is not an order migration: preserve the entire state.
-            backup=DATA.with_name('bot04_state_before_v0714.json')
-            if not backup.exists():
-                shutil.copy2(DATA,backup)
-                os.chmod(backup,0o600)
-            st['version']=VER
-            save(st)
-            log('STATE_UPGRADED',from_version=previous_version,to_version=VER,
-                preserved_cycles=len(st['cycles']))
-        elif previous_version == '0.7.11':
-            # Durable migration: preserve every cycle, order identity and pending intent.
-            backup=DATA.with_name('bot04_state_before_v0712.json')
-            if not backup.exists():
-                shutil.copy2(DATA,backup)
-                os.chmod(backup,0o600)
-            st['version']=VER
-            save(st)
-            log('STATE_UPGRADED',from_version=previous_version,to_version=VER,
-                preserved_cycles=len(st['cycles']))
-        elif previous_version == '0.7.10':
-            backup=DATA.with_name('bot04_state_before_v0711.json')
-            if not backup.exists():
-                shutil.copy2(DATA,backup)
-                os.chmod(backup,0o600)
-            st['version']=VER
-            save(st)
-            log('STATE_UPGRADED',from_version=previous_version,to_version=VER,
-                preserved_cycles=len(st['cycles']))
-        elif previous_version == '0.7.9':
-            backup=DATA.with_name('bot04_state_before_v0710.json')
-            if not backup.exists():
-                shutil.copy2(DATA,backup)
-                os.chmod(backup,0o600)
-            st['version']=VER
-            save(st)
-            log('STATE_UPGRADED',from_version=previous_version,to_version=VER,
-                preserved_cycles=len(st['cycles']))
-        elif previous_version == '0.7.8':
-            backup=DATA.with_name('bot04_state_before_v079.json')
-            if not backup.exists():
-                shutil.copy2(DATA,backup)
-                os.chmod(backup,0o600)
-            st['version']=VER
-            save(st)
-            log('STATE_UPGRADED',from_version=previous_version,to_version=VER,
-                preserved_cycles=len(st['cycles']))
-        elif previous_version in ('0.7.6','0.7.7'):
-            backup=DATA.with_name('bot04_state_before_v078.json')
-            if not backup.exists():
-                shutil.copy2(DATA,backup)
-                os.chmod(backup,0o600)
-            st['version']=VER
-            save(st)
-            log('STATE_UPGRADED',from_version=previous_version,to_version=VER,
-                preserved_cycles=len(st['cycles']))
-        elif previous_version in ('0.7.2','0.7.3','0.7.4','0.7.5'):
-            # Preserve every durable TP link, virtual signal and MARKET intent.
-            # v0.7.6 preserves all v0.7.5 trade and market-exit decisions.
-            backup=DATA.with_name('bot04_state_before_v076.json')
-            if not backup.exists():
-                shutil.copy2(DATA,backup)
-                os.chmod(backup,0o600)
-            st['version']=VER
-            save(st)
-            log('STATE_UPGRADED',from_version=previous_version,to_version=VER,
-                preserved_cycles=len(st['cycles']))
-        elif previous_version == '0.7.1':
-            # Preserve attached TP, aggregate and virtual states from v0.7.1.
-            backup=DATA.with_name('bot04_state_before_v072.json')
-            if not backup.exists():
-                shutil.copy2(DATA,backup)
-                os.chmod(backup,0o600)
-            st['version']=VER
-            save(st)
-            log('STATE_UPGRADED',from_version=previous_version,to_version=VER,
-                preserved_cycles=len(st['cycles']))
-        elif previous_version == '0.7.0':
-            backup=DATA.with_name('bot04_state_before_v071.json')
-            if not backup.exists():
-                shutil.copy2(DATA,backup)
-                os.chmod(backup,0o600)
-            st['version']=VER
-            st.setdefault('aggregate_exits',[])
-            save(st)
-            log('STATE_UPGRADED',from_version=previous_version,to_version=VER,
-                preserved_cycles=len(st['cycles']))
-        elif previous_version == '0.6.10':
-            backup=DATA.with_name('bot04_state_before_v070.json')
-            if not backup.exists():
-                shutil.copy2(DATA,backup)
-                os.chmod(backup,0o600)
-            st['version']=VER
-            save(st)
-            log('STATE_UPGRADED',from_version=previous_version,to_version=VER,
-                preserved_cycles=len(st['cycles']))
-        elif previous_version in ('0.6.9','0.6.8'):
-            backup=DATA.with_name('bot04_state_before_v0610.json')
-            if not backup.exists():
-                shutil.copy2(DATA,backup)
-                os.chmod(backup,0o600)
-            st['version']=VER
-            save(st)
-            log('STATE_UPGRADED',from_version=previous_version,to_version=VER,
-                preserved_cycles=len(st['cycles']))
-        elif previous_version in ('0.6.7','0.6.6','0.6.5','0.4.1','0.5.0','0.5.1','0.5.2','0.5.3','0.5.4','0.5.5','0.5.6','0.5.7','0.5.8','0.5.9','0.6.0','0.6.1','0.6.2','0.6.3','0.6.4'):
-            backup=DATA.with_name('bot04_state_before_v060.json')
-            if not backup.exists():
-                shutil.copy2(DATA,backup)
-                os.chmod(backup,0o600)
-            st['version']=VER
-            st.setdefault('archived_cycles',[])
-            save(st)
-            log('STATE_UPGRADED',from_version=previous_version,to_version=VER,
-                preserved_cycles=len(st['cycles']))
-        elif previous_version != VER:
-            die('Unsupported old state version: '+str(previous_version))
-        migrate_cycle_records(st)
-        return st
+        st=json.loads(DATA.read_text(encoding='utf-8'))
+        try:return validate_state(st, INST)
+        except ValueError as exc:die(str(exc))
     if not LIVE:
-        return {'cycles':{},'completed':0,'version':VER,'instrument':INST}
+        return empty_state(VER, INST)
     return initial_state()
 
 
@@ -3384,7 +2617,7 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                 watcher.wake.clear()
                 continue
 
-            # v0.7.9: surplus TP no longer enters maintain_virtual_tp()
+            # surplus TP no longer enters maintain_virtual_tp()
             # before BUY refill. Preserve its independent coverage check.
             # Do not send BUY if SELL/virtual exposure is inconsistent.
             if mode=='RUN':
@@ -3416,7 +2649,7 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                 watcher.wake.wait(0.10 if escape_action=='WAIT' else 0.15)
                 watcher.wake.clear()
                 continue
-            # v0.7.11: rearm under-target real protective TP *before* BUY.
+            # rearm under-target real protective TP *before* BUY.
             # At target, the farthest-to-nearest TP rotation is elective and
             # now waits until after the BUY refill. Surplus already waits.
             real_tp_now=len(real_tp_active(st))
@@ -3464,7 +2697,7 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             active=active_buy(st)
             validate_buy_buffer(active)
 
-            # v0.7.2: protect near-market BUYs during BOTH directions of shift.
+            # protect near-market BUYs during BOTH directions of shift.
             # extra BUYs are a temporary buffer, never a steady target.
             # All order writes are preceded by the same full REST reconciliation.
             market.set_grid_reference(top)
@@ -3478,7 +2711,7 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             occupied_tp={D(k) for k,x in st['cycles'].items()
                          if x['state'] in ('TP_WAIT','TP_PARTIAL','VIRTUAL_TP')}
             desired=desired_buy_levels(top,occupied_tp)
-            # v0.7.5 r2: DO NOT add a BUY below the lowest of the 25
+            # r2: DO NOT add a BUY below the lowest of the 25
             # existing highest-price BUYs while 25+ orders are already live.
             # Otherwise bottom-up cleanup would immediately cancel this order
             # and the two algorithms could churn endlessly at a STATIC BID.
@@ -3520,7 +2753,7 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                 if len(active_buy(st))>=allowed_buys or count(st)>=CAP:break
                 if place(st,price):placed+=1
                 else:break
-                time.sleep(0.05)  # v0.7.5: BUY pacing 50ms; keep order rate limit
+                time.sleep(0.05)  # BUY pacing; keep order rate limit
             if candidates:
                 latency_ms('buy_batch',buy_batch_start,
                            attempted=len(candidates),placed=placed,
@@ -3588,7 +2821,7 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                     log('BUY_CANCEL_PROTECTED',
                         levels=[c['buyPx'] for c in protected[:5]],
                         bid=str(fresh_bid),reason='Near BID; retained inside 30 BUY limit')
-            # v0.7.9: surplus TP cleanup is opportunistic and one-at-a-time,
+            # surplus TP cleanup is opportunistic and one-at-a-time,
             # after a pass with no new BUY/BUY-cancel request. This preserves
             # the existing rule: every TP cancellation must reconcile fully
             # before any subsequent exchange write.
@@ -3830,41 +3063,6 @@ def full_stats_snapshot(state, fills, bid, contract_value, *, include_durable_ar
                 expected_orders=len(expected))
 
 
-def _legacy_exchange_fills(state):
-    cycles=all_stat_cycles(state)
-    expected={}
-    for c in cycles:
-        if D(c.get('filledBuy'))>0 and c.get('ordId'):
-            expected[str(c['ordId'])]=D(c['filledBuy'])
-        if D(c.get('filledTP'))>0:
-            legs=[r for r in c.get('tpOrders',[]) if D(r.get('filled'))>0]
-            if not legs:legs=[{'ordId':c.get('tpOrdId'),'filled':c.get('filledTP')}]
-            for r in legs:
-                if r.get('ordId'):accumulate_expected_sell(expected,r)
-    if not expected:
-        return []
-    got={}
-    rows=[]; seen_bills=set(); after=None
-    for page_number in range(STATS_HISTORY_PAGES_LIMIT):
-        params={'instType':'SWAP','instId':INST,'limit':'100'}
-        if after: params['after']=after
-        page=A.req('GET','/api/v5/trade/fills-history',params,background=True)
-        for f in page:
-            oid=str(f.get('ordId') or '')
-            bill=str(f.get('billId') or '')
-            if oid not in expected or not bill or bill in seen_bills:continue
-            seen_bills.add(bill)
-            got[oid]=got.get(oid,Decimal(0))+D(f.get('fillSz'))
-            rows.append(f)
-        if all(got.get(oid,Decimal(0))==q for oid,q in expected.items()):
-            return rows
-        if len(page)<100: return rows
-        nxt=str(page[-1].get('billId') or '')
-        if not nxt or nxt==after: raise RuntimeError('Fills pagination stalled')
-        after=nxt
-    raise RuntimeError('Too many historical pages; stats coverage not verified')
-
-
 def expected_filled_orders(state, *, include_archive=True):
     cycles=all_stat_cycles(state) if include_archive else list(state.get('cycles',{}).values()) + list(state.get('archived_cycles',[]))
     expected={}
@@ -3882,19 +3080,17 @@ def expected_filled_orders(state, *, include_archive=True):
 
 def stats_exchange_fills(state):
     # Mandatory archive bootstrap only once, then fetch missing order IDs.
-    FILL_STORE.bootstrap(state)
     return FILL_STORE.ensure_expected(expected_filled_orders(state))
 
 
 # OKX performance report: fixed capital basis from initial upper bound or creation price.
 # Revenue/fees/execution remain actual OKX fills, not LIMIT-price estimates.
-RUNTIME_STATS = ROOT / 'state' / 'okx_stats_runtime_v059.json'
-GRID_REFERENCE = ROOT / 'state' / 'okx_stats_grid_reference_v059.json'
+RUNTIME_STATS = ROOT / 'state' / 'runtime_stats.json'
+GRID_REFERENCE = ROOT / 'state' / 'grid_reference.json'
 
 def _first_anchor(fills):
     # Capital is frozen at bot creation: upper bound if set, otherwise
     # the market price captured at setup. Never use a later moving BID.
-    # A legacy 0.5.9 grid reference is deliberately NOT overwritten.
     if GRID_REFERENCE.exists():
         r=json.loads(GRID_REFERENCE.read_text())
         if D(r['top_buy']) != CAPITAL_REFERENCE:
@@ -3951,7 +3147,7 @@ def _clock(seconds):
 
 
 def runtime_heartbeat():
-    # Accurate uptime tracking begins ONLY with v0.6.0.
+    # Accurate uptime tracking begins ONLY with .
     # Gaps >60s are downtime, not falsely counted as running time.
     now=time.time()
     if RUNTIME_STATS.exists():
@@ -4285,9 +3481,8 @@ def main():
         return
     lock=acquire_lock()
     try:
-        print(f'=== OKX BOT01 v{VER} ===',
+        print(f'=== OKX GRID v{VER} ===',
               f'LIVE {TARGET} BUY' if LIVE else ('READ ONLY AUDIT' if AUDIT else 'READ ONLY'),flush=True)
-        run_tests()
         # At startup (including systemd restart after network outage), safe
         # GET/API rate failures must NOT exhaust systemd StartLimitBurst.
         # Read-only upgrade audits deliberately fail fast and roll back.

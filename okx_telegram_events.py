@@ -10,7 +10,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from okx_runtime_paths import state_file, fills_db, observer_dir
+from okx_paths import state_file, fills_db, observer_dir
 
 from okx_telegram_views import (COUNTS, MODE, date_epoch, read_json, number,
                                 market_message, market_ledger, journal)

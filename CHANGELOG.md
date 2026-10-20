@@ -1,3 +1,11 @@
+## v0.7.19 — 2026-10-20 — Clean-engine baseline
+
+- Removed historical state/cycle/fill migrations and old monitoring adapters.
+- Refactored API/accounting/strategy/state; unified version and runtime paths.
+- Validated USDT-settled linear SWAP instruments without base-coin allowlist.
+- Archive view shows final confirmed PnL before historical snapshot.
+- Preserved trade safety and FIFO behavior; new bot states only.
+
 ## v0.7.18 — 2026-10-20 — Internal runtime paths
 
 - LIVE state/SQLite/logs/diagnostics migrated to stable file and directory names; existing history preserved.

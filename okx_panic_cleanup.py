@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""v0.7.12 systemd ExecStopPost: local-only, fail-closed PANIC_DONE cleanup.
-
-Runs after a newly created trading instance EXITS. Not a trading component;
-never sends OKX requests. All decision gates are local, synchronous and
-idempotent. Exit 0 on cleanup failure to avoid triggering systemd Restart=on-failure
-for a retired trading service; failures are visible in journald.
-"""
+"""Local-only, fail-closed terminal cleanup; never submits OKX requests."""
 import argparse
 import json
 import os
@@ -13,7 +7,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from okx_runtime_paths import state_file
+from okx_paths import state_file
 
 BOT_ROOT = Path('/root/okx')
 UNIT_DIR = Path('/etc/systemd/system')
@@ -81,25 +75,23 @@ def cleanup(root,service,unit_dir=UNIT_DIR):
     found=[]
     # Strict list for our managed observers. Never touch a global Telegram unit
     # or a different trading instance. No wildcard systemctl commands.
-    for version in ('v077','v078','v079','v0710','v0711','v0712',''):
-        for kind in ('burst','execution'):
-            unit=(f'observer-{service}-{kind}-{version}.service'
-                  if version else f'observer-{service}-{kind}.service')
-            unit_file=unit_dir/unit
-            if not unit_file.is_file() or unit_file.is_symlink():
-                continue
-            content=unit_file.read_text(encoding='utf-8')
-            if (f'--root {root}' not in content or
-                f'--service {service}' not in content or
-                'okx_execution_observer' not in content):
-                failures.append(f'{unit}: identity/ownership check failed')
-                continue
-            found.append(unit)
-            try:
-                call_systemctl('disable','--now',unit)
-                print('PANIC CLEANUP observer DISABLED:',unit,flush=True)
-            except (RuntimeError,subprocess.TimeoutExpired) as exc:
-                failures.append(str(exc))
+    for kind in ('burst','execution'):
+        unit=f'observer-{service}-{kind}.service'
+        unit_file=unit_dir/unit
+        if not unit_file.is_file() or unit_file.is_symlink():
+            continue
+        content=unit_file.read_text(encoding='utf-8')
+        if (f'--root {root}' not in content or
+            f'--service {service}' not in content or
+            'okx_execution_observer' not in content):
+            failures.append(f'{unit}: identity/ownership check failed')
+            continue
+        found.append(unit)
+        try:
+            call_systemctl('disable','--now',unit)
+            print('PANIC CLEANUP observer DISABLED:',unit,flush=True)
+        except (RuntimeError,subprocess.TimeoutExpired) as exc:
+            failures.append(str(exc))
     try:
         # Disable only; the engine is already exiting. Never --now self here.
         call_systemctl('disable','--no-reload',service+'.service')

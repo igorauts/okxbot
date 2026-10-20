@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""OKX v0.7.11 first-run terminal wizard. NO TRADING API WRITES.
-
-Creates a NEW, separate bot directory. All prompts require explicit input;
-no empty-Enter defaults. Existing bot directories are never overwritten.
-"""
+"""Interactive wizard for NEW OKX USDT linear SWAP bots; GET-only."""
 import argparse
 import base64
 import curses
@@ -20,9 +16,10 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP
 from pathlib import Path
 
-VER='0.7.18'
+from okx_version import VERSION as VER
+from okx_contracts import validate_spec
 BASE=Path(__file__).resolve().parent
-ASSETS={'Bitcoin':'BTC','Ethereum':'ETH','Solana':'SOL','Near':'NEAR','Zcash':'ZEC','Sui':'SUI'}
+from okx_setup_presets import ASSETS
 
 
 def D(s):
@@ -85,7 +82,7 @@ def validate_numeric(key,s,ctx):
         if x!=x.to_integral_value() or not 1<=x<=25:
             raise ValueError('Количество базовых реальных TP: 1–25.')
     elif key in ('buy_buf','buy_protect','tp_buf'):
-        raise ValueError('Служебные буферы и защита BUY фиксированы в v0.7.11.')
+        raise ValueError('Служебные буферы и защита BUY фиксированы.')
     elif key=='upper':
         if x<0:raise ValueError('Верхняя граница не может быть отрицательной.')
         if x and x%tick:raise ValueError(f'Верхняя граница должна быть кратна ${tick}.')
@@ -136,9 +133,8 @@ def load_contract(coin,env):
     instruments=okx_req('/api/v5/public/instruments',params={'instType':'SWAP','instId':inst})
     if len(instruments)!=1:raise RuntimeError('Спецификация контракта отсутствует')
     spec=instruments[0]
-    if (spec.get('state')!='live' or spec.get('ctValCcy')!=coin
-        or spec.get('ctType')!='linear'):
-        raise RuntimeError('Контракт не доступен как активный линейный USDT SWAP')
+    try: validate_spec(inst, spec)
+    except ValueError as exc: raise RuntimeError(str(exc)) from exc
     tick,ct,lot,minimum=[D(spec[k]) for k in ('tickSz','ctVal','lotSz','minSz')]
     if any(x<=0 for x in (tick,ct,lot,minimum)):
         raise RuntimeError('Некорректные размеры контракта OKX')
@@ -272,7 +268,7 @@ def report(ctx):
     reference=upper if upper else price
     lo,position,cap=capital(reference,ctx['step'],int(ctx['grids']),ctx['qty'])
     return [
-        f'Актив:                         {next(k for k,v in ASSETS.items() if v==c)}',
+        f'Актив:                         {next((k for k,v in ASSETS.items() if v==c), c)}',
         f'Контракт:                      {ctx["instrument"]}',
         f'Имя бота:                      {ctx.get("name","—")}',
         f'Текущая цена:                  ${price}', '',
@@ -470,7 +466,7 @@ def persist(ctx,out,env_raw):
 
 
 def main():
-    parser=argparse.ArgumentParser(description='Create a NEW v0.7.11 OKX bot directory; never sends orders.')
+    parser=argparse.ArgumentParser(description='Create a NEW OKX bot directory; no order writes.')
     parser.add_argument('--output',required=True,help='NEW empty bot directory, e.g. /root/okx/btc01')
     parser.add_argument('--env-file',required=True,help='Existing local OKX API .env')
     args=parser.parse_args()

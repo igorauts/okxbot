@@ -1,7 +1,8 @@
 {
   "schema_version": 1,
+  "current_version": "0.7.19",
   "engines": {
-    "0.7.18": {
+    "0.7.19": {
       "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
@@ -9,9 +10,13 @@
         "okx_positions_fifo.py",
         "okx_fill_singleflight.py",
         "okx_emergency_gate.py",
-        "okx_runtime_paths.py"
+        "okx_version.py",
+        "okx_state.py",
+        "okx_contracts.py",
+        "okx_accounting.py",
+        "okx_api.py",
+        "okx_strategy.py"
       ]
     }
-  },
-  "current_version": "0.7.18"
+  }
 }

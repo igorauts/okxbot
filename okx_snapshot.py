@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stop-consistent bot snapshot building block for OKX Grid Bot v0.7.14.
+"""Stop-consistent bot snapshot builder.
 
 Not a rollout tool. CALLER must first stop the designated engine, establish
 exclusive control over that unit's lifecycle, verify it has no trading Python
@@ -20,7 +20,7 @@ import json
 import os
 from contextlib import closing
 from pathlib import Path
-from okx_runtime_paths import state_file
+from okx_paths import state_file
 import shutil
 import sqlite3
 import tempfile

@@ -22,7 +22,8 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from okx_runtime_paths import state_file
+from okx_archive_reader import state_file
+from okx_version import VERSION
 
 import okx_setup as wizard
 from okx_observers import provision_observers
@@ -97,24 +98,14 @@ def bot_path(entry):
     return p
 
 
-def _engine_key(filename):
-    """0.6.10 < 0.7.0 < 0.7.7 < 0.7.10 (not lexical ordering)."""
-    m=re.fullmatch(r'okx_bot0(\d)(\d{1,2})\.py',filename)
-    return (0,int(m.group(1)),int(m.group(2))) if m else None
-
-
 def latest_engine(source=SOURCE):
     """The release manifest and internal VER are authoritative; never filename digits."""
     source=Path(source)
     path=source/'okx_bot.py'
     if not path.is_file() or path.is_symlink():
         raise RuntimeError('Нет установленного торгового движка okx_bot.py')
-    raw=path.read_text(encoding='utf-8')
-    m=re.search(r"(?m)^VER\s*=\s*['\"]([0-9]+\.[0-9]+\.[0-9]+)['\"]",raw)
-    if not m:
-        raise RuntimeError('Внутренняя версия VER в okx_bot.py отсутствует')
-    ver=m.group(1)
-    compile(raw,str(path),'exec')
+    compile(path.read_bytes(),str(path),'exec')
+    ver=VERSION
     manifest=json.loads((source/'engine_manifest.json').read_text(encoding='utf-8'))
     if manifest.get('schema_version')!=1 or manifest.get('current_version')!=ver:
         raise RuntimeError('Несоответствие VER и текущей версии манифеста')
@@ -125,25 +116,18 @@ def latest_engine(source=SOURCE):
 
 
 def engine_file(path):
-    """Prefer versionless engine; keep legacy read-only audit support for migration."""
-    path=Path(path)
-    stable=path/'okx_bot.py'
-    if stable.is_file() and not stable.is_symlink():
-        return 'okx_bot.py'
-    matches=[(_engine_key(p.name),p.name) for p in path.glob('okx_bot0*.py')
-             if _engine_key(p.name) is not None and p.is_file() and not p.is_symlink()]
-    if not matches:
-        raise RuntimeError('Не найден исполняемый Python-файл бота')
-    return max(matches)[1]
-
+    """Only current engine can run. Archive is read-only."""
+    p=Path(path)/'okx_bot.py'
+    if not p.is_file() or p.is_symlink():
+        raise RuntimeError('Current engine not installed')
+    return 'okx_bot.py'
 
 
 def latest_dependencies(engine_name,version,source=SOURCE):
     """Manifest-driven future dependencies; no manager changes per release."""
     path=Path(source)/'engine_manifest.json'
     if not path.is_file():
-        # Backwards compatibility for already installed old manager directories.
-        return ['okx_terminal_accounting_v077.py'] if version=='0.7.7' else []
+        raise RuntimeError('Engine manifest missing')
     manifest=json.loads(path.read_text())
     if manifest.get('schema_version')!=1:
         raise RuntimeError('Unsupported engine manifest')
@@ -166,13 +150,11 @@ def provision_latest_engine(created,source=SOURCE):
     if not (created/'config.json').is_file():
         raise RuntimeError('Wizard did not create config.json')
     cfg=json.loads((created/'config.json').read_text())
-    if (created/'state/bot04_state.json').exists() or (created/'state/bot_state.json').exists():
+    if (created/'state/bot_state.json').exists() or (created/'state/bot04_state.json').exists():
         raise RuntimeError('Never upgrade an existing trading state in wizard')
     shutil.copy2(Path(source)/name,created/name)
     for dependency in latest_dependencies(name,version,source):
         shutil.copy2(Path(source)/dependency,created/dependency)
-    for old in created.glob('okx_bot0*.py'):
-        if _engine_key(old.name) is not None and old.name != name:old.unlink()
     cfg['version']=version
     fd,tmp=tempfile.mkstemp(prefix='.config-engine-',dir=created)
     try:
@@ -198,8 +180,8 @@ def unit_text(path, engine, name):
             '[Service]\nType=simple\nUser=root\n'
             f'WorkingDirectory={path}\n'
             'Environment=PYTHONUNBUFFERED=1\n'
-            'Environment=OKX_BOT04_LIVE=CONFIRM\n'
-            'Environment=OKX_BOT04_PROBE=FULL_25\n'
+            'Environment=OKX_GRID_LIVE=CONFIRM\n'
+            'Environment=OKX_GRID_PROBE=FULL_25\n'
             f'ExecStart={path}/.venv/bin/python -u {path}/{engine}\n'
             f'ExecStopPost=/usr/bin/python3 -B {SOURCE}/{cleanup_file} --root {path} --service okx-grid-{path.name}\n'
             'Restart=on-failure\nRestartSec=15\n\n'
@@ -219,8 +201,8 @@ def describe(entry):
 def audit_entry(entry):
     path = bot_path(entry)
     env = {k:v for k,v in os.environ.items()
-           if k not in ('OKX_BOT04_LIVE','OKX_BOT04_PROBE','OKX_BOT05_STATS')}
-    env['OKX_BOT04_AUDIT'] = 'READ_ONLY'
+           if k not in ('OKX_GRID_LIVE','OKX_GRID_PROBE','OKX_GRID_STATS')}
+    env['OKX_GRID_AUDIT'] = 'READ_ONLY'
     print('Проверка OKX без выставления ордеров…', flush=True)
     run([str(path / '.venv/bin/python'), '-u', str(path / engine_file(path))],
         cwd=path, env=env, timeout=180)
@@ -374,8 +356,7 @@ def control_supported(entry):
     if not command:return False
     parts=command.split()
     return any(Path(token).parent==path
-               and (Path(token).name=='okx_bot.py' or
-                    _engine_key(Path(token).name) is not None)
+               and Path(token).name=='okx_bot.py'
                and Path(token).is_file() and not Path(token).is_symlink()
                for token in parts)
 
@@ -743,7 +724,7 @@ def cmd_clone(source_name, new_name):
 # publish the same complete human-readable report in their systemd journal.
 # The journal adapter exists for backwards compatibility and is never allowed
 # to start a trading engine, use API credentials, or alter trading state.
-_STATS_HEADER = re.compile(r'^\[.+?\] 📊 OKX (BTC|ETH|SOL) GRID STATISTICS\s*$')
+_STATS_HEADER = re.compile(r'^\[.+?\] 📊 OKX ([A-Z0-9]{2,32}) GRID STATISTICS\s*$')
 _STATS_DONE = 'Все закрытые циклы сопоставлены'
 _STATS_MAX_AGE = 900  # background reports every 600s + margin
 
@@ -858,14 +839,13 @@ def stats_text(name):
             historical=None
         if historical is not None:
             previous=with_latest_bot_dd(historical[0],path,instrument)
-            return (header+'ИСТОРИЧЕСКАЯ СТАТИСТИКА (снимок ДО завершения)\n\n'
-                    +previous+'\n\n'+'━'*32+'\n'
-                    +final['report'])
+            return (header+final['report']+'\n\n'+'━'*32+'\n'
+                    +'ИСТОРИЧЕСКАЯ СТАТИСТИКА (до завершения)\n\n'+previous)
         return header+'Исторический снимок недоступен.\n\n'+final['report']
     if instance_terminal(entry):
         return header+('⏳ Финальный расчёт не подтверждён. '
             'Торговлю не возобновлять. Выполните GET-only --terminal-finalize '
-            'на установленном движке v0.7.8.\n')
+            'на установленном торговом движке.\n')
     try:
         snapshot = read_stats_snapshot(path, instrument)
     except (ValueError, OSError, RuntimeError) as e:
@@ -1287,7 +1267,7 @@ def interactive_main(env_file):
         titles.extend(['➕ Создать бота','📦 Архив',
                        '📱 Telegram-монитор: '+telegram_monitor_label(),
                        '⚙️   Управление аккаунтом','Выход'])
-        i=curses.wrapper(lambda s:wizard.menu(s,'OKX Grid Bot v0.7.18',titles))
+        i=curses.wrapper(lambda s:wizard.menu(s,'OKX Grid Bot v'+VERSION,titles))
         if i is None or i==len(titles)-1:return
         if i<len(names):
             interactive_bot_menu(names[i]);continue
