@@ -23,7 +23,8 @@ from zoneinfo import ZoneInfo
 from urllib.request import Request, urlopen
 import html
 from okx_telegram_views import status_one, latency_report, read_json, LINE
-from okx_telegram_events import (one, event_alert, market_event, market_process, partial_scan, zero_buy_scan, observer_fault_scan)
+from okx_telegram_events import (one, event_alert, market_event, market_process, zero_buy_scan, observer_fault_scan)
+from okx_telegram_followups import partial_scan, panic_scan
 
 BASE = Path(os.environ.get('OKXBOT_BASE_DIR','/root/okx')).resolve()
 REGISTRY = Path(os.environ.get('OKXBOT_REGISTRY',str(BASE/'.okxbot_registry.json')))
@@ -375,7 +376,8 @@ def ingest_events(api,st):
     market_process(api,st,{k:Path(v) for k,v in BOT_DIRS.items()})
     names={k:Path(v) for k,v in BOT_DIRS.items() if _active_service(k)}
     observer_fault_scan(api,st,names)
-    partial_scan(api,st,names)
+    panic_scan(api,st,{k:Path(v) for k,v in BOT_DIRS.items()})
+    partial_scan(api,st,names,{k:Path(v) for k,v in BOT_DIRS.items()})
     zero_buy_scan(api,st,names)
 
 def poll_commands(api,st):
