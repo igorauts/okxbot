@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from okx_runtime_paths import state_file
 
 import okx_setup as wizard
 from okx_observers import provision_observers
@@ -165,7 +166,7 @@ def provision_latest_engine(created,source=SOURCE):
     if not (created/'config.json').is_file():
         raise RuntimeError('Wizard did not create config.json')
     cfg=json.loads((created/'config.json').read_text())
-    if (created/'state/bot04_state.json').exists():
+    if (created/'state/bot04_state.json').exists() or (created/'state/bot_state.json').exists():
         raise RuntimeError('Never upgrade an existing trading state in wizard')
     shutil.copy2(Path(source)/name,created/name)
     for dependency in latest_dependencies(name,version,source):
@@ -508,7 +509,7 @@ def _account_reset_preflight(latch):
             raise RuntimeError('Активный экземпляр уже терминален: '+slug)
         try:
             config = json.loads((bot.root/'config.json').read_text(encoding='utf-8'))
-            state = json.loads((bot.root/'state/bot04_state.json').read_text(encoding='utf-8'))
+            state = json.loads(state_file(bot.root).read_text(encoding='utf-8'))
         except (OSError, ValueError) as exc:
             raise RuntimeError('Не удаётся проверить сохранённое состояние: '+slug) from exc
         if (not isinstance(config, dict) or not isinstance(state, dict) or
@@ -1286,7 +1287,7 @@ def interactive_main(env_file):
         titles.extend(['➕ Создать бота','📦 Архив',
                        '📱 Telegram-монитор: '+telegram_monitor_label(),
                        '⚙️   Управление аккаунтом','Выход'])
-        i=curses.wrapper(lambda s:wizard.menu(s,'OKX Grid Bot v0.7.17',titles))
+        i=curses.wrapper(lambda s:wizard.menu(s,'OKX Grid Bot v0.7.18',titles))
         if i is None or i==len(titles)-1:return
         if i<len(names):
             interactive_bot_menu(names[i]);continue

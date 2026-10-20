@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from contextlib import closing
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from okx_runtime_paths import fills_db
 from urllib.parse import quote
 
 RECORD = 'bot_max_position_v1.json'
@@ -104,7 +105,7 @@ def load_and_update(path: Path, instrument: str):
     if cfg.get('instrument') != instrument:
         raise ValueError('Пара в конфигурации и реестре различается')
     cv=dec(cfg['contract_value'],positive=True)
-    rowdata=_ordered_rows(path/'state'/'fills_v068.sqlite',instrument)
+    rowdata=_ordered_rows(fills_db(path),instrument)
     best,net=reconstruct_peak(rowdata,cv)
     file=path/'state'/RECORD
     previous=None

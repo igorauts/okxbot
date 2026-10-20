@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP
 from pathlib import Path
 
-VER='0.7.14'
+VER='0.7.18'
 BASE=Path(__file__).resolve().parent
 ASSETS={'Bitcoin':'BTC','Ethereum':'ETH','Solana':'SOL','Near':'NEAR','Zcash':'ZEC','Sui':'SUI'}
 

@@ -13,6 +13,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from okx_runtime_paths import state_file
 
 BOT_ROOT = Path('/root/okx')
 UNIT_DIR = Path('/etc/systemd/system')
@@ -30,14 +31,16 @@ def confirmed_panic(root):
     """No API; require independently persisted terminal state, ack and config."""
     try:
         cfg=load_json(root/'config.json')
-        st=load_json(root/'state'/'bot04_state.json')
+        st=load_json(state_file(root))
         ack=load_json(root/'state'/'control_ack.json')
         control=load_json(root/'state'/'control.json')
     except (OSError,ValueError,TypeError) as exc:
         print(f'PANIC CLEANUP SKIP: state unavailable ({type(exc).__name__})',flush=True)
         return False
-    if not (cfg.get('version')=='0.7.14' and
-            st.get('version')=='0.7.14' and
+    if not (isinstance(cfg.get('version'), str) and
+            cfg.get('version')==st.get('version') and
+            re.fullmatch(r'\d+\.\d+\.\d+', cfg['version']) and
+            tuple(map(int, cfg['version'].split('.'))) >= (0,7,14) and
             cfg.get('instrument')==st.get('instrument') and
             control.get('mode')=='PANIC' and
             st.get('terminal_mode')=='PANIC_DONE' and

@@ -13,6 +13,7 @@ import fcntl
 import json
 import os
 from pathlib import Path
+from okx_runtime_paths import state_file
 import re
 
 from okx_rollout_plan import plan_unit_rewrite
@@ -79,7 +80,7 @@ def read_only_bot_plan(root:Path, service:str, unit_text:str):
     if not (root/'state').is_dir() or (root/'state').is_symlink():
         raise UpgradeBlocked('Unsafe state path')
     config=_read(root/'config.json')
-    state=_read(root/'state/bot04_state.json')
+    state=_read(state_file(root))
     instrument=_check_versions(config,state)
     try:
         planned=plan_unit_rewrite(unit_text,root,service)

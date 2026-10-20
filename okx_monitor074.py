@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from okx_runtime_paths import state_file
 """Manage optional per-instance read-only burst/execution observers.
 
 Never imports the trading engine, touches credentials or restarts trading services.
@@ -72,7 +73,7 @@ def main():
     from json import JSONDecodeError
     try:
         config=json.loads((root/'config.json').read_text())
-        st=json.loads((root/'state/bot04_state.json').read_text())
+        st=json.loads((state_file(root)).read_text())
         if st.get('version')!='0.7.4' or st.get('instrument')!=config.get('instrument'):
             raise RuntimeError('Observer needs running v0.7.4 state matching config')
     except (OSError,JSONDecodeError) as exc:

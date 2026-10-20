@@ -20,6 +20,7 @@ import json
 import os
 from contextlib import closing
 from pathlib import Path
+from okx_runtime_paths import state_file
 import shutil
 import sqlite3
 import tempfile
@@ -61,7 +62,7 @@ def _source_inventory(root: Path, expected_version: str):
     if state.is_symlink() or not state.is_dir():
         raise SnapshotError('Missing or linked state directory')
     conf=root/'config.json'
-    trade_state=state/'bot04_state.json'
+    trade_state=state_file(root)
     for p in (conf,trade_state):
         if p.is_symlink() or not p.is_file():
             raise SnapshotError('Missing or linked mandatory snapshot source: '+p.name)

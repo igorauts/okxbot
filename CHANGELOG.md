@@ -1,3 +1,11 @@
+## v0.7.18 — 2026-10-20 — Internal runtime paths
+
+- LIVE state/SQLite/logs/diagnostics migrated to stable file and directory names; existing history preserved.
+- Introduced `okx_runtime_paths.py`; current bots use new paths, archived older bots remain readable through legacy paths.
+- Updated engine, manager, Telegram and observers; included verified STATE MISMATCH / BACK TO NORMAL hotfix.
+- Explicitly deferred account-wide FIFO gate renames, compatibility-module refactoring and any trading/TP strategy changes.
+- Published the exact verified LIVE public source without restarting trading services.
+
 ## v0.7.17 — 2026-10-19 — Project cleanup
 
 - GitHub main: один README, удалены исторические README/Release Notes, устаревшие исходники и тестовые комплекты; старые теги сохранены.

@@ -15,6 +15,7 @@ from collections import Counter, defaultdict, deque
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from okx_runtime_paths import state_file, events_file, observer_dir
 
 OBSERVER_VERSION = '0.7.14'
 BID_PATTERN = re.compile(r'РЕЖИМ=[A-Z_]+\s*\|\s*BID=([0-9]+(?:\.[0-9]+)?)')
@@ -139,7 +140,7 @@ class Observer:
     def __init__(self, root, service, mode):
         self.root, self.service, self.mode = root, service, mode
         cfg = read_json(root / 'config.json')
-        st = read_json(root / 'state/bot04_state.json')
+        st = read_json(state_file(root))
         if cfg is None or st is None or not _observer_supported_version(cfg, st):
             raise RuntimeError('Observer requires consistent state/config version >= 0.7.7')
         if cfg.get('instrument') != st.get('instrument'):
@@ -149,13 +150,16 @@ class Observer:
         self.grid_step = num(cfg.get('grid_step'))
         if self.grid_step is None or self.grid_step <= 0 or not 1 <= self.target_buy <= 25 or not 1 <= self.target_tp <= 25:
             raise RuntimeError('Invalid grid config')
-        self.out = root / 'diagnostics' / (mode + '_v0711')
+        self.out = observer_dir(root,mode)
         self.out.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.tail = Tail(root / 'logs/bot04_events.jsonl')
+        self.tail = Tail(events_file(root))
         self.counters = Counter()
         self.bid = None
         self.bid_at = 0.
         self.last_state = None
+        self.paired_run = f"{int(time.time()*1000)}-{os.getpid()}"
+        self.paired_seq = 0
+        self.paired_samples = deque(maxlen=64)
         self.last_sample = 0.
         self.last_summary = 0.
         self.below_since = None
@@ -299,7 +303,7 @@ class Observer:
         # Journal events are recorded but not written once per heartbeat.
 
     def snapshot(self):
-        st = read_json(self.root / 'state/bot04_state.json')
+        st = read_json(state_file(self.root))
         if st is None:
             if time.monotonic() - self.last_error_notice > 30:
                 self.last_error_notice = time.monotonic()
@@ -324,6 +328,13 @@ class Observer:
             s['engine_buy']=self.engine_sample['buy']
             s['engine_tp']=self.engine_sample['tp']
             s['engine_observed_ts']=self.engine_sample['ts']
+            if (not self.paired_samples or
+                self.paired_samples[-1]['engine_observed_ts'] != s['engine_observed_ts']):
+                self.paired_seq += 1
+                self.paired_samples.append({
+                    'seq':self.paired_seq, 'ts':s['ts'],
+                    'state_buy':s['buy'], 'engine_buy':s['engine_buy'],
+                    'engine_observed_ts':s['engine_observed_ts']})
             if s['buy'] != self.engine_sample['buy']:
                 self.state_engine_disagreements += 1
                 now = time.monotonic()
@@ -397,6 +408,8 @@ class Observer:
                'cancel_then_replace_same_price_1s':self.same_price_1s,
                'fresh_bid':str(self.bid) if self.bid is not None and time.monotonic()-self.bid_at<15 else None,
                'note':'Read-only. BUY duration based on engine journal statuses, persisted JSON is separately sampled at 5s. Not independent OKX confirmation.'}
+        rec['paired_run'] = self.paired_run
+        rec['paired_samples'] = list(self.paired_samples)
         p = self.out/'summary.json'
         tmp = self.out/'.summary.tmp'
         tmp.write_text(json.dumps(rec,ensure_ascii=False,indent=2),encoding='utf-8')
@@ -469,7 +482,7 @@ def run(root,service,mode):
 
 
 def report(root,mode):
-    p=root/'diagnostics'/(mode+'_v0711')/'summary.json'
+    p=observer_dir(root,mode)/'summary.json'
     data=read_json(p)
     print(json.dumps(data,ensure_ascii=False,indent=2) if data else 'No observer data yet')
 

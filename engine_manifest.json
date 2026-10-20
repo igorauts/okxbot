@@ -1,16 +1,17 @@
 {
   "schema_version": 1,
   "engines": {
-    "0.7.17": {
+    "0.7.18": {
       "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
         "okx_positions_fifo.py",
         "okx_fill_singleflight.py",
-        "okx_emergency_gate.py"
+        "okx_emergency_gate.py",
+        "okx_runtime_paths.py"
       ]
     }
   },
-  "current_version": "0.7.17"
+  "current_version": "0.7.18"
 }

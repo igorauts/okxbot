@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from okx_runtime_paths import state_file
 """Read-only monitor discovery + guarded actions for OKX manager v0.7.4.
 
 Never changes/reads exchange credentials or trading state. The only systemd
@@ -93,7 +94,7 @@ def assert_compatible(service: str, root: Path) -> None:
                            'Торговый бот пока на старой версии; ничего не изменено.')
     try:
         cfg = json.loads((root / 'config.json').read_text(encoding='utf-8'))
-        state = json.loads((root / 'state' / 'bot04_state.json').read_text(encoding='utf-8'))
+        state = json.loads(state_file(root).read_text(encoding='utf-8'))
     except (ValueError, OSError) as exc:
         raise RuntimeError('Не удалось сверить конфигурацию и состояние бота.') from exc
     if state.get('version') != '0.7.4' or cfg.get('instrument') != state.get('instrument'):

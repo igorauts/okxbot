@@ -10,6 +10,7 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from okx_runtime_paths import state_file, fills_db, observer_dir
 
 from okx_telegram_views import (COUNTS, MODE, date_epoch, read_json, number,
                                 market_message, market_ledger, journal)
@@ -128,7 +129,7 @@ def market_process(api,st,names):
         # may use OKX clock: therefore displayed with approximation sign.
         try:
             import sqlite3
-            db=root/'state/fills_v068.sqlite'
+            db=fills_db(root)
             with sqlite3.connect(db.resolve().as_uri()+'?mode=ro',uri=True,timeout=2) as con:
                 rows=[json.loads(x[0]) for x in con.execute('SELECT data FROM fills WHERE order_id=?',(oid,))]
             if intent and rows:
@@ -158,7 +159,7 @@ def partial_scan(api,st,names):
     current=set()
     for name,root in names.items():
         cfg=read_json(root/'config.json')
-        statepath=root/'state/bot04_state.json'
+        statepath=state_file(root)
         try:
             # A stale state is not an authoritative live partial fill.
             if now-statepath.stat().st_mtime>30:
@@ -254,7 +255,8 @@ def _state_mismatch_alert(api,st,name,obj):
     state_buy=obj.get('state_buy')
     engine_buy=obj.get('engine_buy')
     rec={'since':ts-duration,'last_alert_at':ts,'matches':0,
-         'last_match_ts':None,'state_buy':state_buy,'engine_buy':engine_buy}
+          'last_match_ts':None,'state_buy':state_buy,'engine_buy':engine_buy,
+          'paired_schema':2}
     # Don't store an active incident unless Telegram accepted its alert.
     one(api,st,f'state_mismatch/open/{name}/{ts}',
         f'⚠️ STATE MISMATCH | {name}\n'
@@ -264,75 +266,97 @@ def _state_mismatch_alert(api,st,name,obj):
 
 
 def _state_mismatch_check_recovery(api,st,names):
-    """Check actual paired observer measurements, never silence as recovery.
+    """Recovery requires three distinct recent *paired* observer measurements.
 
-    Observer v0.7.14 writes summary.json every ~20s. Its `last_state`
-    is enriched IN MEMORY with engine_buy/engine_observed_ts; unlike
-    snapshots.jsonl, which is written before adding engine data.
-    Three distinct fresh, consecutive matching summary samples required.
+    Observer pairs are generated only when an engine journal value is <5s old
+    at a state snapshot; no inference from a stale summary or mere silence.
     """
     incidents=st.setdefault('state_mismatch_incidents',{})
     now=time.time()
     for name in list(incidents):
         if name not in names:
-            # Do not claim recovery from an inactive process or missing observer.
             continue
         rec=incidents[name]
         root=names[name]
-        paths=list(root.glob('diagnostics/execution_*/summary.json'))
+        current_summary = observer_dir(root,'execution')/'summary.json'
+        paths=([current_summary] if current_summary.is_file()
+               else list(root.glob('diagnostics/execution_*/summary.json')))
         if not paths:
-            rec['matches']=0
             continue
         try:
             newest=max(paths,key=lambda p:p.stat().st_mtime)
             summary=read_json(newest)
-            if summary.get('mode')!='execution':
-                rec['matches']=0; continue
-            sample=summary.get('last_state')
-            if not isinstance(sample,dict):
-                rec['matches']=0; continue
             summary_ts=date_epoch(summary.get('ts'))
-            sample_ts=date_epoch(sample.get('ts'))
-            engine_ts=date_epoch(sample.get('engine_observed_ts'))
-            if (summary_ts is None or sample_ts is None or engine_ts is None
-                or not (-2<=now-summary_ts<=45)
-                or not (-2<=now-sample_ts<=35)
-                or abs(sample_ts-engine_ts)>6
-                or sample_ts<=float(rec.get('last_alert_at',0))):
-                rec['matches']=0;continue
-            # Refuse unknown/stale engine reports; require numeric equality.
-            state_buy=sample.get('buy')
-            engine_buy=sample.get('engine_buy')
-            if (not isinstance(state_buy,int) or isinstance(state_buy,bool)
-                or not isinstance(engine_buy,int) or isinstance(engine_buy,bool)
-                or state_buy<0 or engine_buy<0 or state_buy!=engine_buy):
+            if (summary.get('mode')!='execution' or summary_ts is None
+                    or not (-2 <= now-summary_ts <= 45)):
+                continue
+            run=summary.get('paired_run')
+            pairs=summary.get('paired_samples')
+            if not isinstance(run,str) or not isinstance(pairs,list):
+                continue
+            if rec.get('pair_run')!=run:
+                rec['pair_run']=run
+                rec['last_pair_seq']=0
                 rec['matches']=0
                 rec['last_match_ts']=None
-                continue
-            last=rec.get('last_match_ts')
-            if last is not None and sample_ts<=float(last):
-                continue  # same observer sample on the next Telegram poll
-            if last is not None and sample_ts-float(last)>45:
-                rec['matches']=0  # missed too many summary intervals
-            rec['last_match_ts']=sample_ts
-            rec['matches']=int(rec.get('matches',0))+1
-            if rec['matches']>=3:
-                duration=max(0.,sample_ts-float(rec['since']))
-                one(api,st,f'state_mismatch/normal/{name}/{rec["since"]}',
-                    f'✅ BACK TO NORMAL | {name}\n'
-                    f'State и Engine снова совпадают\n'
-                    f'Длительность инцидента: {duration:.1f} с')
-                del incidents[name]
-        except (OSError,TypeError,ValueError,OverflowError):
-            rec['matches']=0
-            # Next monitoring iteration can retry reading a new summary.
+                rec['first_match_ts']=None
+            for pair in sorted((p for p in pairs if isinstance(p,dict)),
+                               key=lambda p:int(p.get('seq') or 0)):
+                seq=pair.get('seq')
+                if (not isinstance(seq,int) or isinstance(seq,bool)
+                        or seq <= int(rec.get('last_pair_seq') or 0)):
+                    continue
+                rec['last_pair_seq']=seq
+                sample_ts=date_epoch(pair.get('ts'))
+                engine_ts=date_epoch(pair.get('engine_observed_ts'))
+                if (sample_ts is None or engine_ts is None
+                        or not (-2 <= now-sample_ts <= 180)
+                        or abs(sample_ts-engine_ts)>6
+                        or sample_ts <= float(rec.get('last_alert_at',0))):
+                    continue
+                state_buy=pair.get('state_buy')
+                engine_buy=pair.get('engine_buy')
+                if (type(state_buy) is not int or type(engine_buy) is not int
+                        or state_buy < 0 or engine_buy < 0):
+                    rec['matches']=0
+                    rec['last_match_ts']=None
+                    rec['first_match_ts']=None
+                    continue
+                if state_buy != engine_buy:
+                    rec['matches']=0
+                    rec['last_match_ts']=None
+                    rec['first_match_ts']=None
+                    continue
+                last=rec.get('last_match_ts')
+                if last is not None and sample_ts <= float(last):
+                    continue
+                if last is None or sample_ts-float(last)>75:
+                    rec['matches']=0
+                    rec['first_match_ts']=sample_ts
+                rec['last_match_ts']=sample_ts
+                rec['matches']=int(rec.get('matches',0))+1
+                if rec['matches']>=3:
+                    since=float(rec['since'])
+                    duration=max(0.,sample_ts-since)
+                    if rec.get('paired_schema')==2:
+                        detail=f'До подтверждения восстановления: {duration:.1f} с'
+                    else:
+                        detail=('Длительность старого инцидента не установлена: '
+                                'до исправления часть измерений терялась')
+                    one(api,st,f'state_mismatch/normal/{name}/{rec["since"]}',
+                        f'✅ BACK TO NORMAL | {name}\n'
+                        f'State и Engine снова совпадают (3 измерения)\n'
+                        +detail)
+                    del incidents[name]
+                    break
+        except (OSError,TypeError,ValueError,OverflowError,AttributeError,KeyError):
+            # Never infer recovery from an unavailable/invalid observation.
             continue
-
 
 def observer_fault_scan(api,st,names):
     offsets=st.setdefault('observer_offsets',{})
     for name,root in names.items():
-        for path in root.glob('diagnostics/execution_*/alerts.jsonl'):
+        for path in ([observer_dir(root,'execution')/'alerts.jsonl'] if (observer_dir(root,'execution')/'alerts.jsonl').is_file() else list(root.glob('diagnostics/execution_*/alerts.jsonl'))):
             token=str(path)
             try:
                 size=path.stat().st_size

@@ -34,8 +34,8 @@ from okx_latency import LatencyJournal
 
 ROOT = Path(__file__).resolve().parent
 CFG = json.loads((ROOT / 'config.json').read_text())
-DATA = ROOT / 'state' / 'bot04_state.json'
-EVENTS = ROOT / 'logs' / 'bot04_events.jsonl'
+DATA = ROOT / 'state' / 'bot_state.json'
+EVENTS = ROOT / 'logs' / 'bot_events.jsonl'
 INST = str(CFG.get('instrument',''))
 COIN = INST.split('-',1)[0]
 ALLOWED = {'BTC','ETH','SOL','NEAR','ZEC','SUI'}
@@ -44,7 +44,7 @@ STEP, TP, QTY = (Decimal(str(CFG.get(k,0))) for k in
 TARGET, CAP, EX_CAP = (int(CFG.get(k,0)) for k in
                        ('active_buy_orders','max_grids','max_exchange_orders'))
 INTERVAL = 1.0  # main safety loop; BID updates independently via public WS
-VER = '0.7.17'
+VER = '0.7.18'
 # REST orders-pending is paginated. Exchange-attached SELLs may temporarily
 # exceed the baseline real TP count during multiple simultaneous BUY fills.
 # Exchange-attached TP can grow during a burst. Surplus is trimmed only
@@ -70,9 +70,9 @@ ESCAPE_COALESCE_SEC = 0.15
 
 REDUCE_ONLY_HARD_CAP = 150
 TP_ACTIONS_PER_PASS = 5  # normal TP recovery; burst cleanup uses 1
-TP_JOURNAL = ROOT / 'logs' / 'tp_transitions_v057.jsonl'
-PNL_DATA = ROOT / 'state' / 'bot05_pnl.json'
-PNL_DB = ROOT / 'state' / 'pnl_v068.sqlite'
+TP_JOURNAL = ROOT / 'logs' / 'tp_transitions.jsonl'
+PNL_DATA = ROOT / 'state' / 'pnl.json'
+PNL_DB = ROOT / 'state' / 'pnl.sqlite'
 CONTRACT_VALUE = Decimal(str(CFG.get('contract_value',0)))
 PRICE_STEP = Decimal(str(CFG.get('tick_size',0)))
 CONTRACT_LOT = Decimal(str(CFG.get('contract_lot',0)))
@@ -99,11 +99,11 @@ if not (30 <= PARTIAL_AGE <= 3600 and 1 <= PARTIAL_STEPS <= 100):
 
 
 # v0.7.0-dev1 instrumentation: opt-in, no trading-control changes.
-# Enable with OKX_RECON_PROFILE=1, recording to logs/reconcile_profile_v070.jsonl.
+# Enable with OKX_RECON_PROFILE=1, recording to logs/reconcile_profile.jsonl.
 # Samples are diagnostic only, intentionally not fsynced to avoid slowing trading.
 _PERF_RECON_ENABLED = False  # Set after LIVE guard evaluation, below.
 _PERF_LOCAL = threading.local()
-_PERF_PATH = ROOT / 'logs' / 'reconcile_profile_v070.jsonl'
+_PERF_PATH = ROOT / 'logs' / 'reconcile_profile.jsonl'
 
 _RECON_PROFILE_MAX_BYTES = 16 * 1024 * 1024
 _RECON_PROFILE_ROTATION_LOCK = threading.Lock()
@@ -192,7 +192,7 @@ if (COIN not in ALLOWED or INST != f'{COIN}-USDT-SWAP'
             and BUY_CANCEL_PROTECT_STEPS==5) or EX_CAP != 500
     or D(CFG.get('buy_base_qty'))!=QTY*CONTRACT_VALUE
     or (UPPER and UPPER!=CAPITAL_REFERENCE)):
-    die('Invalid v0.7.17 BTC/ETH/SOL/NEAR/ZEC/SUI configuration. Refusing to start.')
+    die('Invalid v0.7.18 BTC/ETH/SOL/NEAR/ZEC/SUI configuration. Refusing to start.')
 
 ENV = {}
 for line in (ROOT / '.env').read_text().splitlines():
@@ -223,7 +223,7 @@ if LIVE and not FULL:
 # v0.7.11: local asynchronous latency journal, enabled for LIVE by default.
 # Disable with OKX_LATENCY_PROFILE=0. Never writes to trading state/SQLite.
 _PERF_RECON_ENABLED = LIVE and os.getenv('OKX_RECON_PROFILE', '1') != '0'
-LATENCY = LatencyJournal(ROOT / 'logs' / 'latency_v0711.jsonl',
+LATENCY = LatencyJournal(ROOT / 'logs' / 'latency.jsonl',
                          enabled=LIVE and os.getenv('OKX_LATENCY_PROFILE', '1') != '0')
 
 def latency_ms(phase, started_ns, **fields):
@@ -890,8 +890,8 @@ def trip_account_soft_stop(scode, message, action):
 # Local append-only record of exchange executions. Fills are unique by ordId+billId
 # (NOT by grid price or client-side order lifetime). SQLite transactions are
 # committed BEFORE a completed financial snapshot can use them.
-FILL_DB = ROOT / 'state' / 'fills_v068.sqlite'
-ARCHIVE_DB = ROOT / 'state' / 'cycles_v068.sqlite'
+FILL_DB = ROOT / 'state' / 'fills.sqlite'
+ARCHIVE_DB = ROOT / 'state' / 'cycles.sqlite'
 
 class FillStore:
     def __init__(self):
@@ -1154,7 +1154,7 @@ def _batch_confirmed_facts(state):
 
 # A separate persistent control plane; never edited by the analytics worker.
 # The manager submits a request by atomic rename. Only the trading process
-# sends/cancels orders and writes the acknowledgement, under bot05.lock.
+# sends/cancels orders and writes the acknowledgement, under bot.lock.
 CONTROL_FILE = ROOT / 'state' / 'control.json'
 CONTROL_ACK = ROOT / 'state' / 'control_ack.json'
 TERMINAL_STATS = ROOT / 'state' / 'final_stats.json'
@@ -2976,7 +2976,7 @@ class PnLWorker(threading.Thread):
 def acquire_lock():
     (ROOT/'state').mkdir(mode=0o700,exist_ok=True)
     (ROOT/'logs').mkdir(mode=0o700,exist_ok=True)
-    path=ROOT/'state'/'bot05.lock'
+    path=ROOT/'state'/'bot.lock'
     fd=os.open(path,os.O_CREAT|os.O_RDWR,0o600)
     try:
         fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
