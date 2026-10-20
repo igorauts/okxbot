@@ -13,7 +13,7 @@ from okx_version import VERSION, STATE_SCHEMA
 from okx_paths import state_file as current_state, fills_db as current_fills
 from okx_archive_reader import state_file as archive_state, fills_db as archive_fills
 
-assert VERSION=='0.7.19' and STATE_SCHEMA==1
+assert VERSION=='0.7.21' and STATE_SCHEMA==1
 assert base_coin('BTC-USDT-SWAP')=='BTC'
 assert base_coin('1000PEPE-USDT-SWAP')=='1000PEPE'
 for invalid in ['BTC-USD-SWAP','BTC-USDC-SWAP','BTC-USDT-241225','BTC-USDT-SWAP-XXX','']:
@@ -63,7 +63,7 @@ assert list(manifest['engines'])==[VERSION]
 for dependency in manifest['engines'][VERSION]['dependencies']:
     assert (SH/dependency).is_file(),dependency
 
-# Main safety-critical trading order functions remain AST-identical.
+# Main safety-critical functions are pinned to reviewed AST (v0.7.21 scope only).
 candidate=ast.parse((SH/'okx_bot.py').read_text())
 references=json.loads((ROOT/'tests/reference_safety_ast.json').read_text())
 new_ast={n.name:n for n in candidate.body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
@@ -106,7 +106,7 @@ for name in ['okx_monitor','okxbot','okx_ui','okx_setup','okx_observers','okx_ar
 for p in ROOT.rglob('*.py'):
     compile(p.read_bytes(),str(p),'exec')
 print('PASS: contracts, state, archive, stable paths, import smoke')
-print('PASS: critical trading AST retained ('+str(len(unchanged))+' symbols)')
+print('PASS: critical trading AST guarded ('+str(len(unchanged))+' symbols); v0.7.21 shutdown/WS changes re-pinned')
 print('PASS: legacy migrations absent; all Python syntax valid')
 print('OFFLINE ONLY — no OKX connection or orders')
 

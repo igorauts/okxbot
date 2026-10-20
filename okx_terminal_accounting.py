@@ -122,6 +122,13 @@ def compute(engine, state, fills, *, bid, snapshot=None):
         for rec in state.get('panic_orders',[]):
             oid=str(rec.get('ordId') or '')
             qty=dec(rec.get('filled') or 0)
+            if rec.get('state') in ('rejected','EXPIRED_ABSENT'):
+                # A definitive rejection or expTime-verified absence generated
+                # NO execution. Preserve it in audit history, but never require
+                # an ordId/fills or invent fees for it.
+                if oid or qty:
+                    raise ValueError('Rejected/absent PANIC intent has ordId or fills')
+                continue
             if not oid or oid in seen_panic or rec.get('state') not in ('filled','canceled','mmp_canceled'):
                 raise ValueError('PANIC order identity/outcome unconfirmed')
             seen_panic.add(oid)

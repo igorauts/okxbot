@@ -1,3 +1,11 @@
+## v0.7.21 — Offline candidate: emergency safety + Coverage HOLD
+
+- HARD/PANIC: owner-verified pending BUY cancellations before position reconciliation; cannot cancel foreign/unproven orders; durable single-send cancel intents preserved.
+- PANIC MARKET: expTime-backed durable intent, definitive rejection accounting, three-stage history/pending absence checks for uncertain POST, bounded retry with a new client ID only after positive proof, terminal accounting excludes rejected/absent zero-fill attempts.
+- Coverage HOLD: 0.5 → 1 → 2 second bounded backoff for unchanged conditions; private-order event wake; public BID changes do not reset it; all resume decisions still need fresh REST reconciliation.
+- FIFO, normal position reconciliation 150/300/500 ms, virtual TP strategy, Telegram and unrelated functions unchanged. State schema remains 1.
+- OFFLINE ONLY: no GitHub publication, LIVE installation or trading orders as part of this candidate.
+
 ## v0.7.20 — Telegram monitoring (2026-10-20)
 
 - Telegram PANIC notifications: confirmed closure, then verified terminal PnL.

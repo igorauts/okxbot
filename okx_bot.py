@@ -947,22 +947,34 @@ def panic_executions(st):
     return sum((D(e.get('filled')) for e in st.get('panic_orders',[])),Decimal(0))
 
 
-def reconcile_panic_orders(st):
-    """Only follow already submitted market SELLs by exact durable identity.
+def reconcile_panic_orders(st, pending=None):
+    """Resolve market SELLs by durable order ID, never by amount or price.
 
-    Never retry POST on ambiguous ACK. If exchange can't prove the original
-    order outcome, keep waiting in emergency mode and alert the operator.
+    Unknown POSTs can only be cleared after the expTime-aware, three-pass
+    historical absence proof AND a fresh pending-order snapshot. Absent proof
+    is never inferred from one missing GET or from a transport error.
     """
     all_resolved=True
     for e in st.get('panic_orders',[]):
-        if e.get('state') in ('filled','canceled','mmp_canceled'):
+        if e.get('state') in ('filled','canceled','mmp_canceled',
+                              'rejected','EXPIRED_ABSENT'):
             continue
         order=A.order(oid=e['ordId']) if e.get('ordId') else A.order(cid=e['clOrdId'])
         if order is None:
+            # A complete fresh /orders-pending is required for negative proof.
+            if (pending is not None and not e.get('ordId') and not any(
+                    o.get('clOrdId')==e['clOrdId'] or
+                    (e.get('ordId') and o.get('ordId')==e['ordId'])
+                    for o in pending) and post_absence_confirmed(e,'sell',st)):
+                e['state']='EXPIRED_ABSENT';e['resolvedAt']=time.time();save(st)
+                log('PANIC_MARKET_ABSENT_VERIFIED',clOrdId=e['clOrdId'],
+                    severity='WARNING',message='Three independent history probes; old client ID is never reused')
+                continue
             all_resolved=False
             if time.time()-float(e.get('placedAt',0))>30 and not e.get('warned'):
                 e['warned']=True;save(st)
-                log('PANIC_UNRESOLVED',clOrdId=e['clOrdId'],message='Do not resubmit; manual exchange audit required')
+                log('PANIC_UNRESOLVED',clOrdId=e['clOrdId'],
+                    severity='CRITICAL',message='Market outcome unknown; no duplicate POST')
             continue
         if (order.get('instId')!=INST or order.get('clOrdId')!=e['clOrdId']
             or order.get('side')!='sell' or order.get('ordType')!='market'
@@ -987,24 +999,71 @@ def reconcile_panic_orders(st):
     return all_resolved
 
 
+PANIC_MAX_POST_ATTEMPTS = 3
+PANIC_RETRY_BACKOFF_SEC = 30
+
+
+def panic_retry_delay(st):
+    """Every prior MARKET must be terminal before a distinct clOrdId is used.
+
+    Rejected/expired requests count toward a persistent per-PANIC cap; an
+    unknown intent does NOT count as proof that it is safe to retry.
+    """
+    orders=st.get('panic_orders',[])
+    if not orders:
+        return 0.0
+    if any(e.get('state') not in ('filled','canceled','mmp_canceled',
+                                  'rejected','EXPIRED_ABSENT') for e in orders):
+        raise ExchangeUnresolved('PANIC order still uncertain: no further POST')
+    if sum(e.get('state') in ('rejected','EXPIRED_ABSENT')
+           for e in orders)>=PANIC_MAX_POST_ATTEMPTS:
+        return None
+    last=orders[-1]
+    if last.get('state') not in ('rejected','EXPIRED_ABSENT'):
+        return 0.0  # confirmed partial/canceled MARKET, remaining position verified
+    return max(0.0, PANIC_RETRY_BACKOFF_SEC*(2**(sum(e.get('state') in ('rejected','EXPIRED_ABSENT') for e in orders)-1)) -
+               (time.time()-float(last.get('resolvedAt',last.get('placedAt',0)))))
+
+
 def place_panic_sell(st, remaining):
     if remaining<=0 or remaining<CONTRACT_MIN or remaining%CONTRACT_LOT:
         die('PANIC remaining size not valid for market sell: '+str(remaining))
+    if sum(e.get('state') in ('rejected','EXPIRED_ABSENT')
+           for e in st.get('panic_orders',[]))>=PANIC_MAX_POST_ATTEMPTS:
+        raise ExchangeUnresolved('PANIC rejections/absences exhausted; manual audit required')
     cid=newid('P')
-    # Write intent BEFORE any network call; never automatically send this
-    # POST twice, even if REST times out or server restarts.
+    deadline=new_request_deadline_ms()
+    # Persist unique ID + expiry BEFORE any network I/O; timeout stays unknown.
     rec={'clOrdId':cid,'ordId':'','sz':str(remaining), 'filled':'0',
-         'state':'SUBMITTED_UNKNOWN','placedAt':time.time()}
+         'state':'SUBMITTED_UNKNOWN','placedAt':time.time(),
+         'expTimeMs':deadline}
     st.setdefault('panic_orders',[]).append(rec);save(st)
-    log('PANIC_INTENT',clOrdId=cid,qty=str(remaining))
-    result=A.req('POST','/api/v5/trade/order',body={
-        'instId':INST,'tdMode':'cross','side':'sell','posSide':'net',
-        'reduceOnly':True,'ordType':'market','sz':str(remaining),'clOrdId':cid})
-    if len(result)!=1 or result[0].get('sCode')!='0':
-        # A definite exchange rejection must be manually inspected.
-        die('PANIC market order rejected/ambiguous; check OKX and do not resubmit blindly: '+str(result))
+    log('PANIC_INTENT',clOrdId=cid,qty=str(remaining),expTimeMs=deadline)
+    try:
+        result=A.req('POST','/api/v5/trade/order',body={
+            'instId':INST,'tdMode':'cross','side':'sell','posSide':'net',
+            'reduceOnly':True,'ordType':'market','sz':str(remaining),'clOrdId':cid},
+            exp_time_ms=deadline)
+    except OrderExpiredBeforeSend:
+        # A local expiry is positive proof that NO network POST happened.
+        rec['state']='EXPIRED_ABSENT';rec['resolvedAt']=time.time();save(st)
+        log('PANIC_LOCAL_EXPIRY',clOrdId=cid,severity='WARNING')
+        return
+    if (len(result)!=1 or not isinstance(result[0],dict)
+        or result[0].get('clOrdId') not in (None,'',cid)):
+        raise ExchangeUnresolved('PANIC ACK identity or length ambiguous; intent reserved')
+    if result[0].get('sCode')!='0':
+        # API.req only returns explicit per-order rejection with matching cid
+        # and no ordId. A 5xx/429/transport error raises unknown instead.
+        if result[0].get('ordId') not in ('',None) or not result[0].get('sCode'):
+            raise ExchangeUnresolved('PANIC rejection contradicts order identity')
+        rec['state']='rejected';rec['rejectCode']=str(result[0]['sCode'])
+        rec['resolvedAt']=time.time();save(st)
+        log('PANIC_MARKET_REJECTED',severity='CRITICAL',clOrdId=cid,
+            code=rec['rejectCode'],message=str(result[0].get('sMsg',''))[:160])
+        return
     if not result[0].get('ordId'):
-        die('PANIC ACK missing ordId; recovery by clOrdId only')
+        raise ExchangeUnresolved('PANIC ACK missing ordId; recovery by clOrdId only')
     rec['ordId']=result[0]['ordId'];save(st)
     log('PANIC_ACCEPTED',clOrdId=cid,ordId=rec['ordId'])
 
@@ -1016,7 +1075,8 @@ def controlled_shutdown(st, pending, actual, resolved, mode, terminal_bid=None):
     confirmed final states, then retire; PANIC alone additionally market
     closes the reconciled bot net position. Never call normal TP rearming.
     """
-    # If any cancel/attached TP is still in flight, wait for reconciliation.
+    # Early owner-verified BUY cancels are handled before position reconciliation
+    # in live_loop(). Never bypass the fresh full pass for TP cancellation or SELL.
     if not resolved:
         control_ack(mode,'WAIT_RECONCILIATION')
         return False
@@ -1051,7 +1111,7 @@ def controlled_shutdown(st, pending, actual, resolved, mode, terminal_bid=None):
     # Panic is only reachable once BUY and TP cancels have FINAL outcomes.
     # No other pending orders. Prevent selling against anyone else's account
     # position by demanding exact local/exchange reconciliation every pass.
-    if not reconcile_panic_orders(st):
+    if not reconcile_panic_orders(st,pending):
         control_ack(mode,'WAIT_PANIC_ORDER')
         return False
     # The caller read actual from the SAME round of reconcile_position.
@@ -1066,10 +1126,65 @@ def controlled_shutdown(st, pending, actual, resolved, mode, terminal_bid=None):
         return True
     if actual < 0:
         die('PANIC refused: net position is short')
-    # Only repeat if every PREVIOUS panic order has a confirmed final state.
+    # Resend only after a definitive rejection/expiry or confirmed final fill,
+    # bounded by a durable retry count and with a fresh reconciled position.
+    delay=panic_retry_delay(st)
+    if delay is None:
+        control_ack(mode,'PANIC_MANUAL_REVIEW',remaining_position=str(actual))
+        if not st.get('panic_retry_exhausted_warned'):
+            st['panic_retry_exhausted_warned']=True;save(st)
+            log('PANIC_RETRY_EXHAUSTED',severity='CRITICAL',remaining=str(actual))
+        return False
+    if delay>0:
+        control_ack(mode,'WAIT_PANIC_RETRY',retry_after_sec=round(delay,1))
+        return False
     place_panic_sell(st,actual)
     control_ack(mode,'WAIT_PANIC_ORDER')
     return False
+
+
+def emergency_precancel_own_buys(st, mode):
+    """Reduce exposure before the /positions gate or unrelated TP can stall.
+
+    Exact currently pending BUY identity is proven independently of position
+    reconciliation. Never cancel other orders, PLACING intents, or a BUY that
+    has become terminal; CANCELING intents are never re-POSTed.
+    """
+    eligible=[c for c in active_buy(st)
+              if c.get('state') in ('BUY_LIVE','BUY_PARTIAL') and c.get('ordId')]
+    if not eligible:
+        return False
+    pending=A.pending()  # fresh complete pagination, no /positions quota
+    by_id={}
+    for o in pending:
+        oid=str(o.get('ordId') or '')
+        if not oid or oid in by_id:
+            raise ExchangeUnresolved('Emergency pending snapshot has duplicate/missing order IDs')
+        by_id[oid]=o
+    matches=[]
+    for c in eligible:
+        o=by_id.get(str(c['ordId']))
+        if o is None:
+            continue  # filled/canceled race; full reconciliation must resolve
+        if (o.get('instId')!=INST or o.get('side')!='buy'
+            or o.get('clOrdId')!=c.get('clOrdId')
+            or o.get('state') not in ('live','partially_filled')
+            or D(o.get('sz'))!=D(c['sz'])
+            or D(o.get('px'))!=D(c['buyPx'])):
+            raise ExchangeUnresolved('Emergency BUY identity/price/quantity mismatch')
+        matches.append(c)
+    if not matches:
+        return False
+    if control_mode()!=mode:
+        raise ExchangeTemporary('Emergency command changed during BUY snapshot')
+    for c in matches[:5]:
+        if control_mode()!=mode:
+            raise ExchangeTemporary('Emergency command changed during BUY cancellation batch')
+        cancel_lowest_specific(st,c)  # durable CANCELING before any cancel POST
+    control_ack(mode,'CANCEL_BUYS')
+    log('EMERGENCY_EARLY_BUY_CANCEL',mode=mode,count=min(len(matches),5),
+        message='Fresh exact-ID BUY snapshot; no position gate bypass for SELL')
+    return True
 
 
 def cancel_buys_for_soft_stop(st, resolved, pending=None):
@@ -2114,6 +2229,7 @@ class WSWatcher(threading.Thread):
         super().__init__(daemon=True)
         self.events=queue.Queue(maxsize=1000)
         self.wake=threading.Event()
+        self.private_wake=threading.Event()
         self.connected=False
     def run(self):
         while True:
@@ -2150,6 +2266,7 @@ class WSWatcher(threading.Thread):
                                 safe={k:item.get(k) for k in ('ordId','clOrdId','algoClOrdId',
                                     'side','state','accFillSz','fillSz','tradeId')}
                                 self.events.put_nowait(safe)
+                                self.private_wake.set()
                                 self.wake.set()
             except Exception as e:
                 self.connected=False
@@ -2387,7 +2504,7 @@ def reconcile_position(st, timeout=30, pause=0.5, *, allow_mismatch=False):
             # The position GET happens as soon as the confirmed fact batch is
             # reconciled/durable; NEVER fetch positions before inspecting fills.
             if st.get('panic_orders'):
-                resolved=reconcile_panic_orders(st) and resolved
+                resolved=reconcile_panic_orders(st,pending) and resolved
             positions=(p.run('positions',A.positions) if p is not None else A.positions())
             expected=sum((D(x.get('filledBuy'))-D(x.get('filledTP'))
                           for x in st['cycles'].values()),Decimal('0')) - panic_executions(st)
@@ -2404,7 +2521,8 @@ def reconcile_position(st, timeout=30, pause=0.5, *, allow_mismatch=False):
                     # We still have a fresh list of individual known pending BUYs.
                     # Permit their exact-ID cancellations in SOFT, but block any
                     # new exposure or TP placement that needs position coverage.
-                    log('SOFT_POSITION_UNRESOLVED',exchange=str(actual),local=str(expected),
+                    log('EMERGENCY_POSITION_UNRESOLVED' if control_mode() in ('HARD','PANIC')
+                        else 'SOFT_POSITION_UNRESOLVED',exchange=str(actual),local=str(expected),
                         message='Only independently confirmed BUY cancels are allowed')
                     return pending,False,actual
                 raise ExchangeUnresolved('Position mismatch persisted after full REST rechecks: '
@@ -2499,6 +2617,28 @@ def safe_tp_during_buy_wait(st,pending,actual):
     return 'RESTORE'
 
 
+def coverage_hold_delay(attempts):
+    return (0.5,1.0,2.0)[min(max(0,attempts),2)]
+
+
+def wait_coverage_hold(watcher,delay):
+    """Bounded HOLD backoff; private order events or emergency stop wake it.
+
+    Public BID changes never reset this timer. A wake merely requests a fresh
+    REST reconciliation and cannot approve new BUY on its own.
+    """
+    deadline=time.monotonic()+delay
+    while True:
+        if control_mode()!='RUN':
+            return 'CONTROL'
+        if not watcher.events.empty() or watcher.private_wake.is_set():
+            return 'PRIVATE'
+        remaining=deadline-time.monotonic()
+        if remaining<=0:
+            return 'TIMEOUT'
+        watcher.private_wake.wait(min(0.2,remaining))
+
+
 def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
     last_status_key=None
     last_print=0
@@ -2511,6 +2651,8 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
     sync_warn_level=0
     maker_cost=None
     tp_buffer=TPBufferScheduler()
+    coverage_hold_reason=None
+    coverage_hold_attempts=0
     while True:
         try:
             started=time.monotonic()
@@ -2532,9 +2674,18 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             if ws_n:
                 latency_ms('ws_drain',ws_start,count=ws_n)
             watcher.wake.clear()
+            watcher.private_wake.clear()
 
+            if mode in ('HARD','PANIC') and emergency_precancel_own_buys(st,mode):
+                # Resume with a FRESH snapshot next pass. Never let an unknown
+                # TP, foreign order or saturated /positions delay safe BUY cancel.
+                continue
             pending,all_resolved,actual=reconcile_position(
-                st,timeout=30,allow_mismatch=(mode=='SOFT'))
+                st,timeout=30,allow_mismatch=(mode in ('SOFT','HARD','PANIC')))
+            # A manager command may change during a 30-second REST pass.
+            # Never continue to BUY placement under a stale RUN/PAUSE mode.
+            if control_mode()!=mode:
+                continue
             # Publish reconciled virtual targets to the ticker listener and
             # durably latch crossings observed during the previous REST pass.
             # Never send orders here; exchange position/order gates remain.
@@ -2633,10 +2784,25 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                             mode=mode,message='BUY blocked; existing TP retained')
                         last_sync_kind='COVERAGE_HOLD'
                         last_sync_notice=now
-                    safe_tp_during_buy_wait(st,pending,actual)
-                    watcher.wake.wait(0.15)
-                    watcher.wake.clear()
+                    reason=str(exc)
+                    if reason==coverage_hold_reason:
+                        coverage_hold_attempts+=1
+                    else:
+                        coverage_hold_reason=reason
+                        coverage_hold_attempts=0
+                    delay=coverage_hold_delay(coverage_hold_attempts)
+                    if control_mode()!=mode:
+                        continue
+                    outcome=safe_tp_during_buy_wait(st,pending,actual)
+                    if outcome=='RESTORE':
+                        # A protective TP was submitted; reconcile promptly.
+                        coverage_hold_attempts=0
+                        continue
+                    wait_coverage_hold(watcher,delay)
                     continue
+                else:
+                    coverage_hold_reason=None
+                    coverage_hold_attempts=0
             # TP lifecycle takes precedence over all new BUY placements.
             # Any cancel/restore requires a full new REST reconciliation.
             bid=market.get_bid()
