@@ -926,7 +926,19 @@ def control_ack(mode, phase, **details):
     signature = (record['mode'],record['phase'],details)
     if old and (old.get('mode'), old.get('phase'),
                 {k:v for k,v in old.items() if k not in ('schema_version','mode','phase','updated_at')}) == signature:
-        return
+        if mode=='SOFT' and phase=='SOFT_STOPPED' and account_soft_active():
+            # A new account latch can trip AFTER a bot was already SOFT.
+            # Acknowledge it only after another successful SOFT safety pass,
+            # preserving the manager's strict post-latch timestamp check.
+            latch=json.loads(ACCOUNT_SOFT_STOP.read_text(encoding='utf-8'))
+            at=datetime.fromisoformat(str(latch['at']).replace('Z','+00:00'))
+            previous=datetime.fromisoformat(str(old['updated_at']).replace('Z','+00:00'))
+            if at.tzinfo is None or previous.tzinfo is None:
+                raise RuntimeError('Invalid SOFT acknowledgment/latch timestamp')
+            if previous>=at:
+                return
+        else:
+            return
     atomic_json(CONTROL_ACK,record)
     log('CONTROL_STATE',mode=mode,phase=phase,**details)
 
@@ -3555,13 +3567,36 @@ class BotDrawdownSampler:
     introduce small errors, as deliberately accepted by the operator.
 
     No REST, no extra GET, no fills history, no anchor/fingerprint gating,
-    no retry, no queue, no threads. DD errors must never affect orders.
+    Bounded async writer persists the sample; errors never affect orders.
     """
     def __init__(self, market, pnl):
         self.market = market
         self.pnl = pnl
         self.last_sample = 0.0
         self.last_error_notice = 0.0
+        self.samples = queue.Queue(maxsize=120)  # bounded, latest seconds of diagnostics
+        self.dropped = 0
+        self._thread = threading.Thread(target=self._write_loop,
+                                         daemon=True,name='okx-drawdown-writer')
+        self._thread.start()
+
+    def _write_loop(self):
+        while True:
+            total, at, bid = self.samples.get()
+            try:
+                record_bot_drawdown(total, now=at,
+                                    source='local_realized_plus_bid', bid=bid)
+            except Exception as exc:
+                clock=time.monotonic()
+                if clock-self.last_error_notice>=60:
+                    self.last_error_notice=clock
+                    try:
+                        log('BOT_DRAWDOWN_SAMPLE_FAILED',
+                            error=f'{type(exc).__name__}: {str(exc)[:120]}')
+                    except Exception:
+                        pass
+            finally:
+                self.samples.task_done()
 
     def submit_reconciled(self, st):
         clock = time.monotonic()
@@ -3595,8 +3630,11 @@ class BotDrawdownSampler:
             total = D(realized) + floating
             if not total.is_finite():
                 return
-            record_bot_drawdown(total, now=time.time(),
-                                source='local_realized_plus_bid', bid=bid)
+            try:
+                self.samples.put_nowait((total, time.time(), bid))
+            except queue.Full:
+                # Diagnostic data may drop; trading must NEVER wait for fsync.
+                self.dropped += 1
         except Exception as exc:
             # A diagnostic error must never interrupt trading.
             if clock - self.last_error_notice >= 60:

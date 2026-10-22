@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 from urllib.request import Request, urlopen
 import html
 from okx_telegram_views import status_one, latency_report, read_json, LINE
-from okx_telegram_events import (one, event_alert, market_event, market_process, zero_buy_scan, observer_fault_scan)
+from okx_telegram_events import (one, event_alert, market_event, market_process, zero_buy_scan, observer_fault_scan, gate_alert_scan)
 from okx_telegram_followups import partial_scan, panic_scan
 from okx_telegram_delivery import persist as durable_save, drain as alert_drain
 from okx_telegram_health import service_check, engine_heartbeat_check, observers_check
@@ -379,6 +379,7 @@ def ingest_events(api,st):
     panic_scan(api,st,{k:Path(v) for k,v in BOT_DIRS.items()})
     partial_scan(api,st,names,{k:Path(v) for k,v in BOT_DIRS.items()})
     zero_buy_scan(api,st,names)
+    gate_alert_scan(api,st)
 
 def poll_commands(api,st):
     updates=api.call('getUpdates',{'offset':st['updates_offset'],'timeout':0,'limit':20})

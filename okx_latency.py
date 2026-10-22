@@ -61,7 +61,23 @@ class LatencyJournal:
             # Read-only telemetry must never propagate an error into trading.
             self.dropped += 1
 
+    def _health_snapshot(self):
+        """Worker-only diagnostic heartbeat; never run in trading caller."""
+        dest=self.path.parent/'latency_health.json'
+        data={'schema':1, 'dropped':self.dropped,
+              'write_errors':self.write_errors, 'at':time.time()}
+        temp=dest.with_name('.latency_health.tmp')
+        try:
+            fd=os.open(temp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+            try:
+                os.write(fd,json.dumps(data,separators=(',',':')).encode('utf-8'))
+            finally:os.close(fd)
+            os.replace(temp,dest)
+        except OSError:
+            pass
+
     def _write_loop(self):
+        next_health=0.0
         while True:
             rec = self.queue.get()
             try:
@@ -78,3 +94,8 @@ class LatencyJournal:
                 self.write_errors += 1
             finally:
                 self.queue.task_done()
+                clock=time.monotonic()
+                if clock>=next_health:
+                    self._health_snapshot()
+                    next_health=clock+30
+

@@ -573,9 +573,211 @@ def cmd_account_reset():
     finally:
         fcntl.flock(fd,fcntl.LOCK_UN)
         os.close(fd)
-    print('\nОбщая блокировка СНЯТА. Все три бота по-прежнему SOFT.')
+    print(f'\nОбщая блокировка СНЯТА. {len(summary)} ботов по-прежнему SOFT.')
     print('Возобновляй нужные боты по одному через меню «Возобновить работу».')
     print('Если проблема с маржой повторится, блокировка автоматически восстановится.')
+
+
+def _current_account_bots():
+    """Authoritative discovery: unknown running services are fatal."""
+    return discover_single_account(BASE, SYSTEMD_DIR)
+
+
+def _account_env_file():
+    account=BASE/'.okxbot_account.env'
+    if account.is_file() and not account.is_symlink():
+        return account
+    # The VPS is deliberately bound to ONE OKX account; fallback credentials
+    # are from a currently managed instance only, never arbitrary user input.
+    bots=[b for b in _current_account_bots() if b.systemd_state=='active']
+    if not bots:
+        raise RuntimeError('Нет ключа для безопасного GET аккаунта')
+    env=bots[0].root/'.env'
+    if env.is_symlink() or not env.is_file():
+        raise RuntimeError('Нет корректного файла API-ключей')
+    return env
+
+
+def _account_overview_data():
+    from okx_account_ui import get_account_snapshot
+    bots=_current_account_bots()
+    return get_account_snapshot(_account_env_file()),bots,_account_soft_latch_data()
+
+
+def _account_overview_lines():
+    from okx_account_ui import format_account
+    return format_account(*_account_overview_data())
+
+
+def cmd_account_status():
+    for line in _account_overview_lines(): print(line)
+
+
+def _panic_all_preflight():
+    """No writes. Require known, non-terminal, independently owned live bots."""
+    bots=_current_account_bots()
+    active=[b for b in bots if b.systemd_state=='active']
+    if any(b.systemd_state in ('activating','deactivating','reloading') for b in bots):
+        raise RuntimeError('Службы переходят между состояниями — PANIC ALL отклонён')
+    if not active:
+        raise RuntimeError('Нет активных торговых ботов для PANIC ALL')
+    registry=load_registry()
+    result=[]
+    seen_pairs=set()
+    for bot in active:
+        entry=registry.get(bot.display_name)
+        if entry is None or bot.instrument in seen_pairs:
+            raise RuntimeError('Дублирующая или неизвестная пара; PANIC ALL заблокирован')
+        seen_pairs.add(bot.instrument)
+        if (not control_supported(entry) or instance_terminal(entry)
+                or not service_running(bot.service)):
+            raise RuntimeError('Бот не готов к PANIC: '+bot.display_name)
+        mode=read_control(entry).get('mode')
+        if mode in ('PANIC','HARD'):
+            raise RuntimeError('Бот уже выполняет аварийную остановку: '+bot.display_name)
+        conflict=scan_other_live_same_instrument(bot.root,bot.instrument)
+        if conflict:
+            raise RuntimeError('Чужой бот на той же NET-паре: '+str(conflict))
+        # Stable id across confirmation and no PID change during the request.
+        pid=subprocess.run(['systemctl','show',bot.service,'-p','MainPID','--value'],
+                            capture_output=True,text=True,timeout=10,check=True).stdout.strip()
+        if not pid.isdecimal() or int(pid)<=0:
+            raise RuntimeError('PID недостоверен: '+bot.display_name)
+        result.append((bot.display_name,bot.instrument,bot.service,int(pid),mode))
+    return tuple(sorted(result))
+
+
+def cmd_panic_all():
+    """Single typed confirmation; independent durable PANIC per managed bot.
+
+    Not atomic across bots: partial submission is reported loudly; no rollback.
+    Never sends OKX orders, never treats a submitted command as PANIC_DONE.
+    """
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise RuntimeError('PANIC ALL разрешён только в интерактивном терминале')
+    plan=_panic_all_preflight()
+    print('\n🚨 PANIC ALL — НЕОБРАТИМОЕ ЗАКРЫТИЕ УПРАВЛЯЕМЫХ БОТОВ')
+    for name,instrument,service,pid,mode in plan:
+        print(f'  {name}: {instrument} (PID {pid}, {mode})')
+    print('Снимаются принадлежащие ботам ордера; остатки позиций закрываются MARKET reduceOnly.')
+    print('Это запросы к двигателям, НЕ подтверждение фактической ликвидации.')
+    if input('Для подтверждения введи PANIC ALL: ').strip()!='PANIC ALL':
+        print('Отменено. Команды не отправлены.')
+        return
+    # Recheck every service AND its PID before issuing even the FIRST command.
+    if _panic_all_preflight()!=plan:
+        raise RuntimeError('Состав ботов/PID/режим изменился; ни одной команды не отправлено')
+    sent=[]
+    expected_names={row[0] for row in plan}
+    for name,instrument,service,pid,mode in plan:
+        _,entry=find_entry(name)
+        try:
+            unexpected={b.display_name for b in _current_account_bots()
+                        if b.systemd_state=='active'}-expected_names
+            if unexpected:
+                raise RuntimeError('Появился новый активный бот: '+str(sorted(unexpected)))
+            if not service_running(service):
+                raise RuntimeError('Служба уже остановлена')
+            current_pid=subprocess.run(['systemctl','show',service,'-p','MainPID','--value'],
+                  capture_output=True,text=True,timeout=10,check=True).stdout.strip()
+            if current_pid!=str(pid) or read_control(entry).get('mode')!=mode:
+                raise RuntimeError('Состояние бота изменилось после preflight')
+            write_control(entry,'PANIC')
+            sent.append(name)
+            print(f'✓ {name}: запрос PANIC сохранён')
+        except Exception as exc:
+            print('⛔ PANIC ALL НЕПОЛНЫЙ! Уже отправлены: '+', '.join(sent),file=sys.stderr)
+            raise RuntimeError(f'{name}: PANIC не отправлен: {exc}') from exc
+    print('Отправлено команд: '+str(len(sent))+'. Дождись PANIC_DONE по каждому боту.')
+
+
+def _account_detail_menu(scr, initial):
+    """Live age counter, fixed refresh/back actions, no background OKX polling."""
+    from okx_account_ui import format_account
+    data=initial
+    error=''
+    idx=0
+    scroll=0
+    scr.timeout(1000)
+    try:
+        while True:
+            lines=format_account(*data)
+            if error:
+                lines+=['', 'Ошибка обновления: '+error]
+            h,w=scr.getmaxyx()
+            scr.erase()
+            if h<12 or w<38:
+                _put(scr,0,0,'Увеличьте окно терминала',max(0,w-1))
+                scr.refresh()
+            else:
+                _put(scr,0,1,'OKX GRID BOT — Управление аккаунтом',w-2)
+                _put(scr,1,1,'═'*(w-2),w-2)
+                room=max(1,h-8)
+                maximum=max(0,len(lines)-room)
+                scroll=min(max(scroll,0),maximum)
+                for row,line in enumerate(lines[scroll:scroll+room]):
+                    _put(scr,2+row,1,line,w-2)
+                if maximum:
+                    _put(scr,h-6,1,f'Данные: {scroll+1}–{min(len(lines),scroll+room)} '
+                                     f'из {len(lines)} (PgUp/PgDn)',w-2)
+                for j,label in enumerate(('Обновить данные','Вернуться')):
+                    _put(scr,h-4+j,1,('❯ ' if idx==j else '  ')+label,w-2)
+                _put(scr,h-1,1,'↑ ↓ — выбор    Enter — действие    PgUp/PgDn — прокрутка    Esc — назад',w-2)
+                scr.refresh()
+            try:
+                key=scr.get_wch()
+            except curses.error:
+                continue  # 1-second redraw refreshes age, never calls OKX.
+            if key in ('\x1b','q'):
+                return
+            if key in (curses.KEY_DOWN,'j'):
+                idx=(idx+1)%2
+            elif key in (curses.KEY_UP,'k'):
+                idx=(idx-1)%2
+            elif key==curses.KEY_NPAGE:
+                scroll=min(maximum,scroll+max(1,h-9))
+            elif key==curses.KEY_PPAGE:
+                scroll=max(0,scroll-max(1,h-9))
+            elif key in ('\r','\n',curses.KEY_ENTER,'r','R'):
+                if idx==1 and key not in ('r','R'):
+                    return
+                try:
+                    data=_account_overview_data()
+                    error=''
+                    scroll=0
+                except Exception as exc:
+                    error=str(exc)[:140]
+    finally:
+        scr.timeout(-1)
+
+
+def interactive_account_menu():
+    while True:
+        initial=None
+        try:
+            from okx_account_ui import format_account
+            initial=_account_overview_data()
+            preview=format_account(*initial)[:7]+['','Подробные позиции — в первом пункте.']
+        except Exception as exc:
+            preview=['Не удалось получить полный снимок OKX:',str(exc)[:160],
+                     '','PANIC ALL не зависит от доступности снимка баланса.']
+        choices=['Баланс, позиции и плечи','Обновить данные',
+                 'Сбросить SOFT-блокировку',
+                 '🚨 PANIC ALL — аварийное закрытие','Назад']
+        idx=curses.wrapper(lambda s:wizard.menu(s,'OKX GRID BOT — Аккаунт',choices,preview))
+        if idx is None or idx==4:return
+        if idx==0:
+            if initial is not None:
+                curses.wrapper(lambda s:_account_detail_menu(s,initial))
+            continue
+        if idx==1:continue
+        try:
+            if idx==2:cmd_account_reset()
+            elif idx==3:cmd_panic_all()
+        except Exception as exc:
+            print('ОШИБКА:',exc,file=sys.stderr)
+        _pause_return()
+
 
 def cmd_control(name, mode):
     if mode=='RUN' and account_soft_active():
@@ -1096,7 +1298,7 @@ def interactive_bot_menu(name):
         is_new=control_supported(entry)
         terminal=instance_terminal(entry)
         mode=control_desired(entry)
-        choices=['Статистика','Статус','Настройки','Логи (LIVE)',
+        choices=['Статистика','Статус','Настройки','Логи (LIVE)','Latency Diagnostics',
                  'Burst Monitor: '+monitor_label(entry,'burst'),
                  'Execution Monitor: '+monitor_label(entry,'execution')]
         active=service_running(unit_name(entry))
@@ -1128,6 +1330,10 @@ def interactive_bot_menu(name):
             curses.wrapper(lambda s: stats_screen(s,name))
         elif chosen=='Логи (LIVE)':
             curses.wrapper(lambda s: live_logs_screen(s,name))
+        elif chosen=='Latency Diagnostics':
+            from okx_latency_ui import report as latency_report
+            curses.wrapper(lambda s: _text_screen(s,'Latency — '+name,
+                             latency_report(bot_path(entry))))
         elif chosen in ('Статус','Настройки'):
             try:
                 content=_capture_status(name) if chosen=='Статус' else _capture_settings(name)
@@ -1273,10 +1479,7 @@ def interactive_main(env_file):
             _pause_return()
         elif action==1: interactive_archive_menu(archive)
         elif action==2: interactive_telegram_menu()
-        elif action==3:
-            try:cmd_account_reset()
-            except Exception as exc:print('ОШИБКА:',exc,file=sys.stderr)
-            _pause_return()
+        elif action==3:interactive_account_menu()
 
 def main(argv=None):
     p=argparse.ArgumentParser(description='Управление именованными OKX Grid ботами')
@@ -1288,6 +1491,8 @@ def main(argv=None):
         if cmd=='logs':sp.add_argument('-f','--follow',action='store_true')
     sub.add_parser('list')
     sub.add_parser('account-reset', help='проверить и снять общую блокировку после ручной проверки маржи')
+    sub.add_parser('account-status', help='GET-only баланс, маржа и позиции OKX')
+    sub.add_parser('panic-all', help='одно подтверждение, аварийное завершение всех LIVE-ботов')
     clone=sub.add_parser('clone',help='новый экземпляр из завершённого бота')
     clone.add_argument('source_name');clone.add_argument('new_name')
     a=sub.add_parser('attach',help='дать имя существующему боту без его перезапуска')
@@ -1307,6 +1512,8 @@ def main(argv=None):
     if cmd=='new':cmd_new(getattr(opts,'env_file',str(BASE/'.okxbot_account.env')))
     elif cmd=='list':cmd_list()
     elif cmd=='account-reset':cmd_account_reset()
+    elif cmd=='account-status':cmd_account_status()
+    elif cmd=='panic-all':cmd_panic_all()
     elif cmd=='attach':cmd_attach(opts.name,opts.path,opts.service)
     elif cmd=='stats':cmd_stats(name)
     elif cmd=='status':cmd_status(name)
