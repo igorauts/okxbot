@@ -9,11 +9,11 @@ sys.path.insert(0,str(SH))
 
 from okx_contracts import base_coin, validate_spec
 from okx_state import empty, validate, IncompatibleState
-from okx_version import VERSION, STATE_SCHEMA
+from okx_version import ENGINE_VERSION, RELEASE_VERSION, STATE_SCHEMA
 from okx_paths import state_file as current_state, fills_db as current_fills
 from okx_archive_reader import state_file as archive_state, fills_db as archive_fills
 
-assert VERSION=='0.7.23.1' and STATE_SCHEMA==1
+assert ENGINE_VERSION=='0.7.24' and RELEASE_VERSION=='0.7.24' and STATE_SCHEMA==1
 assert base_coin('BTC-USDT-SWAP')=='BTC'
 assert base_coin('1000PEPE-USDT-SWAP')=='1000PEPE'
 for invalid in ['BTC-USD-SWAP','BTC-USDC-SWAP','BTC-USDT-241225','BTC-USDT-SWAP-XXX','']:
@@ -33,7 +33,7 @@ for key,value in [('ctType','inverse'),('settleCcy','USD'),('instType','FUTURES'
     except ValueError:pass
     else:raise AssertionError('Accepted invalid '+key+'='+value)
 
-new=empty(VERSION,'BTC-USDT-SWAP')
+new=empty(ENGINE_VERSION,'BTC-USDT-SWAP')
 assert validate(new,'BTC-USDT-SWAP') is new
 assert 'archived_cycles' in new
 for broken in [{**new,'schema_version':0},{**new,'instrument':'ETH-USDT-SWAP'},
@@ -58,9 +58,9 @@ with tempfile.TemporaryDirectory() as d:
     else:raise AssertionError('Invalid archive version accepted')
 
 manifest=json.loads((SH/'engine_manifest.json').read_text())
-assert manifest['current_version']==VERSION
-assert list(manifest['engines'])==[VERSION]
-for dependency in manifest['engines'][VERSION]['dependencies']:
+assert manifest['current_version']==ENGINE_VERSION
+assert list(manifest['engines'])==[ENGINE_VERSION]
+for dependency in manifest['engines'][ENGINE_VERSION]['dependencies']:
     assert (SH/dependency).is_file(),dependency
 
 # Main safety-critical functions are pinned to reviewed AST (v0.7.21 scope only).
@@ -168,7 +168,7 @@ def flush():COUNT['flush']+=1
 def api_factory(live, gate):
     return build_api(ENV={'OKX_API_KEY':'TEST','OKX_API_SECRET':'TEST',
         'OKX_API_PASSPHRASE':'TEST'},CFG={'fee_group_id':'','buy_base_qty':'1'},
-        COIN='BTC',INST='BTC-USDT-SWAP',LIVE=live,VER=VERSION,
+        COIN='BTC',INST='BTC-USDT-SWAP',LIVE=live,VER=ENGINE_VERSION,
         D=lambda x:Decimal(str(x or '0')),die=lambda text: (_ for _ in ()).throw(RuntimeError(text)),
         CONTRACT_LOT=Decimal('1'),CONTRACT_MIN=Decimal('1'),CONTRACT_VALUE=Decimal('1'),
         PRICE_STEP=Decimal('0.1'),QTY=Decimal('1'),STEP=Decimal('1'),TP=Decimal('2'),

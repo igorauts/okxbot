@@ -29,7 +29,8 @@ def _records(path, bytes_limit=32*1024*1024):
     return rows
 
 
-def report(root,window_minutes=6):
+def report(root):
+    window_minutes=60
     root=Path(root)
     log=root/'logs/latency.jsonl'
     health=root/'logs/latency_health.json'
@@ -47,15 +48,21 @@ def report(root,window_minutes=6):
                 if rec.get('phase') in summary:summary[rec['phase']].append(ms)
         except (ValueError,TypeError,KeyError):continue
     latest=max(samples) if samples else None
+    first=min(samples) if samples else None
+    coverage=min(60.0,max(0.0,(latest-first).total_seconds()/60.0)) if first else 0.0
+    # Span is not complete sample coverage when there are telemetry gaps.
+    ordered=sorted(samples)
+    gaps=sum((b-a).total_seconds()>120 for a,b in zip(ordered,ordered[1:]))
     active=bool(latest and (now-latest).total_seconds()<90)
     lines=[f'LATENCY DIAGNOSTICS — {root.name}',
            f'Статус: {"ACTIVE" if active else "NO FRESH DATA"}',
-           f'Окно: последние {window_minutes} минут (хвост журнала до 32 MiB)',
+           f'Окно: {window_minutes} мин | временной охват: {coverage:.1f}/60 мин (хвост до 32 MiB)',
+           f'Разрывы данных >120 с: {gaps}',
            f'Измерений в окне: {len(samples)}',
            'Последний замер: '+(latest.isoformat(timespec='seconds') if latest else 'н/д'),
-           '', 'Путь                 N       P50          P95']
+           '', 'Путь                 N       P50          P95          P99          MAX']
     for label,values in summary.items():
-        lines.append(f'{label:<20} {len(values):<6} {_percentile(values,50):<12} {_percentile(values,95)}')
+        lines.append(f'{label:<20} {len(values):<6} {_percentile(values,50):<12} {_percentile(values,95):<12} {_percentile(values,99):<12} {_percentile(values,100)}')
     try:
         if health.is_file() and not health.is_symlink():
             data=json.loads(health.read_text())

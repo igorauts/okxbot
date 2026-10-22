@@ -27,7 +27,7 @@ from pathlib import Path
 
 import websocket
 from okx_latency import LatencyJournal
-from okx_version import VERSION as VER, STATE_SCHEMA
+from okx_version import ENGINE_VERSION as VER, STATE_SCHEMA
 from okx_state import validate as validate_state, empty as empty_state
 from okx_contracts import base_coin, validate_spec
 
@@ -3136,6 +3136,9 @@ def full_stats_snapshot(state, fills, bid, contract_value, *, include_durable_ar
     open_buy_nominal=Decimal(0)
     exit_gain=Decimal(0)
     exit_count=0
+    # Presentation-only attribution. Trading accounting totals remain unchanged.
+    limit_tp_net=market_tp_net=Decimal(0)
+    floating_pnl=Decimal(0)
     expected={}
     known_orders=set()
     for c in cycles:
@@ -3189,9 +3192,9 @@ def full_stats_snapshot(state, fills, bid, contract_value, *, include_durable_ar
                 q=sum((D(f['fillSz']) for f in split),Decimal(0))
                 n=sum((D(f['fillPx'])*D(f['fillSz'])*contract_value for f in split),Decimal(0))
                 fee=sum((D(f['fee']) for f in split),Decimal(0))
-                sell_parts.append({'qty':q,'notional':n,'fee':fee})
+                sell_parts.append({'qty':q,'notional':n,'fee':fee,'source':'aggregate_exit'})
             else:
-                sell_parts.append(grouped[oid])
+                sell_parts.append({**grouped[oid], 'source':'limit_tp'})
         if not b or b['qty']<=0: continue
         buy_avg=b['notional']/(b['qty']*contract_value)
         sell_qty=sum((v['qty'] for v in sell_parts),Decimal(0))
@@ -3203,6 +3206,13 @@ def full_stats_snapshot(state, fills, bid, contract_value, *, include_durable_ar
             if remaining: raise ValueError('CLOSED cycle has unclosed position')
             closed_count+=1
             closed_gain += sell_nominal-b['notional']+b['fee']+sell_fee
+            # Allocate actual BUY notional/fees pro rata among independently
+            # confirmed TP legs. This is a reporting partition, not PnL rewrite.
+            for part in sell_parts:
+                share=part['qty']/b['qty']
+                leg_net=part['notional'] + part['fee'] - (b['notional']-b['fee'])*share
+                if part['source']=='aggregate_exit':market_tp_net+=leg_net
+                else:limit_tp_net+=leg_net
             closed_buy_nominal+=b['notional']
         elif c.get('state')=='EXITED':
             if remaining:raise ValueError('EXITED partial cycle still has position')
@@ -3211,6 +3221,7 @@ def full_stats_snapshot(state, fills, bid, contract_value, *, include_durable_ar
         else:
             # Open-cycle mark-to-market, including realized portion of PARTIAL
             # TP and commissions already paid. Funding excluded.
+            floating_pnl += remaining*contract_value*(bid-buy_avg)
             open_gain += (sell_nominal - sell_qty*contract_value*buy_avg +
                           remaining*contract_value*(bid-buy_avg) +
                           b['fee'] + sell_fee)
@@ -3218,6 +3229,8 @@ def full_stats_snapshot(state, fills, bid, contract_value, *, include_durable_ar
 
     volume=maker_volume+taker_volume
     total_fees=maker_fee+taker_fee
+    if abs(limit_tp_net+market_tp_net-closed_gain)>Decimal('0.00000001'):
+        raise ValueError('Closed TP attribution does not reconcile')
     total_gain=closed_gain+open_gain+exit_gain
     total_buy=closed_buy_nominal+open_buy_nominal
     active_buys=sum(c.get('state') in ('BUY_LIVE','BUY_PARTIAL','PLACING') for c in state.get('cycles',{}).values())
@@ -3229,6 +3242,8 @@ def full_stats_snapshot(state, fills, bid, contract_value, *, include_durable_ar
                 active_buys=active_buys,tps=tps,grid_gain=closed_gain,
                 grid_pct=stats_pct(closed_gain,closed_buy_nominal),
                 open_gain=open_gain,open_pct=stats_pct(open_gain,open_buy_nominal),
+                floating_pnl=floating_pnl,realized_open_components=open_gain-floating_pnl,
+                limit_tp_net=limit_tp_net,market_tp_net=market_tp_net,
                 total_gain=total_gain,total_pct=stats_pct(total_gain,total_buy),
                 total_fees=total_fees,volume=volume,maker_volume=maker_volume,
                 taker_volume=taker_volume,maker_fee=maker_fee,taker_fee=taker_fee,
@@ -3476,6 +3491,63 @@ def format_okx_report(st,fills,stats,now=None):
     return '\n'.join(items)
 
 
+def performance_snapshot_v0724(st, fills, stats, now):
+    """Read-only presentation payload from exactly the audited fill snapshot.
+
+    This does not change PnL and deliberately does not mark unverified
+    partially completed cycles as realized GRID PROFIT.
+    """
+    launched,ref=_first_anchor(fills)
+    bottom=average=max_base=capital=None
+    if ref is not None:
+        bottom=ref-STEP*(CAP-1)
+        if bottom<=0:raise ValueError('Invalid reference grid lower bound')
+        average=(ref+bottom)/2
+        max_base=CAP*QTY*CONTRACT_VALUE
+        capital=max_base*average
+    elapsed=now-launched if launched is not None else None
+    days=Decimal(str(elapsed))/Decimal(86400) if elapsed and elapsed>0 else None
+    daily=stats['grid_gain']/days if days else None
+    past24=_last_24h_profit(st,fills,CONTRACT_VALUE,int(now*1000)) if capital is not None else None
+    open_top=[]
+    for c in st.get('cycles',{}).values():
+        if c.get('state') not in ('TP_WAIT','TP_PARTIAL','VIRTUAL_TP'):continue
+        if D(c.get('filledBuy'))>D(c.get('filledTP')):
+            px=D(c.get('buyPx'))
+            if px>0:open_top.append(px)
+    payload={
+        'schema':1,'bid':str(stats['bid']),
+        'top_open_buy':str(max(open_top)) if open_top else None,
+        'open_base':str(stats['open_base']),
+        'open_nominal':str(stats['open_base']*stats['bid']),
+        'floating_pnl':str(stats['floating_pnl']),
+        'grid_profit':str(stats['grid_gain']),
+        'closed_count':stats['closed_count'],
+        'limit_tp_net':str(stats['limit_tp_net']),
+        'market_tp_net':str(stats['market_tp_net']),
+        'partial_exit_count':stats['partial_exit_count'],
+        'partial_exit_net':str(stats['partial_exit_net']),
+        'realized_open_components':str(stats['realized_open_components']),
+        'total_pnl':str(stats['total_gain']),
+        'tp_waiting':len(real_tp_active(st)),
+        'last_24h':str(past24) if past24 is not None else None,
+        'per_day':str(daily) if daily is not None else None,
+        'per_30d':str(daily*30) if daily is not None else None,
+        'per_year':str(daily*365) if daily is not None else None,
+        'capital':str(capital) if capital is not None else None,
+        'max_base':str(max_base) if max_base is not None else None,
+        'grid_reference_top':str(ref) if ref is not None else None,
+        'grid_bottom':str(bottom) if bottom is not None else None,
+        'grid_average':str(average) if average is not None else None,
+        'launch_at':launched,'uptime':runtime_pct(now),
+        'volume':str(stats['volume']),
+        'maker_volume':str(stats['maker_volume']),
+        'taker_volume':str(stats['taker_volume']),
+        'paid_fees':str(-stats['total_fees']),
+    }
+    return payload
+
+
 def print_full_stats(pnl=None, *, require_complete=False):
     """One-shot report / 10-minute background print; NEVER touches orders."""
     if not DATA.exists():
@@ -3521,6 +3593,7 @@ def print_full_stats(pnl=None, *, require_complete=False):
             'signature':financial_signature(st),'total_pnl_usdt':str(d['total_gain']),
             'open_contracts':str(d['open_contracts']),'bid':str(bid),'at':now})
     report=format_okx_report(st,fills,d,now=now)
+    detail=performance_snapshot_v0724(st,fills,d,now)
     if LIVE:
         atomic_json(STATS_FILE, {
             'schema_version': 1,
@@ -3529,6 +3602,7 @@ def print_full_stats(pnl=None, *, require_complete=False):
             'bot_version': VER,
             'generated_at': datetime.fromtimestamp(now,timezone.utc).isoformat(),
             'generated_at_unix': now,
+            'performance_v0724': detail,
             'report': report,
         })
     print('\n'+report+'\n',flush=True)

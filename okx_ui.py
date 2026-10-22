@@ -12,8 +12,8 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from okx_archive_reader import state_file, fills_db, observer_dir
 
-from okx_version import VERSION
-MANAGER_VERSION='v'+VERSION
+from okx_version import RELEASE_VERSION
+MANAGER_VERSION='v'+RELEASE_VERSION
 ENGINE_PATTERN=re.compile(r'\bokx_bot(\d{3,4})\.py\b')
 GRID_LINE=re.compile(r'BID=([0-9.]+)\b')
 TERMINAL_AGG={'FILLED','CANCELED','REJECTED','DONE','CLOSED'}

@@ -23,7 +23,7 @@ import sys
 import tempfile
 from pathlib import Path
 from okx_archive_reader import state_file
-from okx_version import VERSION
+from okx_version import RELEASE_VERSION, ENGINE_VERSION, STATE_SCHEMA, validate_version_ids
 
 import okx_setup as wizard
 from okx_observers import provision_observers
@@ -99,15 +99,16 @@ def bot_path(entry):
 
 
 def latest_engine(source=SOURCE):
-    """The release manifest and internal VER are authoritative; never filename digits."""
+    """Engine manifest tracks ENGINE_VERSION, never maintenance package version."""
     source=Path(source)
     path=source/'okx_bot.py'
     if not path.is_file() or path.is_symlink():
         raise RuntimeError('Нет установленного торгового движка okx_bot.py')
     compile(path.read_bytes(),str(path),'exec')
-    ver=VERSION
+    validate_version_ids(RELEASE_VERSION,ENGINE_VERSION)
+    ver=ENGINE_VERSION
     manifest=json.loads((source/'engine_manifest.json').read_text(encoding='utf-8'))
-    if manifest.get('schema_version')!=1 or manifest.get('current_version')!=ver:
+    if manifest.get('schema_version')!=STATE_SCHEMA or manifest.get('current_version')!=ver:
         raise RuntimeError('Несоответствие VER и текущей версии манифеста')
     if manifest.get('engines',{}).get(ver,{}).get('file')!='okx_bot.py':
         raise RuntimeError('Манифест не указывает на okx_bot.py')
@@ -225,6 +226,7 @@ def scan_other_live_same_instrument(current_path, instrument):
 
 
 def cmd_new(env_file):
+    latest_engine()  # Fail closed BEFORE a wizard can write a new bot.
     entries = load_registry()
     env, raw = wizard.read_env(env_file)
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
@@ -1049,6 +1051,21 @@ def stats_text(name):
         raise RuntimeError(f'Ошибка снимка статистики: {e}') from e
     if snapshot is not None:
         report, ts = snapshot
+        # v0.7.24 structured report; preserve the legacy screen for older engines.
+        data=json.loads((path/'state'/'stats.json').read_text(encoding='utf-8'))
+        if isinstance(data.get('performance_v0724'),dict):
+            from okx_stats_ui import format_stats
+            heartbeat=False
+            try:
+                runfile=path/'state'/'runtime_stats.json'
+                if runfile.is_file() and not runfile.is_symlink():
+                    rt=json.loads(runfile.read_text(encoding='utf-8'))
+                    heartbeat=0<=time.time()-float(rt['last'])<=90
+            except (OSError,ValueError,TypeError,KeyError):pass
+            content=format_stats(path,instrument,data['performance_v0724'],
+                         bot_active=service_running(unit),heartbeat_fresh=heartbeat,
+                         snapshot_at=ts)
+            return content
         report = with_latest_bot_dd(report, path, instrument)
         try:
             from okx_position_peak import format_peak
@@ -1123,21 +1140,42 @@ def _put(scr, y, x, text, width):
         pass
 
 
-def _viewer_frame(scr, title, lines, scroll, footer, live=False):
+def _viewer_frame(scr, title, lines, scroll, footer, live=False, paint_stats=False):
     h, w = scr.getmaxyx()
     scr.erase()
     if h < 5 or w < 24:
         _put(scr, 0, 0, 'Увеличьте окно терминала', max(0, w - 1))
         scr.refresh()
         return 0, 0
-    _put(scr, 0, 1, title, w - 2)
-    _put(scr, 1, 1, '═' * max(0, w - 2), w - 2)
-    room = max(1, h - 4)
+    if not paint_stats:
+        _put(scr, 0, 1, title, w - 2)
+        _put(scr, 1, 1, '═' * max(0, w - 2), w - 2)
+    room = max(1, h - (2 if paint_stats else 4))
     maximum = max(0, len(lines) - room)
     scroll = min(max(scroll, 0), maximum)
     first = max(0, len(lines) - room - scroll) if live else min(scroll, maximum)
     for j, line in enumerate(lines[first:first + room]):
-        _put(scr, j + 2, 1, line, w - 2)
+        if not paint_stats:
+            _put(scr, j + 2, 1, line, w - 2)
+            continue
+        attribute=curses.A_NORMAL
+        if line.startswith(('GRID PROFIT:', 'ИТОГОВЫЙ PnL:')):
+            attribute |= curses.A_BOLD
+        if curses.has_colors() and line.startswith((
+                'GRID PROFIT:', 'ИТОГОВЫЙ PnL:', 'LIMIT TP:', 'MARKET TP:',
+                'Partial MARKET Exit:', 'Floating PnL:', 'Макс. просадка:')):
+            try:
+                curses.start_color()
+                curses.use_default_colors()
+                curses.init_pair(1,curses.COLOR_GREEN,-1)
+                curses.init_pair(2,curses.COLOR_RED,-1)
+                content=line.split(':',1)[1] if ':' in line else line
+                attribute |= curses.color_pair(2 if '−$' in content else 1)
+            except (curses.error,ValueError):pass
+        try:
+            scr.addnstr(j+(0 if paint_stats else 2),1,line,max(0,w-2),attribute)
+        except (curses.error,TypeError):
+            _put(scr,j+(0 if paint_stats else 2),1,line,w-2)
     _put(scr, h - 1, 1, footer, w - 2)
     scr.refresh()
     return scroll, maximum
@@ -1154,7 +1192,7 @@ def stats_screen(scr, name):
     while True:
         scroll, maximum = _viewer_frame(
             scr, f'OKX GRID BOT — {name} — статистика', lines, scroll,
-            '↑ ↓ — прокрутка    Esc / Enter — назад')
+            '↑ ↓ — прокрутка    Esc / Enter — назад', paint_stats=True)
         key = scr.get_wch()
         if key in ('\x1b', '\n', '\r', curses.KEY_ENTER, 'q'):
             return
@@ -1299,6 +1337,7 @@ def interactive_bot_menu(name):
         terminal=instance_terminal(entry)
         mode=control_desired(entry)
         choices=['Статистика','Статус','Настройки','Логи (LIVE)','Latency Diagnostics',
+                 'FIFO Diagnostics','Execution Diagnostics',
                  'Burst Monitor: '+monitor_label(entry,'burst'),
                  'Execution Monitor: '+monitor_label(entry,'execution')]
         active=service_running(unit_name(entry))
@@ -1334,6 +1373,11 @@ def interactive_bot_menu(name):
             from okx_latency_ui import report as latency_report
             curses.wrapper(lambda s: _text_screen(s,'Latency — '+name,
                              latency_report(bot_path(entry))))
+        elif chosen in ('FIFO Diagnostics','Execution Diagnostics'):
+            from okx_diagnostics_ui import fifo_report,execution_report
+            reporter=fifo_report if chosen.startswith('FIFO') else execution_report
+            curses.wrapper(lambda s: _text_screen(s,chosen+' — '+name,
+                             reporter(bot_path(entry))))
         elif chosen in ('Статус','Настройки'):
             try:
                 content=_capture_status(name) if chosen=='Статус' else _capture_settings(name)
@@ -1468,7 +1512,7 @@ def interactive_main(env_file):
         titles.extend(['➕ Создать бота','📦 Архив',
                        '📱 Telegram-монитор: '+telegram_monitor_label(),
                        '⚙️   Управление аккаунтом','Выход'])
-        i=curses.wrapper(lambda s:wizard.menu(s,'OKX Grid Bot v'+VERSION,titles))
+        i=curses.wrapper(lambda s:wizard.menu(s,'OKX Grid Bot v'+RELEASE_VERSION,titles))
         if i is None or i==len(titles)-1:return
         if i<len(names):
             interactive_bot_menu(names[i]);continue

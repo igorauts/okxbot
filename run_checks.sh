@@ -8,3 +8,4 @@ python3 -B tests/test_v0723.py
 python3 -B tests/test_v0723_final_ui.py
 python3 -B tests/test_v0723_fifo_alert.py
 python3 -B tests/test_v07231_telegram_start.py
+python3 -B tests/test_v0724.py

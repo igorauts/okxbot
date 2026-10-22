@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP
 from pathlib import Path
 
-from okx_version import VERSION as VER
+from okx_version import ENGINE_VERSION as VER
 from okx_contracts import validate_spec
 BASE=Path(__file__).resolve().parent
 from okx_setup_presets import ASSETS
