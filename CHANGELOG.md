@@ -1,3 +1,9 @@
+## v0.7.23.1 — Telegram START/RUN maintenance fix
+
+- Fixed false `STARTED in systemd, but RUN not confirmed after 60s` alarms after normal trading-bot restarts: an absent `state/control.json` now means `RUN`, matching the trading engine, and `state/control_ack.json` is read independently.
+- A valid, fresh `RUNNING` acknowledgment and heartbeat are still required for positive START confirmation; corrupt or unreadable existing `control.json` remains fail-closed.
+- Telegram-only functional change. GRID, Virtual TP, FIFO, PANIC execution, state schema and all trading-engine modules are unchanged. This patch can be deployed by updating only `okx_telegram_health.py` and restarting only `okx-telegram-monitor.service`.
+
 ## v0.7.23 — account management, panic-all, wizard, latency and diagnostic I/O
 
 - Final monitoring fixes (2026-10-22): a brief ACCOUNT_POSITIONS_GATE_DEGRADED waits 15s for confirmed RECONCILIATION_RECOVERED before Telegram queues an alert; queued undelivered alarms are canceled if the gate recovers first. A sustained gate failure still alerts, and then confirmed recovery is reported. Durable pending incidents survive Telegram restarts; other CRITICAL events retain immediate delivery. Terminal Latency Diagnostics reads up to 32 MiB from the log tail (6-minute stats window unchanged).

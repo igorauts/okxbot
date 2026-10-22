@@ -104,11 +104,25 @@ def service_check(api, st, services, roots):
         elif old_active and not active and not any(x[0] == 'stop' for x in transitions):
             transitions.append(('stop', 'invocation/' + (old_inv or str(time.time_ns()))))
         root = Path(roots[name])
+        # Read independently: an absent control.json means RUN to the engine,
+        # while control_ack.json may validly exist and say RUNNING.  Malformed
+        # or unreadable existing control files must NEVER imply RUN.
         try:
             ack = json.loads((root / 'state/control_ack.json').read_text())
-            control = json.loads((root / 'state/control.json').read_text())
+            if not isinstance(ack, dict):
+                ack = {}
         except (OSError, ValueError):
-            ack, control = {}, {}
+            ack = {}
+        try:
+            control = json.loads((root / 'state/control.json').read_text())
+            if (not isinstance(control, dict) or
+                    control.get('mode') not in ('RUN', 'PAUSE', 'SOFT', 'HARD', 'PANIC')):
+                control = {}
+        except FileNotFoundError:
+            # Match okx_bot.control_mode() exactly for the missing-file case.
+            control = {'mode': 'RUN'}
+        except (OSError, ValueError):
+            control = {}
         expected_terminal = (ack.get('phase') in ('PANIC_DONE', 'RETIRED') or
                              control.get('mode') in ('HARD', 'PANIC'))
         now = time.time()
