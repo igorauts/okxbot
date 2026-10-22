@@ -1,3 +1,9 @@
+## v0.7.22.1 — Telegram hotfix: precise BID and debounced health
+
+- `/status` now obtains an exact positive BID from the engine's `state/stats_financial_anchor.json`, pairing it with `state/stats.json` by instrument, schema and identical sample timestamp; a missing/mismatched price is displayed as `н/д` without a false −100% change.
+- Includes the Telegram heartbeat/observer debounce hotfix previously installed on VPS: sustained stale readings before alarming, and three fresh recovery samples spanning at least 15 seconds.
+- The v0.7.22 trading strategy, Virtual TP, FIFO, PANIC order safety, schema 1 and per-bot LIVE trading code are unchanged. Only shared release identity and Telegram read-only modules are updated by deployment.
+
 ## v0.7.22 — Telegram reliability and UI (candidate)
 
 - Telegram systemd journal cursor and invocation-ID detection for fast STOP/START; engine heartbeat from runtime_stats.json; observer process/freshness checks with recovery alerts.
