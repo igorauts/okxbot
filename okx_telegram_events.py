@@ -43,6 +43,68 @@ def event_key(name, obj):
     return f'event/{name}/{typ}/{identity}'
 
 
+# A brief unavailable /positions FIFO gate normally resolves on the next REST
+# reconciliation. Hold ONLY this warning for a bounded interval so Telegram
+# does not deliver a stale danger signal after the engine has recovered.
+# Other CRITICAL events and systemd faults keep their existing urgency.
+GATE_ALERT_GRACE_SEC = 15.0
+GATE_EVENT = 'ACCOUNT_POSITIONS_GATE_DEGRADED'
+
+
+def gate_alert_scan(api, st, now=None):
+    """Flush matured unresolved gate faults; durable state is saved by caller.
+
+    The user is notified if the problem lasts beyond the short grace period.
+    An explicit reconciliation recovery clears it even after an interruption
+    of the Telegram monitor. No trading state or FIFO file is touched.
+    """
+    now = time.time() if now is None else float(now)
+    pending = st.setdefault('positions_gate_pending_v0723', {})
+    counters = st.setdefault('positions_gate_episode_v0723', {})
+    for name, record in list(pending.items()):
+        if record.get('sent') or now - float(record['received_at']) < GATE_ALERT_GRACE_SEC:
+            continue
+        number = int(counters.get(name, 0)) + 1
+        key = f'event/{name}/{GATE_EVENT}/{number}'
+        error = str(record.get('error') or 'GateUnavailable')[:120]
+        # The queue is durable; do not mark the record sent before enqueueing.
+        one(api, st, key, f'🚨 {GATE_EVENT} | {name}\nerror: {error}\n'
+            'Шлюз /positions недоступен более 15 с; проверка позиции ожидается')
+        counters[name] = number
+        record['sent'] = True
+        record['episode'] = number
+
+
+def _gate_recovered(api, st, name, obj):
+    """Close a pending gate episode only on a subsequent explicit recovery."""
+    pending = st.setdefault('positions_gate_pending_v0723', {})
+    record = pending.get(name)
+    if not record:
+        return
+    # Events are processed in journal order, but a recovery can carry an
+    # exchange-generated timestamp earlier than the fault. Do not let that
+    # stale recovery silently cancel a newer gate failure.
+    start = record.get('event_ts')
+    ended = date_epoch(obj.get('ts'))
+    if start and ended and ended + 0.5 < start:
+        return
+    if record.get('sent'):
+        number = record.get('episode')
+        alarm_key = f'event/{name}/{GATE_EVENT}/{number}'
+        outbox = st.setdefault('alert_outbox_v0722', [])
+        # Delivery is handled in this very same single-threaded monitor loop.
+        # If Telegram had not actually received the alarm, do not deliver a
+        # stale alarm *after* reconciliation has already recovered.
+        if any(x.get('key') == alarm_key for x in outbox):
+            outbox[:] = [x for x in outbox if x.get('key') != alarm_key]
+            st.setdefault('incident_sent', {}).pop(alarm_key, None)
+        else:
+            one(api, st, f'recovery/{name}/{GATE_EVENT}/{number}',
+                f'✅ ACCOUNT_POSITIONS_GATE_RECOVERED | {name}\n'
+                'Свежая REST-сверка восстановлена')
+    del pending[name]
+
+
 RECOVERY_EVENTS = {
     'RECONCILIATION_RECOVERED': ('RECONCILIATION_LONG_WAIT',),
     'ACCOUNT_POSITIONS_GATE_RECOVERED': ('ACCOUNT_POSITIONS_GATE_DEGRADED',
@@ -56,6 +118,15 @@ def event_alert(api, st, name, obj):
     episodes = st.setdefault('event_incidents_v0722', {})
     counters = st.setdefault('event_incident_counters_v0722', {})
     now = time.time()
+    if typ == GATE_EVENT:
+        pending = st.setdefault('positions_gate_pending_v0723', {})
+        if name not in pending:
+            pending[name] = {'received_at': now, 'event_ts': date_epoch(obj.get('ts')),
+                             'error': str(obj.get('error') or 'GateUnavailable'),
+                             'sent': False}
+        return
+    if typ in ('RECONCILIATION_RECOVERED', 'ACCOUNT_POSITIONS_GATE_RECOVERED'):
+        _gate_recovered(api, st, name, obj)
     if typ in RECOVERY_EVENTS:
         cleared = []
         for key in list(episodes):

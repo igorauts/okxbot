@@ -1,3 +1,20 @@
+## v0.7.23 — account management, panic-all, wizard, latency and diagnostic I/O
+
+- Final monitoring fixes (2026-10-22): a brief ACCOUNT_POSITIONS_GATE_DEGRADED waits 15s for confirmed RECONCILIATION_RECOVERED before Telegram queues an alert; queued undelivered alarms are canceled if the gate recovers first. A sustained gate failure still alerts, and then confirmed recovery is reported. Durable pending incidents survive Telegram restarts; other CRITICAL events retain immediate delivery. Terminal Latency Diagnostics reads up to 32 MiB from the log tail (6-minute stats window unchanged).
+
+- Final UI corrections (2026-10-22): account positions show base-asset quantity and OKX USD notional without redundant ticker column, 20x leverage, Floating PnL, margin per position; total In use and *exchange-reported* USDT ordFrozen for open-order margin, with explicit residual when reconciliation differs. No unsupported adjusted equity/risk ratio, or GET-only title. UTC timestamp includes seconds elapsed. Dedicated Refresh / Back actions; periodic timestamp redraw makes no API calls.
+- Bot-creation numeric screens render all live previews immediately (zero or suggested values before typing), tick-aligned TP examples with stable columns, correctly signed +$ / −$ profit, smaller BUY labels and risk projection. Final summary shows GRID/TP percentages, BUY notional and per-trade maker net while hiding fixed buffers and internal `live_trading` UI flag. Edit keeps current values; Enter preserves, first typing replaces. Internal validation and fail-closed LIVE authorization remain untouched.
+- Shared patch deployment preserves `okxbot.py` executable permissions to avoid Permission denied.
+
+- Manager: compact Futures/USDT Cross overview matching OKX: Equity, Floating PnL, total In use (including order margin), available funds and coin-sized positions with leverage as 20x and exchange-reported per-position IMR. Omits unsupported adjusted equity, margin-ratio percentage and redundant LIVE/instrument text. Fields come from details[USDT] when account-level Futures fields are intentionally empty; never infer a margin amount from an unrelated quantity.
+- Account-wide PANIC ALL: single exact phrase, two preflight snapshots of ALL running services including PID and instrument; independent durable PANIC commands; partial submission is reported and never treated as all flat. No exchange POST from manager.
+- Account-wide SOFT latch recovery: engine re-acknowledges SOFT_STOPPED after a NEW shared margin latch, while preserving manager's strict timestamp and manual-reset requirements.
+- Local drawdown recording: non-blocking bounded queue and daemon worker for noncritical atomic JSON persistence. Durable trading state and SQLite FULL untouched.
+- Latency Diagnostics: local per-bot P50/P95 by phase, sample counts and latest timestamp; worker-side dropped/write-errors sidecar; missing diagnostics shown unavailable instead of a fictitious zero.
+- New bot wizard: LIVE local GRID percentage, GRID depth, BUY notional/full-grid spend and floating-loss estimate at hypothetical bottom, TP examples rounded UP to tick and estimated maker net profit. Numeric screens refresh from cached setup BID without additional REST per keystroke. ANSI/curses colors with graceful fallback.
+- Comprehensive statistics redesign deferred. Virtual TP, GRID strategy, FIFO, reconciliation, HARD/PANIC execution engine and state schema unchanged.
+- Package creation does not change LIVE processes or publish a GitHub Release; operator performs deployment separately.
+
 ## v0.7.22.1 — Telegram hotfix: precise BID and debounced health
 
 - `/status` now obtains an exact positive BID from the engine's `state/stats_financial_anchor.json`, pairing it with `state/stats.json` by instrument, schema and identical sample timestamp; a missing/mismatched price is displayed as `н/д` without a false −100% change.

@@ -179,31 +179,122 @@ def load_contract(coin,env):
         'spec':spec}
 
 
-def lines_for(key,ctx):
-    c=ctx['coin']; price=ctx['price']
-    if key=='step':return [
-        'Укажите расстояние между GRID-уровнями.', '',
-        f'Минимум: ${ctx["tick"]}',f'Шаг изменения: ${ctx["tick"]}', '',
-        'Например: '+str({'BTC':'10.00','ETH':'0.25','SOL':'0.05'}.get(c,as_string(to_tick_up(max(ctx['tick'],price*Decimal('0.002')),ctx['tick'])))),'',
-        'GRID STEP (USDT):']
-    if key=='tp':return [
-        'Укажите расстояние TAKE PROFIT.', '',
-        f'Расстояние безубытка: ${ctx["break_even"]}',
-        'Запас над безубытком: 20%',
-        f'Минимальный TP: ${ctx["min_tp"]}',
-        f'Шаг изменения: ${ctx["tick"]}','',
-        'Например: '+str({'BTC':'50.00','ETH':'2.50','SOL':'0.20'}.get(c,as_string(to_tick_up(max(ctx['min_tp'],price*Decimal('0.005')),ctx['tick'])))),'',
-        'TAKE PROFIT (USDT):']
-    if key=='grids':return [
-        'Максимальное количество занятых GRID-уровней.', '',
-        'Минимум: 1','Максимум: 500','', 'Например: 500','',
-        'Количество гридов:']
-    if key=='qty':return [
-        'Укажите размер одного BUY-ордера.', '',
-        f'Минимум: {ctx["min_qty"]} {c}',
-        f'Шаг изменения: {ctx["lot"]*ctx["ct"]} {c}',
-        f'Стоимость минимума: ≈ ${ctx["min_qty"]*price:.2f}', '',
-        f'Например: {ctx["min_qty"]}', '',f'Размер BUY ({c}):']
+def percentage(distance, price):
+    if not price or price <= 0:
+        return 'н/д'
+    return f'{distance / price * 100:.4f}%'
+
+
+def grid_projection(price, step, levels, qty):
+    """Illustration only: fill N equally spaced BUYs below setup BID.
+
+    No upper boundary and no future grid re-anchoring is assumed.
+    """
+    levels = int(levels)
+    if price <= 0 or step <= 0 or qty <= 0 or levels < 1:
+        raise ValueError('Недостаточно параметров')
+    bottom = price - step * levels
+    if bottom <= 0:
+        raise ValueError('Расчётная нижняя цена неположительна')
+    units = qty * levels
+    spent = qty * (price * levels - step * levels * (levels + 1) / 2)
+    nominal = units * bottom
+    return {'bottom':bottom, 'depth':step*levels/price*100,
+            'units':units, 'spent':spent, 'nominal':nominal,
+            'floating':nominal-spent}
+
+
+def tp_reference_rows(ctx):
+    bid,tick=ctx['price'],ctx['tick']
+    output=[]
+    for pct in ('0.08','0.12','0.2','0.3','0.5'):
+        distance=to_tick_up(bid*Decimal(pct)/100,tick)
+        output.append((pct,distance,percentage(distance,bid)))
+    return output
+
+
+def tp_estimated_net(ctx, distance, qty):
+    """Illustrative single fully-filled maker BUY+SELL at displayed BID."""
+    bid,fee=ctx['price'],ctx['maker']
+    return qty*(distance - fee*bid - fee*(bid+distance))
+
+
+def signed_usd(value, places=6):
+    """Financial display sign BEFORE currency, e.g. +$0.012300."""
+    x = D(value)
+    if x > 0:
+        return f'+${x:,.{places}f}'
+    if x < 0:
+        return f'−${-x:,.{places}f}'
+    return f'$0.{"0" * places}' if places else '$0'
+
+
+def _suggested_step(ctx):
+    return to_tick_up(ctx['price'] * Decimal('0.002'), ctx['tick'])
+
+
+def lines_for(key, ctx, input_value=''):
+    c=ctx['coin'];price=ctx['price'];tick=ctx['tick']
+    # Keep every preview row visible before the very first keystroke.
+    try:
+        candidate=D(input_value) if input_value.strip() else Decimal(0)
+    except ValueError:
+        candidate=Decimal(0)
+    head=[f'Текущий BID: ${as_string(price)} (снимок при открытии мастера)']
+    if key=='step':
+        return ['Укажите расстояние между GRID-уровнями.', '', *head,
+                f'Минимум и шаг: ${as_string(tick)}', '',
+                f'GRID STEP: {percentage(candidate,price)} от BID', '',
+                f'Например: ${as_string(_suggested_step(ctx))}', '',
+                'GRID STEP (USDT):']
+    if key=='grids':
+        rows=['Укажите количество GRID-уровней (1–500).', '', *head,
+              f'GRID STEP: ${as_string(ctx["step"])} ({percentage(ctx["step"],price)})', '']
+        if candidate >= 0 and candidate == candidate.to_integral_value():
+            bottom=price-ctx['step']*candidate
+            rows.extend([f'Покрытие вниз: {percentage(ctx["step"]*candidate,price)}',
+                         f'Низ сетки: ${as_string(bottom)}' if bottom>0
+                         else 'Низ сетки: ниже нуля — недопустимо', ''])
+        else:
+            rows.extend(['Покрытие вниз: —', 'Низ сетки: —', ''])
+        return rows+['Например: 100', '', 'Количество гридов:']
+    if key=='qty':
+        rows=['Укажите размер одного BUY-ордера.', '', *head,
+              f'GRID: {int(ctx["grids"])} уровней × ${as_string(ctx["step"])}',
+              f'Минимум: {as_string(ctx["min_qty"])} {c}',
+              f'Шаг количества: {as_string(ctx["lot"]*ctx["ct"])} {c}', '',
+              f'Номинал одного ордера при текущем BID: ≈ ${candidate*price:,.4f}', '',
+              'РАСЧЁТ ПОЛНОГО ЗАПОЛНЕНИЯ СЕТКИ']
+        try:
+            if candidate>0:
+                proj=grid_projection(price,ctx['step'],ctx['grids'],candidate)
+                pct=proj['floating']/proj['spent']*100
+            else:
+                # Still validate geometry even though an empty amount previews zero.
+                grid_projection(price,ctx['step'],ctx['grids'],Decimal(1))
+                proj={'units':Decimal(0),'spent':Decimal(0),'nominal':Decimal(0),
+                      'floating':Decimal(0)}
+                pct=Decimal(0)
+            rows += [f'Максимальная позиция: {as_string(proj["units"])} {c}',
+                     f'Сумма всех BUY: ${proj["spent"]:,.2f}',
+                     f'Номинал на нижней цене: ${proj["nominal"]:,.2f}',
+                     f'Плавающий убыток на дне сетки: {signed_usd(proj["floating"],2)} ({pct:.2f}%)', '']
+        except ValueError:
+            rows.extend(['Диапазон сетки достигает нулевой цены: расчёт невозможен', ''])
+        return rows+['Размер BUY ('+c+'):']
+    if key=='tp':
+        references=tp_reference_rows(ctx)
+        width=max(len(as_string(d)) for _,d,_ in references)
+        rows=['Укажите расстояние TAKE PROFIT.', '', *head,
+              f'Шаг изменения: ${as_string(tick)}', '',
+              'Например:', f'{"Цель":<10} {"Шаг":<{width+2}} От BID']
+        for pct,distance,actual in references:
+            rows.append(f'{pct+"% →":<10} ${as_string(distance):<{width+1}} {actual:>9}')
+        net=tp_estimated_net(ctx,candidate,ctx['qty'])
+        rows.extend(['',f'TAKE PROFIT: {percentage(candidate,price)} от BID',
+                     f'Профит с одной сделки: {signed_usd(net)}', '',
+                     'TAKE PROFIT (USDT):'])
+        return rows
     if key=='buys':return [
         'Укажите количество следящих BUY LIMIT.', '',
         'Минимум: 1', f'Максимум: {min(25,int(ctx["grids"]))}', '',
@@ -213,8 +304,8 @@ def lines_for(key,ctx):
         'Минимум: 1','Максимум: 25','',
         'Например: 25','', 'Базовых реальных TP:']
     if key=='upper':
-        x1=to_tick_up(price*Decimal('1.10'),ctx['tick'])
-        x2=to_tick_up(price*Decimal('1.15'),ctx['tick'])
+        x1=to_tick_up(price*Decimal('1.10'),tick)
+        x2=to_tick_up(price*Decimal('1.15'),tick)
         return [
             'Укажите верхнюю границу сетки.', '',
             f'Текущая цена: ${price}',
@@ -225,7 +316,6 @@ def lines_for(key,ctx):
             f'Например: {x2}', '',
             'Верхняя граница (USDT):']
     raise ValueError('Unknown wizard screen')
-
 
 
 def validate_name(raw, existing=()):
@@ -239,8 +329,8 @@ def validate_name(raw, existing=()):
     return name
 
 
-def name_input(stdscr,title,existing):
-    value='';error=''
+def name_input(stdscr,title,existing, initial=''):
+    value=str(initial);error=''
     while True:
         y=screen(stdscr,title,[
             'Как назовём бота?', '',
@@ -267,44 +357,87 @@ def report(ctx):
     c=ctx['coin']; price=ctx['price']; upper=ctx['upper']
     reference=upper if upper else price
     lo,position,cap=capital(reference,ctx['step'],int(ctx['grids']),ctx['qty'])
+    profit=tp_estimated_net(ctx,ctx['tp'],ctx['qty'])
     return [
         f'Актив:                         {next((k for k,v in ASSETS.items() if v==c), c)}',
         f'Контракт:                      {ctx["instrument"]}',
         f'Имя бота:                      {ctx.get("name","—")}',
-        f'Текущая цена:                  ${price}', '',
-        f'GRID STEP:                     ${ctx["step"]}',
-        f'TAKE PROFIT:                   ${ctx["tp"]}',
-        f'Размер BUY:                    {ctx["qty"]} {c}',
-        f'Стоимость BUY:                 ≈ ${ctx["qty"]*price:.2f}', '',
+        f'Текущий BID:                   ${price}', '',
+        f'GRID STEP:                     ${ctx["step"]} ({percentage(ctx["step"],price)})',
+        f'TAKE PROFIT:                   ${ctx["tp"]} ({percentage(ctx["tp"],price)})',
+        f'Размер BUY:                    {ctx["qty"]} {c} (≈ ${ctx["qty"]*price:,.2f})',
+        f'Профит с одной сделки:        {signed_usd(profit)}', '',
         f'Максимум гридов:               {int(ctx["grids"])}',
         f'Активных BUY LIMIT:            {int(ctx["buys"])} (макс. {int(ctx["buys"])+5})',
         f'Реальных SELL TP:              {int(ctx["real_tp"])} (макс. {int(ctx["real_tp"])+int(ctx["buys"])+5})',
-        f'BUY буфер:                     +5',
-        f'Защита BUY (шаги):             5',
-        f'SELL TP буфер:                 +{int(ctx["buys"])+5}',
         f'Верхняя граница:               {"Без ограничения" if not upper else "$"+str(upper)}',
         '-----------------------------------------------',
         f'Максимальная позиция:          {position} {c}',
         f'Диапазон полной сетки:        ${reference} → ${lo}',
         f'Расчётный капитал 1x:         ${cap.quantize(Decimal("0.01"),rounding=ROUND_HALF_UP):,.2f}',
         '-----------------------------------------------',
-        'Направление: LONG  |  Маржа: CROSS',
-        'Плечо: устанавливается вручную',
-        '-----------------------------------------------',
-        'РЕЖИМ: live_trading=false — торги выключены',
+        'LONG  |  CROSS',
     ]
 
 
-def put(stdscr,y,text):
+def setup_colors():
+    if not curses.has_colors() or os.environ.get('NO_COLOR'):
+        return
+    try:
+        curses.start_color()
+        curses.use_default_colors()
+        for number, foreground in enumerate((curses.COLOR_CYAN,
+                curses.COLOR_GREEN,curses.COLOR_RED,curses.COLOR_WHITE),1):
+            curses.init_pair(number,foreground,-1)
+    except curses.error:
+        pass
+
+
+def color_of(line):
+    if not curses.has_colors() or os.environ.get('NO_COLOR'):
+        return 0
+    text=str(line)
+    if ('убыток' in text.lower() or 'PANIC ALL' in text or 'ниже нуля' in text.lower()
+            or 'недопустим' in text.lower()):
+        return curses.color_pair(3)|curses.A_BOLD
+    if 'Номинал одного ордера' in text:
+        return curses.color_pair(2)|curses.A_BOLD
+    if ('Покрытие вниз' in text or 'Текущий BID' in text
+            or 'от BID' in text or 'Низ сетки' in text):
+        return curses.color_pair(1)
+    if text.startswith(('РАСЧЁТ ', 'GRID STEP (','TAKE PROFIT (','Размер BUY (')):
+        return curses.color_pair(4)|curses.A_BOLD
+    return 0
+
+
+def put(stdscr,y,text,attribute=0):
     height,width=stdscr.getmaxyx()
-    if 0<=y<height:
-        stdscr.addnstr(y,2,str(text),max(0,width-4))
+    if not (0<=y<height and width>4):
+        return
+    text=str(text)
+    try:
+        if (text.lstrip().startswith('Профит с одной сделки:')
+                and not attribute and curses.has_colors()
+                and not os.environ.get('NO_COLOR')):
+            i=text.index(':')+1
+            # Label stays neutral; color ONLY the signed profit amount.
+            prefix=text[:i]
+            rest=text[i:]
+            stdscr.addnstr(y,2,prefix,max(0,width-4))
+            if len(prefix)<width-4:
+                color=(curses.color_pair(3) if '−$' in rest or '-$' in rest
+                       else curses.color_pair(2))|curses.A_BOLD
+                stdscr.addnstr(y,2+len(prefix),rest,max(0,width-4-len(prefix)),color)
+            return
+        stdscr.addnstr(y,2,text,max(0,width-4),attribute or color_of(text))
+    except curses.error:
+        pass
 
 
 def screen(stdscr,title,body,foot='',error=''):
     stdscr.erase()
-    put(stdscr,1,title)
-    put(stdscr,2,'='*min(50,max(0,stdscr.getmaxyx()[1]-4)))
+    put(stdscr,1,title,curses.A_BOLD)
+    put(stdscr,2,'='*min(56,max(0,stdscr.getmaxyx()[1]-4)))
     for i,line in enumerate(body):put(stdscr,4+i,line)
     y=4+len(body)
     if error:put(stdscr,y+1,'Ошибка: '+error)
@@ -313,23 +446,45 @@ def screen(stdscr,title,body,foot='',error=''):
     return y
 
 
-def menu(stdscr,title,choices,body=None):
+def menu(stdscr,title,choices,body=None,timed=False):
     idx=0
-    while True:
-        text=list(body or [])+['']
-        text.extend(('❯ ' if i==idx else '  ')+x for i,x in enumerate(choices))
-        screen(stdscr,title,text,foot='↑ ↓ — выбор    Enter — подтвердить    Esc — назад')
-        key=stdscr.get_wch()
-        if key in (curses.KEY_UP,'k'):idx=(idx-1)%len(choices)
-        elif key in (curses.KEY_DOWN,'j'):idx=(idx+1)%len(choices)
-        elif key in ('\n','\r',curses.KEY_ENTER):return idx
-        elif key=='\x1b':return None
+    if timed:
+        stdscr.timeout(1000)
+    try:
+        while True:
+            content=body() if callable(body) else body
+            text=list(content or [])+['']
+            text.extend(('❯ ' if i==idx else '  ')+x for i,x in enumerate(choices))
+            screen(stdscr,title,text,foot='↑ ↓ — выбор    Enter — подтвердить    Esc — назад')
+            try:
+                key=stdscr.get_wch()
+            except curses.error:
+                if timed:
+                    continue
+                raise
+            if key in (curses.KEY_UP,'k'):idx=(idx-1)%len(choices)
+            elif key in (curses.KEY_DOWN,'j'):idx=(idx+1)%len(choices)
+            elif key in ('\n','\r',curses.KEY_ENTER):return idx
+            elif key=='\x1b':return None
+    finally:
+        if timed:
+            stdscr.timeout(-1)
 
 
-def numeric_input(stdscr,title,lines,validate):
-    value='';error=''
+def numeric_input(stdscr,title,lines,validate,initial=''):
+    value=str(initial);error=''
+    replace_initial=bool(initial)
     while True:
-        y=screen(stdscr,title,lines,foot='Enter — подтвердить    Esc — назад',error=error)
+        body=lines(value) if callable(lines) else lines
+        visible=max(8,stdscr.getmaxyx()[0]-9)
+        if len(body)>visible:
+            # Remove decorative empty lines before ever hiding computed values.
+            compact=[line for line in body if line]
+            if len(compact)<=visible:
+                body=compact
+            else:
+                body=compact[:2]+['… (увеличьте высоту терминала)']+compact[-(visible-3):]
+        y=screen(stdscr,title,body,foot='Enter — подтвердить    Esc — назад',error=error)
         # Input line is rendered one line below label.
         put(stdscr,y,value+'█')
         stdscr.refresh()
@@ -338,19 +493,21 @@ def numeric_input(stdscr,title,lines,validate):
         if ch in ('\n','\r',curses.KEY_ENTER):
             try:return validate(value)
             except ValueError as exc:
-                error=str(exc);value='';continue
+                error=str(exc);continue
         if ch in ('\b','\x7f',curses.KEY_BACKSPACE,127):
-            value=value[:-1];continue
+            value='' if replace_initial else value[:-1]
+            replace_initial=False
+            continue
         if isinstance(ch,str) and ch in '0123456789-+.,' and len(value)<32:
-            value+=ch
+            value=ch if replace_initial else value+ch
+            replace_initial=False
         elif isinstance(ch,str) and ch.isprintable():
             error='Введите только число.'
 
 
 def wizard(stdscr,env,existing_names=()):
     curses.curs_set(0)
-    try:curses.use_default_colors()
-    except curses.error:pass
+    setup_colors()
     while True:
         idx=menu(stdscr,'OKX GRID BOT — выберите пару',list(ASSETS))
         if idx is None:return None
@@ -376,46 +533,59 @@ def wizard(stdscr,env,existing_names=()):
             go=menu(stdscr,f'OKX GRID BOT — {coin}',
                 ['Продолжить','Назад к выбору'],contract_lines)
             if go!=0:break
-            steps=['step','tp','grids','qty','buys','real_tp','upper','name']
-            j=0
-            while j>=0:
-                if j<len(steps):
-                    key=steps[j]
-                    if key=='name':
-                        val=name_input(stdscr,f'OKX GRID BOT — {coin}',existing_names)
-                    else:
-                        val=numeric_input(stdscr,f'OKX GRID BOT — {coin}',lines_for(key,ctx),
-                                          lambda s:validate_numeric(key,s,ctx))
-                    if val is None:
-                        j-=1
-                    else:
-                        ctx[key]=val
-                        j+=1
+            steps=['step','grids','qty','tp','buys','real_tp','upper','name']
+            while True:
+                j=0
+                while j>=0:
+                    if j<len(steps):
+                        key=steps[j]
+                        # Back navigation and explicit edit both preserve typed values.
+                        previous=ctx.get(key)
+                        initial=(as_string(previous) if previous is not None and key!='name'
+                                 else '')
+                        if key=='name':
+                            val=name_input(stdscr,f'OKX GRID BOT — {coin}',existing_names,
+                                           initial=ctx.get('name',''))
+                        else:
+                            val=numeric_input(stdscr,f'OKX GRID BOT — {coin}',
+                                              lambda v,k=key:lines_for(k,ctx,v),
+                                              lambda s,k=key:validate_numeric(k,s,ctx),
+                                              initial=initial)
+                        if val is None:
+                            j-=1
+                        else:
+                            ctx[key]=val
+                            j+=1
+                        continue
+                    # The chosen upper boundary can raise the minimum safe TP.
+                    upper=ctx['upper']
+                    worst=max(ctx['price'],upper)
+                    req_tp=max(ctx['tick'],to_tick_up(
+                        fee_break_even(worst,max(Decimal(0),ctx['maker']))
+                        *Decimal('1.2'),ctx['tick']))
+                    if ctx['tp']<req_tp:
+                        screen(stdscr,f'OKX GRID BOT — {coin}',[
+                            f'TP ${ctx["tp"]} недостаточен для цены ${worst}.',
+                            f'Минимум с запасом: ${req_tp}.',
+                            'Нужно вернуться и увеличить TAKE PROFIT.'],
+                            foot='Нажмите любую клавишу')
+                        stdscr.get_wch()
+                        ctx['min_tp']=req_tp
+                        j=3
+                        continue
+                    break
+                if j<0:
+                    break
+                confirm=menu(stdscr,'OKX GRID BOT — СОЗДАНИЕ БОТА',
+                    ['Создать бота','Изменить настройки','Отмена'],report(ctx))
+                if confirm==0:return ctx
+                if confirm==1:
+                    # Keep the SAME contract/spec/BID and all chosen values.
                     continue
-                # A high chosen upper boundary can raise the minimum TP.
-                upper=ctx['upper']
-                worst=max(ctx['price'],upper)
-                req_tp=max(ctx['tick'],to_tick_up(
-                    fee_break_even(worst,max(Decimal(0),ctx['maker']))
-                    *Decimal('1.2'),ctx['tick']))
-                if ctx['tp']<req_tp:
-                    screen(stdscr,f'OKX GRID BOT — {coin}',[
-                        f'TP ${ctx["tp"]} недостаточен для цены ${worst}.',
-                        f'Минимум с запасом: ${req_tp}.',
-                        'Нужно вернуться и увеличить TAKE PROFIT.'],
-                        foot='Нажмите любую клавишу')
-                    stdscr.get_wch()
-                    ctx['min_tp']=req_tp
-                    j=1
-                    continue
-                break
-            if j<0:break
-            confirm=menu(stdscr,'OKX GRID BOT — СОЗДАНИЕ БОТА',
-                ['Создать бота','Изменить настройки','Отмена'],report(ctx))
-            if confirm==0:return ctx
-            if confirm==1:continue
-            return None
+                return None
+            break
     return None
+
 
 
 def persist(ctx,out,env_raw):
