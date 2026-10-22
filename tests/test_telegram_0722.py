@@ -135,11 +135,60 @@ with tempfile.TemporaryDirectory() as directory:
         (base/'state'/'runtime_stats.json').write_text('{"last": 201}')
         health.engine_heartbeat_check(api,st,{'near0721':'okx-grid-near0721.service'},
                                       {'near0721':base},now=202.)
-    assert len(calls)==2 and 'нет heartbeat' in calls[0] and 'BACK TO NORMAL' in calls[1]
+    # One stale reading must not immediately alarm or produce a recovery pair.
+    assert calls==[],calls
+    # Persistent stale readings do cause an alert, and recovery requires confirmation.
+    st={'engine_heartbeat_v0722':{'near0721':{'since':1.,'alarm':False,'invocation':'same'}}}
+    with patch.object(health,'_show',return_value={'ActiveState':'active','InvocationID':'same'}), \
+         patch.object(health,'one',side_effect=lambda api,st,key,msg:calls.append(msg)):
+        (base/'state'/'runtime_stats.json').write_text('{"last": 1}')
+        for stamp in (300.,320.,340.):
+            health.engine_heartbeat_check(api,st,{'near0721':'okx-grid-near0721.service'},
+                                          {'near0721':base},now=stamp)
+        assert len(calls)==1 and 'нет heartbeat' in calls[0]
+        (base/'state'/'runtime_stats.json').write_text('{"last": 341}')
+        for stamp in (345.,355.,365.):
+            health.engine_heartbeat_check(api,st,{'near0721':'okx-grid-near0721.service'},
+                                          {'near0721':base},now=stamp)
+        assert len(calls)==2 and 'BACK TO NORMAL' in calls[1]
 
     assert views.price_digits({'tick_size':'0.000001'})==6
     assert views.price_digits({'tick_size':'0.1'})==2
     assert views.price_digits({'tick_size':'0.00000001'})==8
+    # Telegram MUST NOT re-parse the v0.7.21 engine's rounded $0.00 BID.
+    micro=base/'micro_bot'
+    (micro/'state').mkdir(parents=True)
+    micro_cfg={'instrument':'DOOD-USDT-SWAP','version':'0.7.21','tick_size':'0.000001'}
+    (micro/'config.json').write_text(json.dumps(micro_cfg))
+    (micro/'state/bot_state.json').write_text(json.dumps({'instrument':'DOOD-USDT-SWAP',
+        'cycles':{'1':{'state':'TP_WAIT','filledBuy':'1000','filledTP':'0','buyPx':'0.002580'}}}))
+    sample=1999999900.0
+    micro_stats={'complete':True,'instrument':'DOOD-USDT-SWAP',
+        'generated_at_unix':sample, 'report':"""Текущий BID: $0.00
+ИТОГОВЫЙ PnL: -$1.04
+Открытая позиция: 27000 DOOD"""}
+    (micro/'state/stats.json').write_text(json.dumps(micro_stats))
+    anchor={'schema':1,'instrument':'DOOD-USDT-SWAP','at':sample,'bid':'0.002304'}
+    (micro/'state/stats_financial_anchor.json').write_text(json.dumps(anchor))
+    text=views.status_one('micro_bot',micro,'1h 45min')
+    assert '$0.002304' in text and '−10.70%' in text, text
+    assert '$0.000000' not in text and '−100.00%' not in text, text
+    anchor['at']=sample-600
+    (micro/'state/stats_financial_anchor.json').write_text(json.dumps(anchor))
+    text=views.status_one('micro_bot',micro,'1h 45min')
+    assert 'Текущий bid: н/д' in text and '−100.00%' not in text, text
+    anchor['at']=sample;anchor['bid']='0'
+    (micro/'state/stats_financial_anchor.json').write_text(json.dumps(anchor))
+    text=views.status_one('micro_bot',micro,'1h 45min')
+    assert 'Текущий bid: н/д' in text and '−100.00%' not in text, text
+    anchor['bid']='0.002304';anchor['instrument']='NEAR-USDT-SWAP'
+    (micro/'state/stats_financial_anchor.json').write_text(json.dumps(anchor))
+    text=views.status_one('micro_bot',micro,'1h 45min')
+    assert 'Текущий bid: н/д' in text and '−100.00%' not in text, text
+    anchor['instrument']='DOOD-USDT-SWAP';anchor['bid']='0.002304'
+    (micro/'state/stats_financial_anchor.json').write_text(json.dumps(anchor))
+    assert views.verified_snapshot_bid(micro,micro_cfg,micro_stats)==views.number('0.002304')
+
     from okx_setup_presets import ASSETS
     assert ASSETS['Doodles']=='DOOD' and 'APR' not in ASSETS.values()
 

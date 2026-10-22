@@ -148,39 +148,109 @@ def service_check(api, st, services, roots):
         previous['active'], previous['invocation'] = active, inv
 
 
+# Debounced health alerts. A single late/missing telemetry sample is not a fault.
+# The trading engine and observer subprocesses remain fully independent of this
+# read-only reporter. Stable timestamps are persisted by the Telegram monitor.
+HEARTBEAT_STALE_SEC = 120
+HEARTBEAT_CONFIRM_SEC = 30
+OBSERVER_STALE_SEC = 90
+OBSERVER_CONFIRM_SEC = 60
+OBSERVER_INACTIVE_CONFIRM_SEC = 10
+RECOVERY_CONFIRM_SEC = 15
+RECOVERY_MIN_SAMPLES = 3
+_HEALTH_RULE = 'debounced-v0722-1'
+
+
+def _health_record(watches, key, now, invocation=None):
+    rec = watches.get(key)
+    if not isinstance(rec, dict) or rec.get('health_rule') != _HEALTH_RULE:
+        # Old v0.7.22 records (including a spurious active alert) cannot trigger
+        # an immediate new alarm/recovery on upgrading this monitor.
+        rec = {'health_rule': _HEALTH_RULE, 'fault': None, 'bad_since': None,
+               'bad_count': 0, 'good_since': None, 'good_count': 0}
+        watches[key] = rec
+    if invocation is not None and rec.get('invocation') != invocation:
+        # New process: its previous heartbeat is not evidence of a hang.
+        rec.update({'invocation': invocation, 'fault': None,
+                    'bad_since': None, 'bad_count': 0,
+                    'good_since': None, 'good_count': 0})
+    return rec
+
+
+def _observe_fault(rec, reason, now):
+    """Return duration of uninterrupted bad readings, or None for healthy."""
+    if reason is None:
+        rec['bad_since'] = None
+        rec['bad_count'] = 0
+        return None
+    since = rec.get('bad_since')
+    if (since is None or now < float(since) or
+            reason != rec.get('bad_reason')):
+        rec['bad_since'] = now
+        rec['bad_count'] = 1
+        rec['bad_reason'] = reason
+        rec['good_since'] = None
+        rec['good_count'] = 0
+        return 0.0
+    rec['bad_count'] = int(rec.get('bad_count', 0)) + 1
+    rec['good_since'] = None
+    rec['good_count'] = 0
+    return now - float(since)
+
+
+def _confirmed_recovery(rec, now):
+    if rec.get('fault') is None:
+        rec['good_since'] = None
+        rec['good_count'] = 0
+        return False
+    since = rec.get('good_since')
+    if since is None or now < float(since):
+        rec['good_since'] = now
+        rec['good_count'] = 1
+        return False
+    rec['good_count'] = int(rec.get('good_count', 0)) + 1
+    return (rec['good_count'] >= RECOVERY_MIN_SAMPLES and
+            now - float(since) >= RECOVERY_CONFIRM_SEC)
+
+
 def engine_heartbeat_check(api, st, services, roots, now=None):
     now = time.time() if now is None else now
     watches = st.setdefault('engine_heartbeat_v0722', {})
     for name, unit in services.items():
         info = _show(unit)
-        if info is None:
+        if info is None:  # systemd itself could not be queried: no speculation.
             continue
         active = info.get('ActiveState') == 'active'
-        rec = watches.setdefault(name, {'since': now, 'alarm': False})
         invocation = info.get('InvocationID') or ''
-        if rec.get('invocation') != invocation:
-            rec.update({'invocation': invocation, 'since': now, 'alarm': False})
+        rec = _health_record(watches, name, now, invocation)
         if not active:
-            rec['since'] = now
-            rec['alarm'] = False
+            # Unexpected trade STOP/START has its own systemd journal alert.
+            rec.update({'fault': None, 'bad_since': None, 'bad_count': 0,
+                        'good_since': None, 'good_count': 0})
             continue
         path = Path(roots[name]) / 'state/runtime_stats.json'
         try:
             data = json.loads(path.read_text())
             stamp = float(data['last'])
-            good = 0 <= now - stamp <= 120
+            fresh = 0 <= now - stamp <= HEARTBEAT_STALE_SEC
         except (OSError, ValueError, TypeError, KeyError):
             stamp = None
-            good = False
-        if not good and now - float(rec.get('since', now)) >= 120 and not rec.get('alarm'):
-            age = f'{now-stamp:.0f} с' if stamp and stamp <= now else 'нет свежего файла'
-            one(api, st, f'heartbeat/down/{name}/{int(now)}',
-                f'🚨 {name}: нет heartbeat движка ({age}), служба active')
-            rec['alarm'] = True
-        if good and rec.get('alarm'):
+            fresh = False
+        reason = None if fresh else 'heartbeat stale'
+        elapsed_bad = _observe_fault(rec, reason, now)
+        if reason:
+            if (rec.get('fault') is None and elapsed_bad is not None and
+                    elapsed_bad >= HEARTBEAT_CONFIRM_SEC and
+                    rec.get('bad_count', 0) >= 3):
+                age = (f'{now-stamp:.0f} с' if stamp is not None and
+                       0 <= now-stamp < 1e9 else 'нет свежего файла')
+                one(api, st, f'heartbeat/down/{name}/{int(now)}',
+                    f'🚨 {name}: нет heartbeat движка ({age}), служба active')
+                rec['fault'] = reason
+        elif _confirmed_recovery(rec, now):
             one(api, st, f'heartbeat/recovery/{name}/{int(now)}',
                 f'✅ BACK TO NORMAL | {name}\nHeartbeat торгового движка восстановлен')
-            rec['alarm'] = False
+            rec.update({'fault': None, 'good_since': None, 'good_count': 0})
 
 
 def observers_check(api, st, services, roots, now=None):
@@ -192,12 +262,13 @@ def observers_check(api, st, services, roots, now=None):
             continue
         for kind in ('burst', 'execution'):
             unit = f'observer-{trade_unit.removesuffix(".service")}-{kind}.service'
+            token = f'{name}/{kind}'
             try:
                 enabled = _run(['systemctl', 'is-enabled', unit], timeout=3).stdout.strip()
             except (OSError, subprocess.TimeoutExpired):
                 continue
             if enabled not in ('enabled', 'enabled-runtime'):
-                watches.pop(f'{name}/{kind}', None)  # Intentionally switched off.
+                watches.pop(token, None)  # Intentionally disabled: no alarm.
                 continue
             info = _show(unit)
             if info is None:
@@ -206,18 +277,32 @@ def observers_check(api, st, services, roots, now=None):
             summary = observer_dir(roots[name], kind) / 'summary.json'
             try:
                 ts = summary.stat().st_mtime
-                fresh = 0 <= now - ts <= 90
+                fresh = 0 <= now - ts <= OBSERVER_STALE_SEC
             except OSError:
                 fresh = False
-            reason = None if running and fresh else ('service inactive' if not running else 'measurements stale >90s')
-            token = f'{name}/{kind}'
-            rec = watches.setdefault(token, {'since': now, 'fault': None})
-            if reason and rec['fault'] != reason and (not running or now - float(rec['since']) > 90):
-                one(api, st, f'observer/fault/{token}/{int(now)}',
-                    f'🚨 OBSERVER {kind.upper()} | {name}\n{reason}')
-                rec['fault'] = reason
-            if not reason and rec.get('fault'):
+            reason = (None if running and fresh else
+                      ('service inactive' if not running else 'measurements stale >90s'))
+            # Do not reset a persistent stale-data fault when the observer crash-loops.
+            rec = _health_record(watches, token, now)
+            elapsed_bad = _observe_fault(rec, reason, now)
+            if reason:
+                minimum = (OBSERVER_INACTIVE_CONFIRM_SEC if not running else
+                           OBSERVER_CONFIRM_SEC)
+                if (elapsed_bad is not None and elapsed_bad >= minimum and
+                        rec.get('bad_count', 0) >= 3 and
+                        rec.get('fault') is None):
+                    one(api, st, f'observer/fault/{token}/{int(now)}',
+                        f'🚨 OBSERVER {kind.upper()} | {name}\n{reason}')
+                    rec['fault'] = reason
+                elif (rec.get('fault') == 'measurements stale >90s' and
+                      reason == 'service inactive' and elapsed_bad is not None and
+                      elapsed_bad >= OBSERVER_INACTIVE_CONFIRM_SEC and
+                      rec.get('bad_count', 0) >= 3):
+                    # True escalation: summary stale AND systemd has now failed.
+                    one(api, st, f'observer/fault/escalated/{token}/{int(now)}',
+                        f'🚨 OBSERVER {kind.upper()} | {name}\nservice inactive')
+                    rec['fault'] = reason
+            elif _confirmed_recovery(rec, now):
                 one(api, st, f'observer/normal/{token}/{int(now)}',
                     f'✅ BACK TO NORMAL | {name}\nObserver {kind} работает, данные свежие')
-                rec['fault'] = None
-                rec['since'] = now
+                rec.update({'fault': None, 'good_since': None, 'good_count': 0})

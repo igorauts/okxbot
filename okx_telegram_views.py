@@ -101,6 +101,29 @@ def price_digits(cfg):
     return max(2, -tick.normalize().as_tuple().exponent) if tick is not None and tick > 0 else 2
 
 
+def verified_snapshot_bid(root, cfg, stats):
+    """Price from the same confirmed stats sample, never its rounded report.
+
+    The v0.7.21+ running engine publishes stats_financial_anchor.json and
+    stats.json with the *same* timestamp, in that order. The two files can
+    briefly be from different samples, so fail closed rather than show a
+    spurious $0.000000 / -100% price change. Read-only, no exchange calls.
+    """
+    anchor = read_json(Path(root) / 'state' / 'stats_financial_anchor.json')
+    if anchor.get('schema') != 1 or anchor.get('instrument') != cfg.get('instrument'):
+        return None
+    if not stats.get('complete') or stats.get('instrument') != cfg.get('instrument'):
+        return None
+    at = number(anchor.get('at'))
+    generated = number(stats.get('generated_at_unix'))
+    bid = number(anchor.get('bid'))
+    if (at is None or generated is None or at <= 0 or generated <= 0
+            or abs(at - generated) > Decimal('0.5')
+            or bid is None or bid <= 0):
+        return None
+    return bid
+
+
 def highest_open_filled_buy_price(root, cfg):
     """Highest entry price of an executed BUY with a still-open TP cycle.
 
@@ -141,7 +164,11 @@ def status_one(name, root, age_text='н/д'):
     first = ', '.join([name, 'v'+ver, age_text])
     def row(title, val):
         return title+': '+val
-    bid = fmt_source(value(values,'Текущий BID'), digits=price_digits(cfg))
+    # Engine report may contain $0.00 for inexpensive assets (v0.7.21).
+    # Anchor and report must share an identical sample timestamp.
+    bid_exact = verified_snapshot_bid(root, cfg, stats)
+    bid = ('$' + human_amount(bid_exact, price_digits(cfg))
+           if bid_exact is not None else 'н/д')
     up = highest_open_filled_buy_price(root, cfg)
     pos = value(values, 'Открытая позиция')
     # Preserve valid instrument name; remove insignificant quantity trailing zeros.
@@ -167,7 +194,7 @@ def status_one(name, root, age_text='н/д'):
                 dd += ' (−'+human_amount(amount * 100 / capital,2)+'%)'
     # Price difference from the highest executed, still-open BUY (not active BUY limit).
     # Telegram view only: two already-persisted values, zero OKX requests.
-    _bid_num=number(bid.replace('$',''))
+    _bid_num=bid_exact
     _grid_num=number(up.replace('$',''))
     _price_change=None
     if _bid_num is not None and _grid_num is not None and _grid_num>0:
