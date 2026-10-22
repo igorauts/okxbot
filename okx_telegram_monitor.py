@@ -15,6 +15,7 @@ if not (_SHARED_CODE / 'okx_paths.py').is_file():
     raise RuntimeError('OKX shared runtime missing: ' + str(_SHARED_CODE))
 sys.path.insert(0, str(_SHARED_CODE))
 from okx_paths import state_file, events_file
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 import re
 import subprocess
 import time
@@ -25,6 +26,8 @@ import html
 from okx_telegram_views import status_one, latency_report, read_json, LINE
 from okx_telegram_events import (one, event_alert, market_event, market_process, zero_buy_scan, observer_fault_scan)
 from okx_telegram_followups import partial_scan, panic_scan
+from okx_telegram_delivery import persist as durable_save, drain as alert_drain
+from okx_telegram_health import service_check, engine_heartbeat_check, observers_check
 
 BASE = Path(os.environ.get('OKXBOT_BASE_DIR','/root/okx')).resolve()
 REGISTRY = Path(os.environ.get('OKXBOT_REGISTRY',str(BASE/'.okxbot_registry.json')))
@@ -122,6 +125,9 @@ ALERT_EVENTS = {
     'AGG_MARKET_TERMINAL':'💰 Market SELL: final result',
     'BOT_TERMINAL_FINALIZED':'🏁 Final bot PnL verified',
     'BOT_TERMINAL_STATS_PENDING':'⚠️ Final bot accounting pending',
+    'EMERGENCY_POSITIONS_GATE_BLOCKED':'🚨 Emergency positions gate blocked',
+    'EMERGENCY_POSITIONS_READ':'🚨 Emergency positions read',
+    'COVERAGE_RECOVERY_WAIT':'⚠️ TP coverage hold',
 }
 RATE_LIMIT_SECONDS = 600
 MARKET_ALERTS = frozenset({'AGG_MARKET_INTENT','AGG_MARKET_ACK',
@@ -178,13 +184,7 @@ def load_state():
 
 
 def save_state(st):
-    STATE_PATH.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
-    target=STATE_PATH.with_suffix('.tmp')
-    fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
-    with os.fdopen(fd,'w') as handle:
-        json.dump(st,handle,ensure_ascii=False)
-        handle.flush();os.fsync(handle.fileno())
-    os.replace(target,STATE_PATH)
+    durable_save(st)
 
 
 def _report_values(report):
@@ -406,41 +406,23 @@ def poll_commands(api,st):
         save_state(st)
 
 def services_check(api,st):
-    for name,unit in SERVICES.items():
-        root=Path(BOT_DIRS[name])
-        result=subprocess.run(['systemctl','is-active',unit],capture_output=True,
-                              text=True,timeout=5).stdout.strip()
-        previous=st.setdefault('service_status',{}).get(name)
-        if previous=='active' and result!='active':
-            ack=read_json(root/'state/control_ack.json')
-            cfg=read_json(root/'state/control.json')
-            if ack.get('phase') not in ('PANIC_DONE','RETIRED') and cfg.get('mode') not in ('HARD','PANIC'):
-                one(api,st,'service_down/'+name+'/'+str(time.time_ns()),
-                    f'🚨 {name}: торговый процесс {previous} → {result}')
-        st['service_status'][name]=result
+    service_check(api,st,SERVICES,BOT_DIRS)
+
 
 def safety_check(api,st):
     now=time.time()
     is_soft=SHARED_SOFT.exists()
-    if is_soft and st.get('shared_soft') is not True:
+    was_soft=st.get('shared_soft')
+    if is_soft and was_soft is not True:
         one(api,st,'shared_soft/'+str(int(now)),
             '🚨 OKX ACCOUNT: shared AUTO SOFT STOP. Manual reset required.')
+    elif not is_soft and was_soft is True:
+        one(api,st,'shared_soft/clear/'+str(int(now)),
+            '✅ OKX ACCOUNT: общая SOFT-блокировка снята. Состояние каждого бота проверяйте отдельно.')
     st['shared_soft']=is_soft
-    for name,root_s in BOT_DIRS.items():
-        if not _active_service(name): continue
-        heartbeat=Path(root_s)/'state/okx_stats_runtime_v059.json'
-        if not heartbeat.is_file(): continue
-        try:
-            age=now-float(json.loads(heartbeat.read_text()).get('last',0))
-            key='heartbeat_fault/'+name
-            seen=st.setdefault('health_faults',{})
-            if age>120 and not seen.get(key):
-                one(api,st,'heartbeat/'+name+'/'+str(int(now)),
-                    f'🚨 {name}: no trading heartbeat for {int(age)} seconds')
-                seen[key]=True
-            if age<=120:
-                seen.pop(key,None)
-        except (OSError,ValueError,TypeError): pass
+    engine_heartbeat_check(api,st,SERVICES,BOT_DIRS,now)
+    observers_check(api,st,SERVICES,BOT_DIRS,now)
+
 
 def daily_check(api,st,now=None):
     now=now or datetime.now(TZ)
@@ -464,9 +446,12 @@ def main():
             poll_commands(api,st)
             daily_check(api,st)
             save_state(st)
+            alert_drain(api,st)
         except Exception as exc:
             # No credentials or outbound URL in diagnostics, ever.
             print('Telegram monitor retry:',type(exc).__name__,flush=True)
+            try: alert_drain(api,st)
+            except Exception: pass
         time.sleep(POLL_SECONDS)
 
 

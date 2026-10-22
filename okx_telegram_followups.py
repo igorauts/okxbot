@@ -347,15 +347,18 @@ def panic_scan(api, st, names):
         marker = str(snapshot.get('at_utc') or final.get('updated_at') or '')
         if not marker:
             continue
-        one(api, st, f'panic/confirmed/{name}/{marker}',
-            f'✅ PANIC SELL | {name}\n'
-            'Позиция 0, ордера закрыты — подтверждено торговым движком по OKX.\n'
-            'Ожидаем финальный финансовый расчёт.')
         verified = _final_stats(root, state)
         if verified is not None:
             msg = _panic_message(name, verified)
             if msg:
                 one(api, st, f'panic/final/{name}/{marker}', msg, html_mode=True)
-        elif closed_at is not None and time.time() - closed_at > 60:
-            one(api, st, f'panic/accounting_wait/{name}/{marker}',
-                f'⚠️ PANIC SELL | {name}\nПозиция закрыта; финальный PnL ещё не подтверждён.')
+        else:
+            age = time.time() - (closed_at if closed_at is not None else since)
+            if age > 15:
+                one(api, st, f'panic/confirmed/{name}/{marker}',
+                    f'✅ PANIC SELL | {name}\n'
+                    'Позиция 0, ордера закрыты — подтверждено торговым движком по OKX.\n'
+                    'Финальный финансовый расчёт ещё ожидается.')
+            if age > 60:
+                one(api, st, f'panic/accounting_wait/{name}/{marker}',
+                    f'⚠️ PANIC SELL | {name}\nФинальный PnL не подтверждён более 60 секунд.')

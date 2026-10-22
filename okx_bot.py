@@ -3407,6 +3407,7 @@ def format_okx_report(st,fills,stats,now=None):
     rate=lambda v: stats_pct(v,capital) if v is not None and capital else '—'
     raw=lambda v,p=4: (f'${D(v).quantize(Decimal(1).scaleb(-p),rounding=ROUND_HALF_UP):,.{p}f}'
                         if v is not None else '—')
+    price_digits=max(2, -PRICE_STEP.normalize().as_tuple().exponent)
     plus=lambda v,p=4: money_usdt(v,p) if v is not None else '—'
     datestr=(datetime.fromtimestamp(launch,timezone.utc).strftime('%d.%m.%Y %H:%M:%S UTC')
              if launch is not None else '—')
@@ -3419,7 +3420,7 @@ def format_okx_report(st,fills,stats,now=None):
         f'Запущен:                   {datestr}',
         f'Работает:                  {_clock(elapsed) if elapsed is not None else "—"}',
         f'Uptime:                    {runtime_pct(now)}',
-        f'Текущий BID:               {raw(stats["bid"],2)}',
+        f'Текущий BID:               {raw(stats["bid"],price_digits)}',
         f'Закрытых циклов:           {stats["closed_count"]}',
         f'Открыто ордеров:           {stats["active_buys"]+real}',
         f'  BUY LIMIT:               {stats["active_buys"]}',
@@ -3435,8 +3436,8 @@ def format_okx_report(st,fills,stats,now=None):
         f'  год:                     {plus(peryear,2)}   ({rate(peryear)})',
         f'Расчётный капитал для 1x: {raw(capital,2) if capital is not None else "—"}',
         f'  max position:            {max_base:.8f} {COIN}' if max_base is not None else '  max position:            —',
-        f'  сетка:                   {raw(top,2)} → {raw(bottom,2)}' if top is not None else '  сетка:                   —',
-        f'  средняя цена:            {raw(average,2)}' if average is not None else '  средняя цена:            —',
+        f'  сетка:                   {raw(top,price_digits)} → {raw(bottom,price_digits)}' if top is not None else '  сетка:                   —',
+        f'  средняя цена:            {raw(average,price_digits)}' if average is not None else '  средняя цена:            —',
         f'Уплачено комиссий:        {raw(-stats["total_fees"],8)}',
         f'Общий объём:              {raw(stats["volume"],4)}',
         f'  Maker:                   {raw(stats["maker_volume"],4)}',

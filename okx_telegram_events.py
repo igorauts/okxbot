@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from okx_paths import state_file, fills_db, observer_dir
+from okx_telegram_delivery import enqueue
 
 from okx_telegram_views import (COUNTS, MODE, date_epoch, read_json, number,
                                 market_message, market_ledger, journal)
@@ -23,45 +24,77 @@ EVENT_ALARMS = {
     'ACCOUNT_POSITIONS_GATE_DEGRADED','TP_HARD_CAP_REACHED','TP_BUFFER_OVERFLOW',
     'TP_CANCEL_REJECTED','PARTIAL_EXIT_MARKET_REJECTED',
     'BUY_PAUSED_UNPLACEABLE_TP', 'BOT_TERMINAL_STATS_PENDING',
+    'EMERGENCY_POSITIONS_GATE_BLOCKED', 'EMERGENCY_POSITIONS_READ',
+    'COVERAGE_RECOVERY_WAIT',
 }
 OBSERVER_ALARMS = {'TP_HARD_CAP_REACHED','TP_BUFFER_OVERFLOW','STATE_READ_FAILED',
                    'PERSISTED_STATE_DIFFERS_FROM_ENGINE','RECONCILIATION_LONG_WAIT'}
 
 
 def one(api, st, key, msg, *, html_mode=False):
-    fired=st.setdefault('incident_sent',{})
-    if key in fired:
-        return False
-    api.send(msg,parse_mode='HTML' if html_mode else None)
-    fired[key]=time.time()
-    # State retention is bounded; a historical incident never repeats if logs
-    # cursors are stable. Never remove incident keys for current active faults.
-    if len(fired)>20000:
-        cutoff=time.time()-30*86400
-        for k in list(fired):
-            if fired[k]<cutoff: del fired[k]
-    return True
+    """Persist-before-send; delivered asynchronously by the main monitor loop."""
+    return enqueue(st, key, msg, html_mode=html_mode)
 
 
-def event_key(name,obj):
-    typ=str(obj.get('event',''))
-    # Avoid repeating a persistent fault every engine loop. For per-order
-    # incidents use actual immutable order identity when available.
-    identity=(obj.get('ordId') or obj.get('clOrdId') or obj.get('code') or
-              obj.get('reason') or obj.get('phase') or typ)
+def event_key(name, obj):
+    typ = str(obj.get('event', ''))
+    identity = (obj.get('ordId') or obj.get('clOrdId') or obj.get('code') or
+                obj.get('reason') or obj.get('phase') or typ)
     return f'event/{name}/{typ}/{identity}'
 
 
-def event_alert(api,st,name,obj):
-    typ=obj.get('event')
+RECOVERY_EVENTS = {
+    'RECONCILIATION_RECOVERED': ('RECONCILIATION_LONG_WAIT',),
+    'ACCOUNT_POSITIONS_GATE_RECOVERED': ('ACCOUNT_POSITIONS_GATE_DEGRADED',
+                                         'EMERGENCY_POSITIONS_GATE_BLOCKED',
+                                         'EMERGENCY_POSITIONS_READ'),
+}
+
+
+def event_alert(api, st, name, obj):
+    typ = str(obj.get('event') or '')
+    episodes = st.setdefault('event_incidents_v0722', {})
+    counters = st.setdefault('event_incident_counters_v0722', {})
+    now = time.time()
+    if typ in RECOVERY_EVENTS:
+        cleared = []
+        for key in list(episodes):
+            if any(key.startswith('event/' + name + '/' + fault + '/')
+                   for fault in RECOVERY_EVENTS[typ]):
+                cleared.append(key)
+                del episodes[key]
+        if cleared:
+            one(api, st, 'recovery/' + name + '/' + typ + '/' + str(int(now)),
+                '✅ ' + typ + ' | ' + name + '\nПодтверждено движком')
+        return
     if typ not in EVENT_ALARMS:
         return
-    extras=[]
-    for k in ('code','ordId','reason','message'):
-        val=obj.get(k)
+    base = event_key(name, obj)
+    item = episodes.get(base)
+    # The same fault continuously emitted by an engine is ONE incident.
+    # A new occurrence after 30 minutes without that event is a new incident.
+    if item and 0 <= now - float(item.get('last', 0)) < 1800:
+        item['last'] = now
+        return
+    episode = int(counters.get(base, 0)) + 1
+    old_item = episodes.get(base)
+    counters[base] = episode
+    episodes[base] = {'episode': episode, 'last': now}
+    extras = []
+    for k in ('code', 'ordId', 'reason', 'message'):
+        val = obj.get(k)
         if val is not None:
             extras.append(f'{k}: {str(val)[:120]}')
-    one(api,st,event_key(name,obj),f'🚨 {typ} | {name}\n'+ '\n'.join(extras))
+    try:
+        one(api, st, base + '/incident/' + str(episode),
+            f'🚨 {typ} | {name}\n' + '\n'.join(extras))
+    except BaseException:
+        counters[base] = episode - 1
+        if old_item is None:
+            episodes.pop(base, None)
+        else:
+            episodes[base] = old_item
+        raise
 
 
 def market_event(st,name,obj):

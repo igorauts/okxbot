@@ -599,7 +599,7 @@ def cmd_control(name, mode):
     if mode=='PANIC':
         conflict=scan_other_live_same_instrument(bot_path(entry),describe(entry))
         if conflict:
-            raise RuntimeError(f'Panic Sell запрещён: {conflict} одновременно торгует '
+            raise RuntimeError(f'PANIC запрещён: {conflict} одновременно торгует '
                                'этот NET-инструмент. Чужую позицию закрывать нельзя.')
     if mode=='RUN' and old not in ('PAUSE','SOFT'):
         raise RuntimeError('Возобновление возможно только после паузы или Soft Stop')
@@ -626,16 +626,11 @@ def cmd_control(name, mode):
     else:
         print(f'Возобновить LIVE BUY-сетку бота «{name}»?')
     marker={'PAUSE':'PAUSE','RUN':'RESUME','SOFT':'SOFT',
-            'HARD':'HARD','PANIC':'PANIC SELL'}[mode]
+            'HARD':'HARD','PANIC':'PANIC'}[mode]
     confirm=f'{marker} {name}'
     if input(f'Введите точно {confirm}: ').strip()!=confirm:
         print('Отменено. Бот продолжает работать в прежнем режиме.')
         return
-    if mode in ('HARD','PANIC'):
-        confirm2=f'FINAL {name}'
-        if input(f'Повторное подтверждение {confirm2}: ').strip()!=confirm2:
-            print('Отменено. Бот продолжает работать в прежнем режиме.')
-            return
     if mode=='RUN' and account_soft_active():
         raise RuntimeError('Общий SOFT STOP снова активен. RESUME не отправлен.')
     write_control(entry,mode)
@@ -1114,7 +1109,7 @@ def interactive_bot_menu(name):
                 choices.append('Soft Stop — отменить BUY LIMIT')
             if mode in ('RUN','PAUSE','SOFT'):
                 choices.extend(['Hard Stop — завершить бота, отменить все ордера',
-                                'Panic Sell — завершить и закрыть позицию'])
+                                'PANIC — завершить и закрыть позицию'])
         if not active and not terminal and mode=='RUN':
             choices.append('Запустить')
         choices.append('Назад')
@@ -1144,7 +1139,7 @@ def interactive_bot_menu(name):
                 elif chosen=='Возобновить работу':cmd_control(name,'RUN')
                 elif chosen.startswith('Soft Stop'):cmd_control(name,'SOFT')
                 elif chosen.startswith('Hard Stop'):cmd_control(name,'HARD')
-                elif chosen.startswith('Panic Sell'):cmd_control(name,'PANIC')
+                elif chosen.startswith('PANIC'):cmd_control(name,'PANIC')
                 elif chosen=='Запустить':cmd_start(name)
                 elif chosen=='Создать нового бота-клона':
                     candidate=input('Имя нового бота-клона: ').strip()

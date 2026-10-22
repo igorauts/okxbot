@@ -39,7 +39,9 @@ def validate_root(root,service,base=Path('/root/okx')):
 def supports_versionless(root, service, base=Path('/root/okx')):
     resolved,cfg=validate_root(root,service,base)
     ver=cfg['version']
-    if ver != VERSION:
+    # Same schema, known unchanged observer ABI: permit v0.7.21 LIVE bots
+    # to retain observer management when shared Telegram/UI moves to 0.7.22.
+    if ver not in (VERSION, '0.7.21'):
         return False
     engine=resolved/'okx_bot.py'
     return engine.is_file() and not engine.is_symlink()

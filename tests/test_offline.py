@@ -13,7 +13,7 @@ from okx_version import VERSION, STATE_SCHEMA
 from okx_paths import state_file as current_state, fills_db as current_fills
 from okx_archive_reader import state_file as archive_state, fills_db as archive_fills
 
-assert VERSION=='0.7.21' and STATE_SCHEMA==1
+assert VERSION=='0.7.22' and STATE_SCHEMA==1
 assert base_coin('BTC-USDT-SWAP')=='BTC'
 assert base_coin('1000PEPE-USDT-SWAP')=='1000PEPE'
 for invalid in ['BTC-USD-SWAP','BTC-USDC-SWAP','BTC-USDT-241225','BTC-USDT-SWAP-XXX','']:
@@ -106,7 +106,7 @@ for name in ['okx_monitor','okxbot','okx_ui','okx_setup','okx_observers','okx_ar
 for p in ROOT.rglob('*.py'):
     compile(p.read_bytes(),str(p),'exec')
 print('PASS: contracts, state, archive, stable paths, import smoke')
-print('PASS: critical trading AST guarded ('+str(len(unchanged))+' symbols); v0.7.21 shutdown/WS changes re-pinned')
+print('PASS: critical trading AST guarded ('+str(len(unchanged))+' symbols); v0.7.22 shutdown/WS unchanged; display-only report updated')
 print('PASS: legacy migrations absent; all Python syntax valid')
 print('OFFLINE ONLY — no OKX connection or orders')
 

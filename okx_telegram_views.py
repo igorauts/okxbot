@@ -96,6 +96,11 @@ def value(values, *keys):
     return 'н/д'
 
 
+def price_digits(cfg):
+    tick = number(cfg.get('tick_size'))
+    return max(2, -tick.normalize().as_tuple().exponent) if tick is not None and tick > 0 else 2
+
+
 def highest_open_filled_buy_price(root, cfg):
     """Highest entry price of an executed BUY with a still-open TP cycle.
 
@@ -122,7 +127,7 @@ def highest_open_filled_buy_price(root, cfg):
             continue
         if bought > sold >= 0 and px > 0:
             prices.append(px)
-    return '$' + human_amount(max(prices), 2) if prices else '—'
+    return '$' + human_amount(max(prices), price_digits(cfg)) if prices else '—'
 
 
 def status_one(name, root, age_text='н/д'):
@@ -136,7 +141,7 @@ def status_one(name, root, age_text='н/д'):
     first = ', '.join([name, 'v'+ver, age_text])
     def row(title, val):
         return title+': '+val
-    bid = fmt_source(value(values,'Текущий BID'))
+    bid = fmt_source(value(values,'Текущий BID'), digits=price_digits(cfg))
     up = highest_open_filled_buy_price(root, cfg)
     pos = value(values, 'Открытая позиция')
     # Preserve valid instrument name; remove insignificant quantity trailing zeros.
