@@ -133,8 +133,11 @@ def format_peak(path: Path, instrument: str):
         coin=instrument.split('-',1)[0]
         at=datetime.fromtimestamp(best['at_unix_ms']/1000,timezone.utc)
         base=dec(best['base_qty']); usdt=dec(best['nominal_usdt']);price=dec(best['price'])
+        cfg=json.loads((Path(path)/'config.json').read_text(encoding='utf-8'))
+        tick=dec(cfg['tick_size'],positive=True)
+        price_digits=max(2,-tick.normalize().as_tuple().exponent)
         return [f'МАКС. ПОЗИЦИЯ В ИСТОРИИ:  {base:.8f} {coin}',
-                f'  Номинал в момент пика: ${usdt:,.2f} (цена ${price:,.2f})',
+                f'  Номинал в момент пика: ${usdt:,.2f} (цена ${price:,.{price_digits}f})',
                 '  Достигнута:             '+at.strftime('%d.%m.%Y %H:%M:%S UTC')]
     except (OSError, ValueError, TypeError, KeyError, sqlite3.DatabaseError,
             InvalidOperation, OverflowError, json.JSONDecodeError) as e:

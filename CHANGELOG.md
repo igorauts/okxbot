@@ -1,3 +1,13 @@
+## v0.7.22 — Telegram reliability and UI (candidate)
+
+- Telegram systemd journal cursor and invocation-ID detection for fast STOP/START; engine heartbeat from runtime_stats.json; observer process/freshness checks with recovery alerts.
+- Durable Telegram incident outbox with bounded retry/backoff; repeating same fault after 30min quiet or explicit recovery; alerts for EMERGENCY_POSITIONS_* and COVERAGE_RECOVERY_WAIT.
+- PANIC terminal notifications: only final verified report when accounting is ready; pending at >15sec; unresolved warning >60sec.
+- Manager PANIC naming and single deliberate PANIC confirmation (no FINAL prompt).
+- Precise display prices at instrument tick precision in statistical report, peak price and Telegram; early profit projections unchanged.
+- Menu presets include DOOD, exclude APR. Schema 1 unchanged. No FIFO/Virtual TP/HARD/PANIC order mechanics, SOFT latch, drawdown fsync changes.
+- This is an OFFLINE candidate. No LIVE services, exchange orders or GitHub publication are affected by building the archive.
+
 ## v0.7.21 — Offline candidate: emergency safety + Coverage HOLD
 
 - HARD/PANIC: owner-verified pending BUY cancellations before position reconciliation; cannot cancel foreign/unproven orders; durable single-send cancel intents preserved.

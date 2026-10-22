@@ -116,7 +116,7 @@
   "runtime_heartbeat": "556b7789d702c94c53e1033267dfd3d5a4e68f0d8a31fbc2382ba978a03be1e8",
   "runtime_pct": "18d22aef9d208e2aaf0d82fabc587e891e0de62632c50df23848dd5dc787bb35",
   "_last_24h_profit": "c2cf759daf88d2278d1e135c490ee494f4c44f5d5f6c2cf5b02c345c1e621b07",
-  "format_okx_report": "5d77a1549471faadb66c48339dac561641d3800708f36cccc73325668e6a57de",
+  "format_okx_report": "6d0324f6248eaedd90a2490cd37bd5d357256e5aca0d39a7c2bd0ca192ddda25",
   "print_full_stats": "9ffd7da081ee10ec2cf1940e35c96da708f6cca9c31488ae89692bb4b0e0f1ae",
   "trim_verified_fills_for_snapshot": "633cef8ef7d53f4709469b8e36403921229cc2ad8039f9b6f640a5c1cb27f1f7",
   "BotDrawdownSampler": "a06e29fc52147e5629c27e5abe90c8ab0812b9fc8e6a6e9990092b1bfe163e67",
