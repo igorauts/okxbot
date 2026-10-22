@@ -32,14 +32,16 @@ class LatencyJournal:
             if not isinstance(phase, str) or phase not in (
                 'http', 'rest_gate', 'positions_gate', 'position_reconcile',
                 'positions_gate_lock_wait', 'positions_gate_quota_wait',
-                'positions_gate_fifo_wait',
+                'positions_gate_fifo_wait', 'positions_gate_error',
+                'positions_gate_recovery',
                 'buy_post', 'buy_batch', 'ws_drain', 'loop_pass',
                 'fills_history_shared_wait', 'pnl_submit',
                 'drawdown_submit'):
                 return
             permitted = {'route', 'method', 'passes', 'mismatches', 'outcome',
                          'count', 'placed', 'attempted', 'status', 'partial',
-                         'resolved', 'active_buys', 'target_buys', 'dropped'}
+                         'resolved', 'active_buys', 'target_buys', 'dropped',
+                         'reason'}
             safe = {k: v for k,v in fields.items()
                     if k in permitted and (v is None or type(v) in (str, int, float, bool))}
             if 'route' in safe:

@@ -220,5 +220,5 @@ with tempfile.TemporaryDirectory() as d:
     out=latency_report(root)
     assert 'ACTIVE' in out and '3.00 ms' in out and '100.00 ms' in out
     assert 'Dropped: н/д' in out
-print('PASS latency: read-only local P50/P95, unknown dropped clearly unavailable')
+print('PASS latency: read-only local P50/P95/P99/MAX, unknown dropped clearly unavailable')
 print('OFFLINE V0723 PASS: no live processes, no exchange connections or trade writes')

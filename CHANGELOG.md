@@ -1,3 +1,13 @@
+## v0.7.24 — Statistics & Performance (2026-10-22)
+
+- P0: package `RELEASE_VERSION` separated from three-component `ENGINE_VERSION`, including manager, wizard, observer and state generation. Maintenance simulation `0.7.24.1` creates engine `0.7.24`. State schema stays 1. Existing LIVE config/state not migrated.
+- Financial statistics: separate audited LIMIT TP and aggregate MARKET TP returns, partial MARKET exits, current open-position Floating PnL marked to the validated snapshot BID, exact nominal, top executed BUY still open, runtime and peak position. Keep legacy report format for older engines and unchanged closed-cycle accounting; unclosed partial-exit realized components remain in total PnL without incorrectly calling them Floating.
+- Terminal statistics highlight profitable/losing PnL. Last 24h, average tempo, volume, commissions, capital projection and drawdown retained. Financial reports remain 10-minute fill-audited snapshots, and stale reports never claim current RUN.
+- Local latency 60-minute window, 32 MiB maximum tail, P50/P95/P99/MAX, N, sidecar drops/write errors. No time-window selector.
+- Passive FIFO diagnostics include flock waiting time, recommended quota backoff, full FIFO wait, categorized `GateUnavailable` and storage recoveries; diagnostic callbacks are error-isolated and never alter quotas, lock ownership, retry or trading decisions.
+- Execution Diagnostics displays trustworthy local BUY/TP event counts, aggregate events and confirmed SYNC recoveries; unavailable fill proportions and uncorrelated latency/durations explicitly reported as unknown, not fabricated.
+- Offline regression completed. On 22 October 2026, controlled LIVE upgrade verified v0.7.24 on `near0721` (PID 3719473), `btc0721` (PID 3719547) and `dood0721-2` (PID 3719581); all four trading/Telegram systemd services reported active. This is a historical rollout verification, not a continuous health assertion. Publishing this GitHub release does not alter LIVE services, exchange orders or state.
+
 ## v0.7.23.1 — Telegram START/RUN maintenance fix
 
 - Fixed false `STARTED in systemd, but RUN not confirmed after 60s` alarms after normal trading-bot restarts: an absent `state/control.json` now means `RUN`, matching the trading engine, and `state/control_ack.json` is read independently.

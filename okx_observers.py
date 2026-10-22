@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One observer pair per active bot; never starts trading services."""
 from __future__ import annotations
-from okx_version import VERSION
+from okx_version import ENGINE_VERSION
 import json
 import os
 from pathlib import Path
@@ -41,7 +41,7 @@ def supports_versionless(root, service, base=Path('/root/okx')):
     ver=cfg['version']
     # Same schema, known unchanged observer ABI: permit v0.7.21 LIVE bots
     # to retain observer management when shared Telegram/UI moves to 0.7.22.
-    if ver not in (VERSION, '0.7.21'):
+    if ver not in (ENGINE_VERSION, '0.7.23', '0.7.21'):
         return False
     engine=resolved/'okx_bot.py'
     return engine.is_file() and not engine.is_symlink()

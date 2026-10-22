@@ -13,7 +13,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from okx_paths import state_file, events_file, observer_dir
 
-from okx_version import VERSION as OBSERVER_VERSION
+from okx_version import RELEASE_VERSION as OBSERVER_VERSION
 BID_PATTERN = re.compile(r'РЕЖИМ=[A-Z_]+\s*\|\s*BID=([0-9]+(?:\.[0-9]+)?)')
 ENGINE_COUNTS = re.compile(r'\bBUY\s+(\d+)/(\d+)\s*\|\s*TP\s+(\d+)\s*\(реальных\s+(\d+)\)')
 JOURNAL_TIME = re.compile(r'^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[+-]\d{2}:\d{2}|Z))')

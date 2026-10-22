@@ -34,12 +34,20 @@ class AccountPositionsFIFO:
             raise ValueError('Shared positions quota file must be absolute')
         self.queue_path = self.path.with_name(self.path.name + '.fifo-v0712.json')
         self.reporter = reporter
+    def _metric(self, phase, elapsed_ms, **fields):
+        # Telemetry must never alter quota/FIFO decisions or propagate errors.
+        try:
+            if self.reporter:
+                self.reporter(phase, elapsed_ms, **fields)
+        except Exception:
+            pass
+
     def _recovery_notice(self, component, reason):
         # Diagnostics only. A reporter failure must never affect rate safety.
         try:
             if self.reporter:
-                self.reporter('shared_gate_recovery', 0.0,
-                              component=component, reason=reason)
+                self.reporter('positions_gate_recovery', 0.0,
+                              reason='quota' if component=='quota' else 'fifo')
         except Exception:
             pass
     def _recover_quota(self, fd, now, reason):
@@ -56,9 +64,12 @@ class AccountPositionsFIFO:
         return os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
 
     def _lock(self, fd, until):
+        started=time.monotonic()
         while True:
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self._metric('positions_gate_lock_wait',
+                             (time.monotonic()-started)*1000, outcome='ok')
                 return
             except BlockingIOError:
                 if time.monotonic() > until:
@@ -160,7 +171,11 @@ class AccountPositionsFIFO:
                 calls.append(now)
                 self._write(fd, {'schema': 1, 'calls': calls})
                 return True, 0.0
-            return False, max(0.02, min(calls) + self.WINDOW - now)
+            delay=max(0.02, min(calls) + self.WINDOW - now)
+            # Scheduled quota delay, not an actual measurement of sleep.
+            self._metric('positions_gate_quota_wait', delay*1000,
+                         outcome='advised_delay')
+            return False, delay
         finally:
             os.close(fd)
 
@@ -231,6 +246,15 @@ class AccountPositionsFIFO:
                 born = True
                 time.sleep(delay)
             raise GateUnavailable('FIFO queue wait deadline; no independent fallback')
+        except GateUnavailable as exc:
+            msg=str(exc)
+            category=('lock_timeout' if 'lock' in msg else
+                      'quota_schema' if 'quota schema' in msg else
+                      'fifo_lease' if 'lease' in msg else
+                      'fifo_deadline' if 'deadline' in msg else 'gate_unavailable')
+            self._metric('positions_gate_error', 0.0, reason=category,
+                         outcome='unavailable')
+            raise
         except (OSError, TimeoutError, ValueError) as exc:
             raise GateUnavailable(f'positions FIFO storage failure: {type(exc).__name__}') from exc
         finally:
