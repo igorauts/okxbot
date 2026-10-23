@@ -13,7 +13,7 @@ from okx_version import ENGINE_VERSION, RELEASE_VERSION, STATE_SCHEMA
 from okx_paths import state_file as current_state, fills_db as current_fills
 from okx_archive_reader import state_file as archive_state, fills_db as archive_fills
 
-assert ENGINE_VERSION=='0.7.26' and RELEASE_VERSION=='0.7.26' and STATE_SCHEMA==1
+assert ENGINE_VERSION=='0.7.27' and RELEASE_VERSION=='0.7.27' and STATE_SCHEMA==1
 assert base_coin('BTC-USDT-SWAP')=='BTC'
 assert base_coin('1000PEPE-USDT-SWAP')=='1000PEPE'
 for invalid in ['BTC-USD-SWAP','BTC-USDC-SWAP','BTC-USDT-241225','BTC-USDT-SWAP-XXX','']:

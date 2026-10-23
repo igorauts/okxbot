@@ -3,6 +3,7 @@ import json
 import math
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+from okx_latency_rollup import distribution, fresh_rows
 
 
 def _percentile(xs,p):
@@ -72,5 +73,33 @@ def report(root):
             else:lines.append('Dropped: н/д (неизвестный формат)')
         else:lines.append('Dropped: н/д (старый движок, нет sidecar)')
     except (OSError,ValueError):lines.append('Dropped: н/д (ошибка sidecar)')
-    lines.extend(['','Локальный журнал; дополнительных запросов OKX нет.'])
+    # Accurate 24h rollup counts with bounded histogram approximations.
+    rollup=root/'logs/latency_24h_rollups.jsonl'
+    try:
+        with rollup.open(encoding='utf-8') as source:
+            history=[]
+            for line in source:
+                try:history.append(json.loads(line))
+                except ValueError:continue
+        history=fresh_rows(history,now.timestamp())
+    except OSError:
+        history=[]
+    lines.extend(['', '24 часа (минутные агрегаты; P50/P95/P99 округлены вверх до границы корзины)',
+                  'Фаза                 N        P50<=      P95<=      P99<=      MAX'])
+    for phase in ('loop_pass','position_reconcile','http','rest_gate','positions_gate',
+                  'positions_gate_fifo_wait','positions_gate_quota_wait',
+                  'positions_gate_lock_wait','buy_post','ws_drain'):
+        d=distribution(history,phase,now.timestamp())
+        fmt=lambda ms: f'{ms:.2f}ms' if ms is not None else 'н/д'
+        lines.append(f'{phase:<22} {d["n"]:<8} {fmt(d["p50_upper_ms"]):<10} '
+                     f'{fmt(d["p95_upper_ms"]):<10} {fmt(d["p99_upper_ms"]):<10} '
+                     +fmt(d['max_ms'] if d['n'] else None))
+    routes=('/api/v5/account/positions','/api/v5/trade/orders-pending',
+            '/api/v5/trade/order','/api/v5/trade/fills-history')
+    lines.extend(['', 'HTTP по маршрутам за 24 часа (локальные измерения)'])
+    for route in routes:
+        d=distribution(history,'http',now.timestamp(),route=route)
+        lines.append(f'{route}: N={d["n"]}, P95<={d["p95_upper_ms"]}ms, '
+                     f'P99<={d["p99_upper_ms"]}ms, MAX={d["max_ms"]:.2f}ms')
+    lines.extend(['', 'Локальный журнал; дополнительных запросов OKX нет.'])
     return '\n'.join(lines)

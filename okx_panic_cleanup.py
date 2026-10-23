@@ -23,7 +23,15 @@ def load_json(path):
 
 def confirmed_panic(root):
     """No API; require independently persisted terminal state, ack and config."""
+    control_path=root/'state'/'control.json'
+    if not control_path.exists() and not control_path.is_symlink():
+        print('PANIC CLEANUP: no PANIC control; nothing to clean',flush=True)
+        return False
     try:
+        control_probe=load_json(control_path)
+        if control_probe.get('mode')!='PANIC':
+            print('PANIC CLEANUP: non-PANIC control; nothing to clean',flush=True)
+            return False
         cfg=load_json(root/'config.json')
         st=load_json(state_file(root))
         ack=load_json(root/'state'/'control_ack.json')

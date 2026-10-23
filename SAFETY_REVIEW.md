@@ -1,3 +1,25 @@
+# OKX Grid Bot — v0.7.27 Safety Review (release)
+
+**Baseline:** immutable public v0.7.26 release ZIP SHA256 `9a6cffb7bf0028632368966cab39c36e474d664e60831006a0008628654aed08`; pinned engine `13751a351640627035298f77bd436e16a8f81a86711af05f2c42f9d33d82b926`.
+**Status (2026-10-23):** full offline regression PASS. Four LIVE instances near0721, btc0721, dood0721-2, zec0724 individually upgraded to v0.7.27 via backup + GET-only audit + fresh heartbeat; 4 engine services, 8 observers and Telegram Monitor reported active after controlled rollout. User-supplied post-update journal check showed no listed engine/observer errors. This does not certify continuous health or destructive emergency paths. GitHub publication does not touch LIVE.
+**Scope:** diagnostics, state-persistence correctness, read-only accounting drift analysis, reliable heartbeat alerts, local 24h latency aggregation and reduced noise. No new order strategy, exchange API timeouts, FIFO quota, position-source, BUY buffer policy, Virtual TP targets, emergency operations or schema changes.
+
+## New safety checkpoints
+
+- `place()` still makes the durable PLACING write before every POST. No duplicate network POST on unknown outcome. The successful placement batch now fsyncs confirmed BUY_LIVE state. A disk failure still propagates and fails closed. This does not assert that PLACING is an OKX order.
+- Observer compares persistent BUY counts only when its state timestamp is at least as recent as the corresponding live journald sample; PLACING is separately classified as unresolved and cannot verify a confirmed exchange BUY. No automatic destructive response to discrepancy; Telegram mismatch spam remains suppressed.
+- Long-pass observer event is emitted only AFTER a completed pass; external heartbeat monitor may detect a blocked pass earlier (45s stale + 15s confirmation). Common alert grouping is based on correlated stale local engine heartbeats, not proof of OKX outage. No automatic restart or unreviewed service action.
+- 24h telemetry writer uses background-only I/O, bounded queue, local JSON, approximate histograms with explicit uncertainty, and retains raw records for outlier investigation. Any write errors are telemetry-only and must not block trading.
+- PnL checker connects to SQLite in `mode=ro`, PRAGMA query_only, performs no network or persistence and does not claim an asynchronous discrepancy proves a missing fill. Original case at ZEC $0.010084 still requires an independently corroborated investigation; balances are never automatically adjusted.
+- Both burst/execution observer services remain independently supervised; only redundant detailed journal outputs removed. Daily counters are local diagnostic counters, not exchange fill ledgers.
+- `okx_live_upgrade.py` hard-pins exact public v0.7.26 engine, requires operator-approved STOP, per-bot backups, GET-only audit and fresh heartbeat. LIVE deployment was separately authorized and verified on 2026-10-23; future deployments still require explicit operator consent before any technical STOP.
+
+## Deferred to v0.7.28
+
+Changes to HTTP GET timeout/retry budget, position synchronization through private WebSocket / shared reader, BUY protection step count, and ZEC real TP target experiment remain explicitly out of scope. Previous v0.7.26 emergency risks (unknown NET ownership, uncertain/rejected PANIC MARKET, HARD→PANIC, Virtual TP MARKET floor) remain open; do not infer these are fixed.
+
+---
+
 # OKX Grid Bot — v0.7.26 Safety Review (release)
 
 **Baseline:** public v0.7.25 ZIP SHA256 `4456dc9eada6b50bef61ebe69b93ad6bec726b3fcf547a458b45ea0370b6dc9f`.

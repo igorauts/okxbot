@@ -2,8 +2,8 @@
 
 Maintenance-only packages MUST NOT change the engine identity.
 """
-RELEASE_VERSION = '0.7.26'
-ENGINE_VERSION = '0.7.26'
+RELEASE_VERSION = '0.7.27'
+ENGINE_VERSION = '0.7.27'
 STATE_SCHEMA = 1
 
 

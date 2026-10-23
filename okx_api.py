@@ -115,13 +115,16 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
                     try:
                         p=getattr(_PERF_LOCAL,'current',None) if _PERF_RECON_ENABLED else None
                         http_start=time.perf_counter_ns()
+                        http_status=None
                         try:
                             if p is not None:
                                 status,result=p.run('rest_http',self._http,method,path,payload,headers)
                             else:
                                 status,result=self._http(method,path,payload,headers)
+                            http_status=status
                         finally:
-                            latency_ms('http',http_start,method=method,route=route)
+                            latency_ms('http',http_start,method=method,route=route,
+                                       status=http_status,attempt=attempt+1)
                     except ExchangeTemporary:
                         if method!='GET':raise ExchangeUnresolved('Uncertain POST response; saved intent must reconcile')
                         if attempt==attempts-1:raise

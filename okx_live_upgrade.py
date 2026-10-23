@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Controlled v0.7.25 -> v0.7.26 LIVE upgrade, one bot at a time.
+"""Controlled v0.7.26 -> v0.7.27 LIVE upgrade, one bot at a time.
 
 NO API orders here. systemctl stop leaves exchange orders live. Upgraded engine
 must pass its GET-only audit before systemctl start. Never auto-restart on failure.
@@ -18,18 +18,18 @@ import time
 from datetime import datetime, timezone
 
 PACKAGE_SHA256 = None  # REQUIRED --sha256 of operator-reviewed ZIP
-OLD_ENGINE_SHA256 = '0c1530e1a8b56cda2f27f3427680da522b8f1682de244dcc62faa637fb1f2f68'  # published v0.7.25 final.zip/okx_bot.py
-OLD_VERSION = '0.7.25'
-NEW_VERSION = '0.7.26'
+OLD_ENGINE_SHA256 = '13751a351640627035298f77bd436e16a8f81a86711af05f2c42f9d33d82b926'  # published v0.7.26 final.zip/okx_bot.py
+OLD_VERSION = '0.7.26'
+NEW_VERSION = '0.7.27'
 PACKAGE = None  # set via --package
 STAGE = None  # set via --stage
 SHARED = Path('/opt/okx-grid-live')
 BASE = Path('/root/okx')
-BACKUPS = Path('/srv/okxbot-v0726-live-backups')
+BACKUPS = Path('/srv/okxbot-v0727-live-backups')
 TELEGRAM_ROOT = Path('/root/okx')
 TELEGRAM_UNIT = 'okx-telegram-monitor.service'
 BOTS = ()  # assigned from --bot, never a hardcoded list
-LOCK = Path('/run/okxbot-v0726-upgrade.lock')
+LOCK = Path('/run/okxbot-v0727-upgrade.lock')
 
 
 def fail(message):
@@ -63,7 +63,7 @@ def json_read(path):
 def atomic_replace_file(src, dst):
     src=check_file(src);dst=Path(dst)
     if dst.is_symlink() or not dst.parent.is_dir():fail('Unsafe destination '+str(dst))
-    fd,tmp=tempfile.mkstemp(dir=dst.parent,prefix='.v0726-upgrade-')
+    fd,tmp=tempfile.mkstemp(dir=dst.parent,prefix='.v0727-upgrade-')
     try:
         with os.fdopen(fd,'wb') as out,src.open('rb') as inp:
             shutil.copyfileobj(inp,out)
@@ -79,7 +79,7 @@ def atomic_replace_file(src, dst):
 
 def atomic_json(path,obj):
     path=check_file(path)
-    fd,tmp=tempfile.mkstemp(dir=path.parent,prefix='.v0726-json-')
+    fd,tmp=tempfile.mkstemp(dir=path.parent,prefix='.v0727-json-')
     try:
         with os.fdopen(fd,'w',encoding='utf-8') as out:
             json.dump(obj,out,ensure_ascii=False,indent=2)
@@ -175,7 +175,7 @@ def instance_check(bot, desired, need_active=True):
             fail(bot+' not in RUN control mode')
     engine=check_file(root/'okx_bot.py')
     if desired==OLD_VERSION and sha256(engine)!=OLD_ENGINE_SHA256:
-        fail(bot+' engine hash not matching published v0.7.25 baseline')
+        fail(bot+' engine hash not matching published v0.7.26 baseline')
     if desired==NEW_VERSION and sha256(engine)!=sha256(STAGE/'okx_bot.py'):
         fail(bot+' engine hash not matching candidate')
     return root,unit,kv
@@ -302,7 +302,7 @@ def install_telegram():
 def upgrade_bot(bot):
     stage_check()
     shared_ver=json_read(SHARED/'engine_manifest.json').get('current_version')
-    if shared_ver!=NEW_VERSION:fail('Shared runtime is not staged v0.7.26')
+    if shared_ver!=NEW_VERSION:fail('Shared runtime is not staged v0.7.27')
     engine_files=files_required()
     # Check staged dependencies are byte-identical to installed shared runtime.
     for name in engine_files:
