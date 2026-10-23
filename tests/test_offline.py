@@ -13,7 +13,7 @@ from okx_version import ENGINE_VERSION, RELEASE_VERSION, STATE_SCHEMA
 from okx_paths import state_file as current_state, fills_db as current_fills
 from okx_archive_reader import state_file as archive_state, fills_db as archive_fills
 
-assert ENGINE_VERSION=='0.7.25' and RELEASE_VERSION=='0.7.25' and STATE_SCHEMA==1
+assert ENGINE_VERSION=='0.7.26' and RELEASE_VERSION=='0.7.26' and STATE_SCHEMA==1
 assert base_coin('BTC-USDT-SWAP')=='BTC'
 assert base_coin('1000PEPE-USDT-SWAP')=='1000PEPE'
 for invalid in ['BTC-USD-SWAP','BTC-USDC-SWAP','BTC-USDT-241225','BTC-USDT-SWAP-XXX','']:
@@ -114,11 +114,12 @@ print('OFFLINE ONLY — no OKX connection or orders')
 # module has no compat chain and must import cleanly.
 assert not any(p.name.startswith('okx_monitor_compat') for p in SH.glob('*.py'))
 
-# Critical last-LIVE Telegram mismatch hotfix stays in candidate unchanged
-# except for the path import.
+# Mismatch paired samples remain in local observer telemetry but are not
+# turned into Telegram notifications. Critical monitor events remain handled.
 observer=(SH/'okx_execution_observer.py').read_text()
 events=(ROOT/'okx_telegram_events.py').read_text()
-assert 'paired_samples' in observer and 'paired_samples' in events
+assert 'paired_samples' in observer and "self.message('PERSISTED_STATE_DIFFERS_FROM_ENGINE'" in observer
+assert '_state_mismatch_alert' not in events and "'RECONCILIATION_LONG_WAIT'" in events
 
 # Archive report puts verified terminal net PnL BEFORE the stale pre-PANIC snapshot.
 import okxbot

@@ -100,4 +100,3 @@ class LatencyJournal:
                 if clock>=next_health:
                     self._health_snapshot()
                     next_health=clock+30
-

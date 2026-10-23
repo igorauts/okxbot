@@ -1,4 +1,4 @@
-"""v0.7.25 offline P0 and display regressions; no exchange, no live files."""
+"""v0.7.26 offline P0 and display regressions; no exchange, no live files."""
 import ast
 import json
 import sys
@@ -18,37 +18,37 @@ from okx_stats_ui import format_stats
 from okx_positions_fifo import AccountPositionsFIFO
 
 D=lambda n:Decimal(str(n if n is not None and n!='' else '0'))
-assert (RELEASE_VERSION,ENGINE_VERSION,STATE_SCHEMA)==('0.7.25','0.7.25',1)
-assert okxbot.latest_engine()==('okx_bot.py','0.7.25')
-assert validate_version_ids('0.7.25.1','0.7.25')
-for invalid in [('0.7.25.1','0.7.25.1'),('0.7.25.1','0.7.25.1'),('0.7.25','0.7.24')]:
+assert (RELEASE_VERSION,ENGINE_VERSION,STATE_SCHEMA)==('0.7.26','0.7.26',1)
+assert okxbot.latest_engine()==('okx_bot.py','0.7.26')
+assert validate_version_ids('0.7.26.1','0.7.26')
+for invalid in [('0.7.26.1','0.7.26.1'),('0.7.26.1','0.7.26.1'),('0.7.26','0.7.24')]:
     try:validate_version_ids(*invalid)
     except RuntimeError:pass
     else:raise AssertionError('Version mismatch allowed: '+str(invalid))
 # Maintenance tag simulation, with a REAL provisional instance package.
 with tempfile.TemporaryDirectory() as d:
-    folder=Path(d);(folder/'config.json').write_text('{"version":"0.7.25.1","instrument":"BTC-USDT-SWAP"}')
-    with patch.object(okxbot,'RELEASE_VERSION','0.7.25.1'):
+    folder=Path(d);(folder/'config.json').write_text('{"version":"0.7.26.1","instrument":"BTC-USDT-SWAP"}')
+    with patch.object(okxbot,'RELEASE_VERSION','0.7.26.1'):
         engine,version=okxbot.provision_latest_engine(folder)
-        assert engine=='okx_bot.py' and version=='0.7.25'
-        assert json.loads((folder/'config.json').read_text())['version']=='0.7.25'
+        assert engine=='okx_bot.py' and version=='0.7.26'
+        assert json.loads((folder/'config.json').read_text())['version']=='0.7.26'
         assert (folder/'okx_version.py').is_file()
         from okx_state import empty
         created=empty(version,'BTC-USDT-SWAP')
-        assert created['version']=='0.7.25'
+        assert created['version']=='0.7.26'
     forged=folder/'wrong_source';forged.mkdir()
     shutil.copy2(ROOT/'okx_bot.py',forged/'okx_bot.py')
-    bad=json.loads((ROOT/'engine_manifest.json').read_text());bad['current_version']='0.7.25.1'
+    bad=json.loads((ROOT/'engine_manifest.json').read_text());bad['current_version']='0.7.26.1'
     (forged/'engine_manifest.json').write_text(json.dumps(bad))
     try:okxbot.latest_engine(forged)
     except RuntimeError:pass
     else:raise AssertionError('Bad release/engine mismatch not rejected')
     # Reject missing engine dependency, not just mismatched versions.
-    bad['current_version']='0.7.25';(forged/'engine_manifest.json').write_text(json.dumps(bad))
-    try:okxbot.latest_dependencies('okx_bot.py','0.7.25',forged)
+    bad['current_version']='0.7.26';(forged/'engine_manifest.json').write_text(json.dumps(bad))
+    try:okxbot.latest_dependencies('okx_bot.py','0.7.26',forged)
     except RuntimeError:pass
     else:raise AssertionError('Missing engine dependency allowed')
-print('PASS P0: new bot engine v0.7.25 despite release v0.7.25.1, malformed sources fail closed')
+print('PASS P0: new bot engine v0.7.26 despite release v0.7.26.1, malformed sources fail closed')
 
 # Extract a pure stats function without importing the LIVE engine module.
 tree=ast.parse((ROOT/'okx_bot.py').read_text())
@@ -100,7 +100,7 @@ with tempfile.TemporaryDirectory() as d:
     payload=dict(schema=1,bid='0.002000',top_open_buy='0.002500',open_base='2000',
         open_nominal='4.000000',floating_pnl='-1.00000000',grid_profit='3.500',
         closed_count=23,limit_tp_net='2.5',market_tp_net='1.0',partial_exit_count=1,
-        partial_exit_net='-.5',realized_open_components='.3',total_pnl='2.3',tp_waiting=2,
+        partial_exit_net='-.5',realized_open_components='.3',total_pnl='2.3',tp_waiting=2,tp_waiting_all=8,
         last_24h='1',per_day='2',per_30d='60',per_year='730',capital='200',
         max_base='200000',grid_reference_top='.003',grid_bottom='.001',grid_average='.002',
         launch_at=1792660000,uptime='99.82%',volume='200',maker_volume='180',
@@ -108,9 +108,10 @@ with tempfile.TemporaryDirectory() as d:
     now=1792680000
     out=format_stats(root,'DOOD-USDT-SWAP',payload,bot_active=True,heartbeat_fresh=True,
                      snapshot_at=now-100,now=now)
-    assert '🟢 Бот работает' in out
-    assert 'Верх сетки: $0.002500' in out and 'ниже на 20.00%' in out
-    assert 'Открытая позиция: 2000.00000000 DOOD  |  $4.00000000' in out
+    assert '🟢 Работает:' in out and 'Бот работает' not in out
+    assert 'Верх сетки: $0.002500' in out and '(-20.00%)' in out
+    assert 'Открытая позиция: 2000 DOOD ($4.00)' in out
+    assert 'Ждут TP: 8' in out
     assert 'Floating PnL: −$1.00000000' in out and 'ИТОГОВЫЙ PnL: +$2.30000000' in out
     assert 'Виртуальных TP' not in out and 'Последний замер DD' not in out
     assert 'Макс. позиция в истории' in out

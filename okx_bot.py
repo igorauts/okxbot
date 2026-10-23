@@ -3543,7 +3543,8 @@ def performance_snapshot_v0724(st, fills, stats, now):
         'partial_exit_net':str(stats['partial_exit_net']),
         'realized_open_components':str(stats['realized_open_components']),
         'total_pnl':str(stats['total_gain']),
-        'tp_waiting':len(real_tp_active(st)),
+        'tp_waiting':len(real_tp_active(st)),  # legacy: real only
+        'tp_waiting_all':len(real_tp_active(st))+len(virtual_cycles(st)),
         'last_24h':str(past24) if past24 is not None else None,
         'per_day':str(daily) if daily is not None else None,
         'per_30d':str(daily*30) if daily is not None else None,

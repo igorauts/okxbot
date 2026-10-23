@@ -1,3 +1,10 @@
+## v0.7.26 — Telegram non-actionable mismatch suppression & terminal statistics (2026-10-23)
+
+- Drop only Telegram delivery of `PERSISTED_STATE_DIFFERS_FROM_ENGINE` diagnostic mismatch and its `BACK TO NORMAL` counterpart. Local observer alert history, paired samples and summary remain untouched, as do BUY 0/N, TP coverage, PANIC, health and other actionable alarms. Clear already-queued obsolete mismatch notifications safely before the next Telegram outbox drain; retain all unrelated queued messages.
+- Manager statistics: status merged into uptime line, start time below, BID relative to top filled/open BUY uses signed percentage only; awaiting TP counts real ACTIVE records plus nonempty virtual TP cycles from one engine snapshot. Older snapshot without the new count displays `н/д` rather than silently presenting real-only counts.
+- Base quantities displayed without padding according to `contract_value × contract_lot`; nominal and historical peak marked to USD cents and shown in parentheses. GRID and total highlighted; LIMIT/MARKET/Partial breakdowns uncolored. No PnL formulas, trade decisions, Virtual TP execution, FIFO or safety paths modified.
+- v0.7.26 engine identity (three components), state schema 1; pinned v0.7.25→v0.7.26 fail-closed updater. Offline regression PASS. On 2026-10-23, four controlled LIVE upgrades with backups, individual GET-only audit and fresh heartbeat succeeded for `near0721`, `btc0721`, `dood0721-2`, `zec0724`; four trading services and Telegram monitor were active after rollout. Publication is separate and does not touch LIVE.
+
 ## v0.7.25 — Emergency Reliability audit hardening (2026-10-22)
 
 - P0: Independently verified owned BUY cancels proceed despite an unrelated manually edited/mismatched BUY; the conflict remains unresolved and prevents an unsafe NET MARKET SELL. Existing durable cancel, batch cap, unknown-POST and position-gate protections retained.

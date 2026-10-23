@@ -10,3 +10,4 @@ python3 -B tests/test_v0723_fifo_alert.py
 python3 -B tests/test_v07231_telegram_start.py
 python3 -B tests/test_v0724.py
 python3 -B tests/test_v0725.py
+python3 -B tests/test_v0726.py
