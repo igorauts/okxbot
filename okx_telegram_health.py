@@ -185,7 +185,10 @@ def _health_record(watches, key, now, invocation=None):
         watches[key] = rec
     if invocation is not None and rec.get('invocation') != invocation:
         # New process: its previous heartbeat is not evidence of a hang.
-        rec.update({'invocation': invocation, 'fault': None,
+        # An unconfirmed restart is NOT a recovery of an already-reported
+        # incident. Keep it unresolved until the new process writes a fresh
+        # heartbeat and recovery is independently confirmed.
+        rec.update({'invocation': invocation,
                     'bad_since': None, 'bad_count': 0,
                     'good_since': None, 'good_count': 0})
     return rec
@@ -240,8 +243,10 @@ def engine_heartbeat_check(api, st, services, roots, now=None):
         invocation = info.get('InvocationID') or ''
         rec = _health_record(watches, name, now, invocation)
         if not active:
-            # Unexpected trade STOP/START has its own systemd journal alert.
-            rec.update({'fault': None, 'bad_since': None, 'bad_count': 0,
+            # A STOP is covered by systemd notifications. Crucially an
+            # outstanding HEARTBEAT alarm is NOT a confirmed recovery.
+            # Retain that alarm until a fresh heartbeat on an active process.
+            rec.update({'bad_since': None, 'bad_count': 0,
                         'good_since': None, 'good_count': 0})
             continue
         path = Path(roots[name]) / 'state/runtime_stats.json'
@@ -266,33 +271,55 @@ def engine_heartbeat_check(api, st, services, roots, now=None):
             just_recovered.append(name)
             rec.update({'fault': None, 'good_since': None, 'good_count': 0})
 
-    # Read-only cross-bot correlation of confirmed stale heartbeats.
-    # Send once per common episode, not once per poll. Never infer OKX outage.
-    affected=tuple(sorted(name for name in services
-                          if isinstance(watches.get(name),dict)
-                          and watches[name].get('fault') == 'heartbeat stale'))
-    correlated=st.setdefault('common_engine_stall_v0727',{})
-    was_common=bool(correlated.get('active'))
-    is_common=len(affected)>=2
-    if is_common and not was_common:
-        one(api, st, 'heartbeat/common/'+str(int(now)),
-            '🚨 COMMON ENGINE STALL | '+', '.join(affected)+
+    # Each fault remains independent in engine_heartbeat_v0722. Grouping is
+    # presentation only: a common incident stays open while ANY member is
+    # unresolved, including one remaining after partial recovery. Never
+    # interpret systemd stop / transient monitoring failures as recovery.
+    affected = tuple(sorted(name for name in services
+                            if isinstance(watches.get(name), dict)
+                            and watches[name].get('fault') == 'heartbeat stale'))
+    correlated = st.setdefault('common_engine_stall_v0727', {})
+    old_members = set(correlated.get('members', [])) if correlated.get('active') else set()
+    new_members = set(affected)
+    # Bot discovery/registry loss is not evidence of recovery. Retain any
+    # previously alarmed member until it becomes observable and confirms a
+    # fresh heartbeat, even if it vanishes from the current services mapping.
+    new_members.update(old_members - set(services))
+    was_common = bool(correlated.get('active'))
+    is_common = len(affected) >= 2
+    if not was_common and is_common:
+        number = int(correlated.get('episode', 0)) + 1
+        one(api, st, f'heartbeat/common/{number}',
+            '🚨 COMMON ENGINE STALL | ' + ', '.join(affected) +
             '\nНесколько ботов без свежего heartbeat. REST / сеть / VPS — причина не установлена.')
-        correlated.update({'active':True,'members':list(affected),'since':now})
-    elif not is_common and was_common:
-        one(api, st, 'heartbeat/common/recovered/'+str(int(now)),
-            '✅ COMMON ENGINE STALL: общая задержка heartbeat больше не подтверждается')
-        correlated.update({'active':False,'members':[]})
-    if not is_common and not was_common:
-        # A genuinely isolated stall remains actionable; do not suppress it.
-        for name,age in just_failed:
+        correlated.update({'active': True, 'members': list(affected),
+                           'since': now, 'episode': number, 'change': 0})
+    elif was_common:
+        number = int(correlated.get('episode', 1))
+        if not new_members:
+            one(api, st, f'heartbeat/common/recovered/{number}',
+                '✅ ALL RECOVERED | ' + ', '.join(sorted(old_members)) +
+                '\nУ всех участников общего инцидента подтверждён свежий heartbeat')
+            correlated.update({'active': False, 'members': [], 'ended': now})
+        elif new_members != old_members:
+            index = int(correlated.get('change', 0)) + 1
+            joined = sorted(new_members - old_members)
+            recovered = sorted(old_members - new_members)
+            details = []
+            if joined: details.append('🔴 Присоединились: ' + ', '.join(joined))
+            if recovered: details.append('✅ Восстановились: ' + ', '.join(recovered))
+            details.append('🔴 Всё ещё без heartbeat: ' + ', '.join(sorted(new_members)))
+            one(api, st, f'heartbeat/common/update/{number}/{index}',
+                '⚠️ COMMON STALL UPDATE\n' + '\n'.join(details))
+            correlated.update({'members': sorted(new_members), 'change': index})
+    else:
+        # Isolated incidents retain their own notification and recovery.
+        for name, age in just_failed:
             one(api, st, f'heartbeat/down/{name}/{int(now)}',
                 f'🚨 {name}: нет heartbeat движка ({age}), служба active')
         for name in just_recovered:
             one(api, st, f'heartbeat/recovery/{name}/{int(now)}',
                 f'✅ BACK TO NORMAL | {name}\nHeartbeat торгового движка восстановлен')
-    # When a common episode is/was active, one grouped alert and one grouped
-    # recovery replace redundant per-bot notifications from the same episode.
 
 
 def observers_check(api, st, services, roots, now=None):

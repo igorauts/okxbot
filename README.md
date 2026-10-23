@@ -2,9 +2,16 @@
 
 Алгоритмический LONG Grid Bot для бессрочных USDT-фьючерсов OKX.
 
-**Последний опубликованный релиз: [v0.7.27](https://github.com/igorauts/okxbot/releases/tag/v0.7.27).**
+**Последний опубликованный релиз: [v0.7.28](https://github.com/igorauts/okxbot/releases/tag/v0.7.28).**
 
-**v0.7.27 — Reliability & Observability.** На 23 октября 2026 года все четыре LIVE-экземпляра прошли последовательное обновление, GET-only audit и проверку свежего heartbeat; 13 служб (включая восемь observers и Telegram) подтверждены активными без ошибок в предоставленных журналах после rollout. Это проверка на тот момент, а не гарантия непрерывной будущей доступности.
+**v0.7.28 — Monitoring Reliability Fix.** Продолжение v0.7.27: безопасная группировка heartbeat-инцидентов, append-only 24-часовая latency-телеметрия и однозначные поля TP-диагностики. Контролируемый LIVE rollout и проверка всех 13 служб завершены 23 октября 2026 года. Это результат проверки на момент обновления, не гарантия непрерывной будущей доступности.
+
+## v0.7.28 — Monitoring Reliability Fix (LIVE-verified, 2026-10-23)
+
+- Heartbeat alerts retain each bot's unresolved fault during multi-bot incidents; join and partial recovery are reported without false `ALL RECOVERED`.
+- 24-hour latency rolls up in append-only UTC-hour files under `logs/latency_24h_rollups.segments/`; the previous JSONL is read only during a one-day transition. No per-minute rewriting of the full 24h file. Histograms remain approximate; no seven-day archive.
+- TP diagnostics include `buyPx`, `tpPx`, `cycleId`, while retaining old `price` for backwards-compatible log readers. Trading choices, FIFO caps, timeouts, TP policy and accounting are unchanged.
+- Контролируемое LIVE-обновление четырёх ботов (`near0721`, `btc0721`, `dood0721-2`, `zec0724`) завершено 23 октября 2026 года: отдельные backup, GET-only audit, свежий heartbeat для каждого; 13 служб активны, ошибок в предоставленной проверке журналов нет. Append-only сегменты всех четырёх ботов содержат свежие минутные записи. Групповые аварии на LIVE намеренно не провоцировались; их сценарии пройдены в офлайн-тестах. Публикация GitHub не трогает LIVE.
 
 ## Возможности
 
