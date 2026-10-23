@@ -1,8 +1,8 @@
-# OKX Grid Bot — v0.7.25 Safety Review (release)
+# OKX Grid Bot — v0.7.26 Safety Review (release)
 
-**Baseline:** public v0.7.24 ZIP SHA256 `2cc176d0860e822ea9674bf7870c008cfd11b743475aefc22f0f7e372d6d572b`.
-**Scope:** hardening of emergency commands, independent PANIC ALL, Telegram notifications, observer compatibility, manager resilience and controlled upgrade. State schema stays `1`.
-**Live status (2026-10-22 rollout):** four LIVE bots `near0721`, `btc0721`, `dood0721-2`, `zec0724` passed the controlled v0.7.25 upgrade procedure, individual GET-only audit and fresh engine-heartbeat verification; all four trading services and Telegram monitor were reported active. This point-in-time verification does not prove destructive emergency branches on the real exchange or continuing availability.
+**Baseline:** public v0.7.25 ZIP SHA256 `4456dc9eada6b50bef61ebe69b93ad6bec726b3fcf547a458b45ea0370b6dc9f`.
+**Scope:** suppressed non-actionable State/Engine BUY mismatch notifications in Telegram while preserving local observer evidence and actionable alerts; compact manager statistics with consistent real+virtual TP count and contract-precision quantities. Trading strategy and emergency decisions unchanged. State schema stays `1`; previous v0.7.25 safety controls retained.
+**Live status (2026-10-23 rollout):** four LIVE bots `near0721`, `btc0721`, `dood0721-2`, `zec0724` passed the controlled v0.7.26 upgrade procedure, individual GET-only audit and fresh engine-heartbeat verification; all four trading services and Telegram monitor were reported active. This point-in-time verification does not prove destructive emergency branches on the real exchange or continuing availability.
 
 ## Emergency ownership and unresolved orders
 
@@ -13,19 +13,23 @@
 
 ## Telegram fault visibility and delivery
 
+- v0.7.26: `PERSISTED_STATE_DIFFERS_FROM_ENGINE` and its diagnostic recovery are retained locally but excluded from Telegram delivery; stale messages of that type are removed from the pending Telegram queue only. Critical PANIC, BUY deficit, TP coverage, engine health and other actionable alerts remain enabled. No observer or trading-engine safety decision is changed.
+
 - Critical event alarms added for `PANIC_MARKET_REJECTED`, `PANIC_RETRY_EXHAUSTED`, `EMERGENCY_POSITION_UNRESOLVED` and `EMERGENCY_BUY_IDENTITY_CONFLICT`.
 - Read-only independently persisted PANIC ACK monitoring reports `PANIC_MANUAL_REVIEW` once per continuous episode (without rereporting on changed timestamps/position), including remaining-position text. No claim of successful PANIC is inferred from a failed attempt.
 - Durable Telegram queue distinguishes definite HTTP 400/403 errors from 429/transient failures. Permanently rejected messages are moved into a bounded local dead-letter log and do not block subsequent alerts; temporary/ambiguous failures remain queued in order. A bounded sent-key index preserves keys of still-queued items. A permanently blocked bot/chat requires local investigation: no Telegram channel can report its own incapacity.
 
 ## Management, upkeep and deploy
 
+- v0.7.26 terminal statistics show the bot RUN uptime and start time, signed BID percentage versus highest filled/open BUY, combined active-real plus virtual TP counts from one snapshot, and quantities rounded to contract specifications with USD notional displayed to cents. The legacy GET-only audit output remains unchanged; reporting never alters order placement.
+
 - PANIC cleanup accepts the exact anomalous historical engine identity `0.7.23.1` but continues to require config/state equality, PANIC_DONE, ACK, terminal snapshot, zero contracts, and confirmed systemd WorkingDirectory. Arbitrary four-part versions remain forbidden.
 - Versionless observers admit only clean-engine three-part versions within `[0.7.19, ENGINE_VERSION]`, with schema 1 and persisted state/config identity. This checks stated ABI compatibility, not merely a version string; old engines outside the clean compatibility range remain disabled.
 - Read-only manager list, menu and account display isolate malformed individual registry records with visible warnings. They never rewrite/erase the record. Safety-sensitive account-reset, create and control flows keep strict validation. The account display must not treat an incomplete bot registry as a verified bot count.
-- `okx_live_upgrade.py` is included in the package. It requires explicit ZIP SHA256, verified unpacked stage, one named bot, v0.7.24 engine hash, backup, stop/inactive and state recheck, durable version migration, GET-only audit and fresh heartbeat on new PID. Any audit failure restores files and leaves bot **stopped**; no automatic exchange orders or blind restart. Stopping systemd does **not** cancel exchange orders; virtual TP can be unprotected while process is stopped. Never run updater without separately authorized LIVE maintenance.
+- `okx_live_upgrade.py` is included in the package. It requires explicit ZIP SHA256, verified unpacked stage, one named bot, v0.7.25 engine hash, backup, stop/inactive and state recheck, durable version migration, GET-only audit and fresh heartbeat on new PID. Any audit failure restores files and leaves bot **stopped**; no automatic exchange orders or blind restart. Stopping systemd does **not** cancel exchange orders; virtual TP can be unprotected while process is stopped. Never run updater without separately authorized LIVE maintenance.
 - `okxbot.py` and `run_checks.sh` ZIP mode must remain `0755`, checked as part of packaging. `README.md` describes the verified rollout and the release procedures; the separate GitHub publication never changes LIVE services.
 
-## Explicit outstanding risks (NOT fixed in v0.7.25)
+## Explicit outstanding risks (NOT fixed in v0.7.26)
 
 1. Unknown manual/foreign orders on the same NET instrument can still prevent bot startup; intentional ownership restriction.
 2. Ambiguous PANIC MARKET POST can leave an unprotected position while safe reconciliation waits. Do not blindly retry or market-sell unknown NET exposure.
@@ -37,4 +41,4 @@
 
 ## Verification limits
 
-`run_checks.sh` includes existing contract/state/finance/Telegram regressions plus v0.7.25 fault injections for mismatched BUY, partial PANIC ALL, invalid NET identity, ACK suppression, dead-letter queue, historical cleanup and registry resilience. All are deterministic/mocked; they do NOT prove end-to-end live exchange behavior. Controlled one-bot-at-a-time LIVE preflight and authorized rollout completed on 2026-10-22 with four instances; intentionally destructive emergency fault-injection was only tested offline. Publication must verify immutable release assets and must not restart or alter LIVE instances.
+`run_checks.sh` includes existing contract/state/finance/Telegram regressions, v0.7.25 emergency fault injections and v0.7.26 mismatch-suppression and terminal-statistics regression. The Telegram delivery suppression is scoped only to diagnostic State/Engine BUY mismatch and associated recovery; other alarms remain unchanged. All are deterministic/mocked; they do NOT prove end-to-end live exchange behavior. Controlled one-bot-at-a-time LIVE preflight and authorized rollout completed on 2026-10-23 with four instances; intentionally destructive emergency fault-injection was only tested offline. Publication must verify immutable release assets and must not restart or alter LIVE instances.

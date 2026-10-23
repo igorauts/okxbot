@@ -1211,8 +1211,8 @@ def _viewer_frame(scr, title, lines, scroll, footer, live=False, paint_stats=Fal
         if line.startswith(('GRID PROFIT:', 'ИТОГОВЫЙ PnL:')):
             attribute |= curses.A_BOLD
         if curses.has_colors() and line.startswith((
-                'GRID PROFIT:', 'ИТОГОВЫЙ PnL:', 'LIMIT TP:', 'MARKET TP:',
-                'Partial MARKET Exit:', 'Floating PnL:', 'Макс. просадка:')):
+                'GRID PROFIT:', 'ИТОГОВЫЙ PnL:',
+                'Floating PnL:', 'Макс. просадка:')):
             try:
                 curses.start_color()
                 curses.use_default_colors()

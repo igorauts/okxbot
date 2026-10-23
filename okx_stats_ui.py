@@ -56,6 +56,25 @@ def run_time(seconds):
     return (f'{d}д ' if d else '')+f'{h}ч {m}м {seconds}с'
 
 
+def base_quantity(value, config):
+    """Readable exact base quantity at OKX contract precision; no fictitious rounding.
+
+    contract_value * contract_lot is the minimum base-asset order increment.
+    Preserve any non-aligned historical partial quantity instead of rounding it.
+    """
+    v=dec(value)
+    if v is None:return 'н/д'
+    contract=dec(config.get('contract_value'))
+    lot=dec(config.get('contract_lot'))
+    quantum=contract*lot if contract is not None and lot is not None else None
+    if quantum is not None and quantum>0 and v % quantum == 0:
+        digits=max(0,-quantum.normalize().as_tuple().exponent)
+        out=f'{v:.{digits}f}'
+    else:
+        out=format(v,'f')  # exact fallback, never round off a partial fill
+    return out.rstrip('0').rstrip('.') if '.' in out else out
+
+
 def peak_line(root, instrument):
     """Read SQLite in query_only mode; never write a peak cache on UI repaint."""
     try:
@@ -66,7 +85,7 @@ def peak_line(root, instrument):
         best,_=reconstruct_peak(_ordered_rows(fills_db(root),instrument),cfg['contract_value'])
         base=dec(best['base_qty']);nominal=dec(best['nominal_usdt'])
         if base is None or nominal is None:raise ValueError('peak invalid')
-        return f'Макс. позиция в истории: {base:.8f} {instrument.split("-",1)[0]}  |  {usd(nominal)}'
+        return f'Макс. позиция в истории: {base_quantity(base,cfg)} {instrument.split("-",1)[0]} ({usd(nominal)})'
     except (OSError,ValueError,TypeError,KeyError,sqlite3.DatabaseError,InvalidOperation):
         return 'Макс. позиция в истории: нет достоверных данных'
 
@@ -120,22 +139,25 @@ def format_stats(root, instrument, payload, *, bot_active=False,
         bidtext=f'{usd(bid,digits)} (верх исполненных BUY отсутствует)'
     else:
         change=(bid-upper)/upper*100
-        comparison=(f'ниже на {abs(change):.2f}%' if change<0 else
-                    f'выше на {change:.2f}%' if change>0 else 'на уровне верха')
-        bidtext=f'{usd(bid,digits)} ({comparison})'
+        bidtext=f'{usd(bid,digits)} ({change:+.2f}%)'
     started=payload.get('launch_at')
     elapsed=now-float(started) if started is not None else None
     uptime=payload.get('uptime') or 'н/д'
     capital=dec(payload.get('capital'))
     pct_total=pct(total,capital)
+    waiting=payload.get('tp_waiting_all')
+    if type(waiting) is not int or waiting<0:
+        # Older engine snapshots contained only real TP. Never mislabel those as
+        # ALL real+virtual while running mixed-package rollout.
+        waiting='н/д'
     lines=[
-        ('🟢 Бот работает' if active else '⚪ Статус RUN не подтверждён'),
+        ('🟢 Работает: ' if active else '⚪ Работает (RUN не подтверждён): ')
+            +f'{run_time(elapsed)}, uptime {uptime}',
         'Запущен: '+at_utc(started),
-        f'Работает: {run_time(elapsed)}, uptime {uptime}',
         '',
         'Верх сетки: '+(usd(upper,digits) if upper is not None else '—'),
         'Текущий BID: '+bidtext,
-        f'Ждут TP: {payload["tp_waiting"]}',
+        f'Ждут TP: {waiting}',
         '',
         'GRID PROFIT: '+signed(grid),
         f'Закрытых циклов: {payload["closed_count"]}',
@@ -143,7 +165,7 @@ def format_stats(root, instrument, payload, *, bot_active=False,
         'MARKET TP: '+signed(market),
         'Partial MARKET Exit: '+signed(partial),
         '',
-        f'Открытая позиция: {base:.8f} {coin}  |  {usd(nominal,8)}',
+        f'Открытая позиция: {base_quantity(base,config)} {coin} ({usd(nominal)})',
         'Floating PnL: '+signed(floating),
         '',
         'ИТОГОВЫЙ PnL: '+signed(total)+f' ({pct_total} от 1x)',
@@ -160,7 +182,7 @@ def format_stats(root, instrument, payload, *, bot_active=False,
         'Уплачено комиссий: '+usd(payload.get('paid_fees'),8),
         '',
         'Расчётный капитал для 1x: '+usd(capital),
-        '  max position: '+(f'{dec(payload["max_base"]):.8f} {coin}' if dec(payload.get('max_base')) is not None else '—'),
+        '  max position: '+(f'{base_quantity(payload["max_base"],config)} {coin}' if dec(payload.get('max_base')) is not None else '—'),
         '  сетка: '+(f'{usd(payload["grid_reference_top"],digits)} → {usd(payload["grid_bottom"],digits)}'
                      if payload.get('grid_reference_top') is not None else '—'),
         '  средняя цена: '+usd(payload.get('grid_average'),digits),

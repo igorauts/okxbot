@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "current_version": "0.7.25",
+  "current_version": "0.7.26",
   "engines": {
-    "0.7.25": {
+    "0.7.26": {
       "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
