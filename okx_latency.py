@@ -10,6 +10,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from okx_latency_rollup import MinuteWriter
 
 
 class LatencyJournal:
@@ -41,7 +42,7 @@ class LatencyJournal:
             permitted = {'route', 'method', 'passes', 'mismatches', 'outcome',
                          'count', 'placed', 'attempted', 'status', 'partial',
                          'resolved', 'active_buys', 'target_buys', 'dropped',
-                         'reason'}
+                         'reason','attempt'}
             safe = {k: v for k,v in fields.items()
                     if k in permitted and (v is None or type(v) in (str, int, float, bool))}
             if 'route' in safe:
@@ -80,18 +81,26 @@ class LatencyJournal:
 
     def _write_loop(self):
         next_health=0.0
+        rollup=MinuteWriter(self.path.with_name('latency_24h_rollups.jsonl'))
         while True:
             rec = self.queue.get()
             try:
-                self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-                if self.path.exists() and self.path.stat().st_size >= self.MAX_BYTES:
-                    old = self.path.with_name(self.path.name + '.1')
-                    os.replace(self.path, old)
-                fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-                try:
-                    os.write(fd, (json.dumps(rec, separators=(',', ':')) + '\n').encode('utf-8'))
-                finally:
-                    os.close(fd)
+                rollup.observe(rec)
+                # Fine-grained lock/quota samples are fully represented in
+                # bucket distributions. Keep only abnormal >1ms raw values.
+                raw_needed=(rec.get('phase') not in (
+                    'positions_gate_lock_wait','positions_gate_quota_wait')
+                    or rec.get('ms',0)>1)
+                if raw_needed:
+                    self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    if self.path.exists() and self.path.stat().st_size >= self.MAX_BYTES:
+                        old = self.path.with_name(self.path.name + '.1')
+                        os.replace(self.path, old)
+                    fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+                    try:
+                        os.write(fd, (json.dumps(rec, separators=(',', ':')) + '\n').encode('utf-8'))
+                    finally:
+                        os.close(fd)
             except (OSError, ValueError, TypeError):
                 self.write_errors += 1
             finally:

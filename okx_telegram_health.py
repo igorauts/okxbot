@@ -165,8 +165,8 @@ def service_check(api, st, services, roots):
 # Debounced health alerts. A single late/missing telemetry sample is not a fault.
 # The trading engine and observer subprocesses remain fully independent of this
 # read-only reporter. Stable timestamps are persisted by the Telegram monitor.
-HEARTBEAT_STALE_SEC = 120
-HEARTBEAT_CONFIRM_SEC = 30
+HEARTBEAT_STALE_SEC = 45
+HEARTBEAT_CONFIRM_SEC = 15
 OBSERVER_STALE_SEC = 90
 OBSERVER_CONFIRM_SEC = 60
 OBSERVER_INACTIVE_CONFIRM_SEC = 10
@@ -230,6 +230,8 @@ def _confirmed_recovery(rec, now):
 def engine_heartbeat_check(api, st, services, roots, now=None):
     now = time.time() if now is None else now
     watches = st.setdefault('engine_heartbeat_v0722', {})
+    just_failed=[]
+    just_recovered=[]
     for name, unit in services.items():
         info = _show(unit)
         if info is None:  # systemd itself could not be queried: no speculation.
@@ -258,13 +260,39 @@ def engine_heartbeat_check(api, st, services, roots, now=None):
                     rec.get('bad_count', 0) >= 3):
                 age = (f'{now-stamp:.0f} с' if stamp is not None and
                        0 <= now-stamp < 1e9 else 'нет свежего файла')
-                one(api, st, f'heartbeat/down/{name}/{int(now)}',
-                    f'🚨 {name}: нет heartbeat движка ({age}), служба active')
+                just_failed.append((name,age))
                 rec['fault'] = reason
         elif _confirmed_recovery(rec, now):
+            just_recovered.append(name)
+            rec.update({'fault': None, 'good_since': None, 'good_count': 0})
+
+    # Read-only cross-bot correlation of confirmed stale heartbeats.
+    # Send once per common episode, not once per poll. Never infer OKX outage.
+    affected=tuple(sorted(name for name in services
+                          if isinstance(watches.get(name),dict)
+                          and watches[name].get('fault') == 'heartbeat stale'))
+    correlated=st.setdefault('common_engine_stall_v0727',{})
+    was_common=bool(correlated.get('active'))
+    is_common=len(affected)>=2
+    if is_common and not was_common:
+        one(api, st, 'heartbeat/common/'+str(int(now)),
+            '🚨 COMMON ENGINE STALL | '+', '.join(affected)+
+            '\nНесколько ботов без свежего heartbeat. REST / сеть / VPS — причина не установлена.')
+        correlated.update({'active':True,'members':list(affected),'since':now})
+    elif not is_common and was_common:
+        one(api, st, 'heartbeat/common/recovered/'+str(int(now)),
+            '✅ COMMON ENGINE STALL: общая задержка heartbeat больше не подтверждается')
+        correlated.update({'active':False,'members':[]})
+    if not is_common and not was_common:
+        # A genuinely isolated stall remains actionable; do not suppress it.
+        for name,age in just_failed:
+            one(api, st, f'heartbeat/down/{name}/{int(now)}',
+                f'🚨 {name}: нет heartbeat движка ({age}), служба active')
+        for name in just_recovered:
             one(api, st, f'heartbeat/recovery/{name}/{int(now)}',
                 f'✅ BACK TO NORMAL | {name}\nHeartbeat торгового движка восстановлен')
-            rec.update({'fault': None, 'good_since': None, 'good_count': 0})
+    # When a common episode is/was active, one grouped alert and one grouped
+    # recovery replace redundant per-bot notifications from the same episode.
 
 
 def observers_check(api, st, services, roots, now=None):

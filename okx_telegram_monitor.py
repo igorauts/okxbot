@@ -107,6 +107,7 @@ ALERT_EVENTS = {
     'ACCOUNT_AUTO_SOFT_STOP':'🚨 AUTO SOFT STOP',
     'AUTO_SOFT_MODE_LATCHED':'🛑 SOFT STOP confirmed',
     'RECONCILIATION_LONG_WAIT':'⚠️ Reconciliation stalled',
+    'TRADING_LOOP_LONG_PASS':'⚠️ Long trading pass',
     'BUY_POST_UNRESOLVED':'⚠️ BUY POST unresolved',
     'TP_POST_UNRESOLVED':'⚠️ TP POST unresolved',
     'KNOWN_TP_UNRESOLVED':'⚠️ Known TP unavailable',

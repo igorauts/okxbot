@@ -65,10 +65,13 @@ def sample_state(st):
     real_tp = 0
     pending_tp = 0
     virtual = 0
+    placing=0
     for c in cycles.values():
         if not isinstance(c, dict):
             continue
         typ = c.get('state')
+        if typ == 'PLACING':
+            placing += 1  # durable intent, NOT an acknowledged exchange order
         if typ in ('BUY_LIVE', 'BUY_PARTIAL'):
             px = num(c.get('buyPx'))
             if px is not None:
@@ -82,7 +85,7 @@ def sample_state(st):
                 real_tp += 1
             elif tp.get('phase') in ('PENDING','PLACING','CANCELING'):
                 pending_tp += 1
-    return dict(buy=len(buys), tp=real_tp, tp_other=pending_tp, virtual_tp=virtual,
+    return dict(buy=len(buys), placing=placing, tp=real_tp, tp_other=pending_tp, virtual_tp=virtual,
                 top_buy=str(max(buys)) if buys else None,
                 bottom_buy=str(min(buys)) if buys else None)
 
@@ -150,6 +153,18 @@ class Observer:
         self.out.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.tail = Tail(events_file(root))
         self.counters = Counter()
+        # UTC daily counters survive service restarts; observer is read-only
+        # with respect to trading state and never touches an exchange API.
+        self.daily_path = self.out / 'daily_counters.json'
+        self.day_utc = datetime.now(timezone.utc).date().isoformat()
+        saved = read_json(self.daily_path)
+        if (saved and saved.get('schema') == 1
+                and saved.get('date_utc') == self.day_utc
+                and saved.get('mode') == mode):
+            counts = saved.get('events', {})
+            if isinstance(counts,dict):
+                self.counters.update({k:int(v) for k,v in counts.items()
+                                      if isinstance(k,str) and type(v) is int and v>=0})
         self.bid = None
         self.bid_at = 0.
         self.last_state = None
@@ -163,6 +178,9 @@ class Observer:
         self.below_total_sec = 0.
         self.below_max_sec = 0.
         self.recent_fills = deque(maxlen=100)
+        self.fill_history = deque(maxlen=8192)
+        self.buy_fill_observed = {}  # exact buy ordId, never price matching
+        self.fill_to_tp_local_ms = deque(maxlen=2000)
         self.burst = None
         self.canceled = defaultdict(deque)
         self.same_price_250ms = 0
@@ -202,7 +220,7 @@ class Observer:
             self.counters['ATTACHED_TP_LEGACY_UNVERIFIED'] += 1
         else:
             self.counters[kind] += 1
-        if kind in EVENTS:
+        if kind in EVENTS and self.mode == 'execution':
             # No complete payloads, credentials, or headers in diagnostic timeline.
             safe = {k:e[k] for k in ('price','cancelled','bid','ordId','cycleId','tpId','count','age_ms')
                     if k in e and isinstance(e[k], (int,float,str)) and len(str(e[k])) < 90}
@@ -212,8 +230,21 @@ class Observer:
                 self.dropped_timeline += 1
         if kind in ('BUY_FILLED','BUY_FILLED_DURING_CANCEL'):
             self.recent_fills.append(t)
+            oid=str(e.get('ordId') or '')
+            if oid and self.mode=='execution':
+                self.buy_fill_observed[oid]=t
+                if len(self.buy_fill_observed)>3000:
+                    self.buy_fill_observed.pop(next(iter(self.buy_fill_observed)))
             if self.mode == 'burst':
                 self.observe_burst(t)
+        if kind == 'TP_LINKED' and self.mode=='execution':
+            # Correlate only exact buy ordId. This measures local event-order lag,
+            # NOT OKX execution/network delay; TP may predate BUY_FILLED event.
+            oid=str(e.get('buyOrdId') or '')
+            first=self.buy_fill_observed.pop(oid,None) if oid else None
+            if first is not None and t>=first:
+                self.fill_to_tp_local_ms.append(round((t-first)*1000,1))
+
         if kind == 'BUY_CANCEL_CONFIRMED':
             px = str(e.get('price') or '')
             if px:
@@ -240,10 +271,17 @@ class Observer:
                 self.burst['last_fill'] = t
 
     def observe_burst(self, t):
+        self.fill_history.append(t)
+        while self.fill_history and t-self.fill_history[0]>3600:
+            self.fill_history.popleft()
         while self.recent_fills and t - self.recent_fills[0] > 10:
             self.recent_fills.popleft()
-        # For five-slot experiments, 3 fills in <=10s qualify as a burst.
-        threshold = min(3, self.target_buy)
+        # Adaptive to each bot's observed recent fill rate. For TARGET=1,
+        # one ordinary fill must never be declared a market burst.
+        span=max(60., min(3600.,t-self.fill_history[0]))
+        rate=max(0.,len(self.fill_history)-1)/span
+        threshold=max(3,min(50,int(rate*10*3+0.999999)))
+
         if self.burst is None and len(self.recent_fills) >= threshold:
             self.burst = {'start':self.recent_fills[0], 'last_fill':t,
                           'counts':Counter({'BUY_FILLED':len(self.recent_fills)-1}), 'min_buy':None, 'max_tp':0,
@@ -310,13 +348,18 @@ class Observer:
         except ValueError:
             return
         self.last_state = s
+        try:
+            state_mtime=state_file(self.root).stat().st_mtime
+        except OSError:
+            state_mtime=None
         fresh_bid = self.bid if time.monotonic() - self.bid_at < 15 else None
         gap = None
         if fresh_bid is not None and s['top_buy'] is not None:
             gap = float((fresh_bid - Decimal(s['top_buy'])) / self.grid_step)
         s.update(ts=now_iso(), bid=str(fresh_bid) if fresh_bid is not None else None,
                  bid_above_top_steps=round(gap,3) if gap is not None else None)
-        append(self.out / 'snapshots.jsonl', s)
+        if self.mode == 'execution':
+            append(self.out / 'snapshots.jsonl', s)
         self.counters['samples'] += 1
         # Delayed persistent state is informative, not proof that the live bot
         # spent seconds with missing BUY. Compare to fresh engine journal only.
@@ -331,7 +374,19 @@ class Observer:
                     'seq':self.paired_seq, 'ts':s['ts'],
                     'state_buy':s['buy'], 'engine_buy':s['engine_buy'],
                     'engine_observed_ts':s['engine_observed_ts']})
-            if s['buy'] != self.engine_sample['buy']:
+            # Compare only observations at the same (or later) persisted
+            # generation. Engine BUY includes PLACING, and state PLACING is
+            # an uncertain intent rather than a confirmed exchange LIMIT.
+            engine_ts=parse_ts(self.engine_sample['ts'])
+            comparable=(engine_ts is not None and state_mtime is not None
+                        and state_mtime+0.02>=engine_ts)
+            if not comparable:
+                self.counters['state_generation_stale'] += 1
+                self.mismatch_since=None;self.mismatch_polls=0
+            elif s['placing']:
+                self.counters['placing_intents_observed'] += 1
+                self.mismatch_since=None;self.mismatch_polls=0
+            elif s['buy'] != self.engine_sample['buy']:
                 self.state_engine_disagreements += 1
                 now = time.monotonic()
                 if self.mismatch_since is None:
@@ -386,6 +441,10 @@ class Observer:
         self.burst = None
 
     def summary(self):
+        day=datetime.now(timezone.utc).date().isoformat()
+        if day!=self.day_utc:
+            self.counters.clear()
+            self.day_utc=day
         rec = {'ts':now_iso(),'version':OBSERVER_VERSION,'mode':self.mode,
                'service':self.service, 'instrument':self.root.name,
                'target_buy':self.target_buy,'target_tp':self.target_tp,
@@ -396,6 +455,9 @@ class Observer:
                'engine_latest':self.engine_sample,
                'engine_count_source':'engine_journal',
                'state_engine_disagreements':self.state_engine_disagreements,
+               'state_buy_placing_uncertain':(self.last_state or {}).get('placing'),
+               'fill_to_tp_local_ms_last_2000':list(self.fill_to_tp_local_ms),
+               'fill_to_tp_source':'local event detection; exact buy ordId; does not measure exchange matching',
                 'state_engine_confirmed':self.mismatch_confirmed,
                 'state_engine_transient':self.mismatch_transient,
                 'state_engine_longest_sec':round(self.mismatch_longest_sec,1),
@@ -410,6 +472,12 @@ class Observer:
         tmp = self.out/'.summary.tmp'
         tmp.write_text(json.dumps(rec,ensure_ascii=False,indent=2),encoding='utf-8')
         os.replace(tmp,p)
+        # Persist only per-UTC-day counters (never trading state).
+        daily={'schema':1,'date_utc':day,'mode':self.mode,
+               'events':dict(self.counters),'updated':rec['ts']}
+        dest=self.out/'.daily_counters.tmp'
+        dest.write_text(json.dumps(daily,separators=(',',':')),encoding='utf-8')
+        os.replace(dest,self.daily_path)
 
     def flush_timeline(self):
         if not self.timeline_buffer:

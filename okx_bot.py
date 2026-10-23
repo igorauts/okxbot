@@ -1476,7 +1476,8 @@ def tp_record_update(st, c, rec, order):
     changed=False
     if rec.get('ordId')!=order['ordId']:
         rec['ordId']=order['ordId'];changed=True
-        log('TP_LINKED',price=c['buyPx'],tpOrdId=order['ordId'],clOrdId=rec['clOrdId'])
+        log('TP_LINKED',price=c['buyPx'],tpOrdId=order['ordId'],clOrdId=rec['clOrdId'],
+            buyOrdId=c.get('ordId',''))
     if filled!=D(rec.get('filled')):
         rec['filled']=str(filled);changed=True
     state=order.get('state')
@@ -2673,6 +2674,7 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
     last_heartbeat=0.0
     last_fee_check=0.0
     last_archive_compact=0.0
+    last_protected_signature=None
     sync_since=None
     sync_warn_level=0
     maker_cost=None
@@ -2946,6 +2948,11 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                 if place(st,price):placed+=1
                 else:break
                 time.sleep(0.05)  # BUY pacing; keep order rate limit
+            if placed:
+                # v0.7.27: persist positively ACKed BUY_LIVE facts after the
+                # placement batch. Pre-POST PLACING remains durably persisted
+                # by place(); unknown POST outcomes still fail closed.
+                save(st)
             if candidates:
                 latency_ms('buy_batch',buy_batch_start,
                            attempted=len(candidates),placed=placed,
@@ -3010,9 +3017,17 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                         bid=str(fresh_bid),age_ms=int(
                             1000*(time.monotonic()-live_loop._shift_at)))
                 elif max_remove and protected:
-                    log('BUY_CANCEL_PROTECTED',
-                        levels=[c['buyPx'] for c in protected[:5]],
-                        bid=str(fresh_bid),reason='Near BID; retained inside 30 BUY limit')
+                    # v0.7.27: emit only when the protected identity set changes.
+                    # This does not modify which BUYs are safe to cancel.
+                    protected_signature=tuple(sorted(str(c.get('ordId') or c.get('clOrdId') or c['buyPx'])
+                                                      for c in protected))
+                    if protected_signature!=last_protected_signature:
+                        log('BUY_CANCEL_PROTECTED',
+                            levels=[c['buyPx'] for c in protected[:5]],
+                            bid=str(fresh_bid),reason='Near BID; retained inside 30 BUY limit')
+                        last_protected_signature=protected_signature
+                else:
+                    last_protected_signature=None
             # surplus TP cleanup is opportunistic and one-at-a-time,
             # after a pass with no new BUY/BUY-cancel request. This preserves
             # the existing rule: every TP cancellation must reconcile fully
@@ -3056,6 +3071,11 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             latency_ms('loop_pass',loop_start_ns,
                 placed=placed,active_buys=len(active_buy(st)),
                 target_buys=TARGET,dropped=LATENCY.dropped)
+            # Diagnostic only; no trading deadline or network retry changes.
+            completed_pass_sec=(time.perf_counter_ns()-loop_start_ns)/1_000_000_000
+            if completed_pass_sec>=30:
+                log('TRADING_LOOP_LONG_PASS',seconds=round(completed_pass_sec,2),
+                    mode=mode)
             # Keep the safety loop at ~1s maximum idle delay. During REST work,
             # processing can still be slower; never promise a fixed 1s reaction.
             delay=max(0.0, INTERVAL-(time.monotonic()-started))

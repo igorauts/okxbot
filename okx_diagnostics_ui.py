@@ -8,6 +8,8 @@ from collections import Counter
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from okx_latency_ui import _records, _percentile
+from okx_latency_rollup import distribution, fresh_rows
+from okx_pnl_diagnostics import inspect as pnl_inspect
 
 
 def _time(record):
@@ -37,17 +39,35 @@ def fifo_report(root, *, now=None):
             ('positions_gate_fifo_wait','FIFO wait (факт)'),
             ('positions_gate','Positions gate'),
             ('http','HTTP общие')]
+    rollups=[]
+    try:
+        for line in (root/'logs/latency_24h_rollups.jsonl').read_text().splitlines():
+            try:rollups.append(json.loads(line))
+            except ValueError:continue
+        rollups=fresh_rows(rollups,now.timestamp())
+    except OSError:pass
     lines=[f'FIFO DIAGNOSTICS — {root.name}',
-           'Последние 60 минут; локальная телеметрия, хвост до 32 MiB',
+           'Последние 60 минут; raw до 32 MiB, быстрые lock/quota из минутных гистограмм',
            'Quota delay — рекомендованный backoff, НЕ фактическое ожидание.',
            '', 'Фаза                      N       P50          P95          MAX']
     for phase,label in phases:
         values=[v for r in recs if r.get('phase')==phase if (v:=_ms(r)) is not None]
-        lines.append(f'{label:<26} {len(values):<6} {_percentile(values,50):<12} '
-                     f'{_percentile(values,95):<12} {_percentile(values,100)}')
+        if phase in ('positions_gate_lock_wait','positions_gate_quota_wait') and rollups:
+            d=distribution(rollups,phase,now.timestamp(),window_seconds=3600)
+            fmt=lambda ms: f'{ms:.2f} ms<=' if ms is not None else 'н/д'
+            lines.append(f'{label:<26} {d["n"]:<6} {fmt(d["p50_upper_ms"]):<12} '
+                         f'{fmt(d["p95_upper_ms"]):<12} '
+                         f'{d["max_ms"]:.2f} ms (hist)')
+        else:
+            lines.append(f'{label:<26} {len(values):<6} {_percentile(values,50):<12} '
+                         f'{_percentile(values,95):<12} {_percentile(values,100)}')
     errors=[r for r in recs if r.get('phase')=='positions_gate_error']
     recovered=[r for r in recs if r.get('phase')=='positions_gate_recovery']
     reasons=Counter(str(r.get('reason') or 'неизвестно') for r in errors)
+    lines.extend(['','FIFO 24 часа (гистограмма; оценки округлены вверх):'])
+    for phase,label in phases:
+        d=distribution(rollups,phase,now.timestamp())
+        lines.append(f'{label}: N={d["n"]} P95<={d["p95_upper_ms"]}ms MAX={d["max_ms"]:.2f}ms')
     lines.extend(['',f'GateUnavailable: {len(errors)} подтверждённых диагностикой',
                   f'Recovery storage: {len(recovered)} событий',
                   'Причины: '+(', '.join(f'{k}={v}' for k,v in sorted(reasons.items())) if reasons else 'нет событий'),
@@ -88,4 +108,13 @@ def execution_report(root, *, now=None):
            'HOLD duration: н/д (нет однозначных границ для всей истории)',
            'Это события, не число уникальных биржевых исполнений или циклов.',
            'Диагностика не взаимодействует с биржей и не изменяет state.']
+    try:
+        p=pnl_inspect(root)
+        lines.extend(['', 'PNL LEDGER vs STATS (read-only):',
+                      'Ledger: '+str(p.get('ledger_grid_profit','н/д')),
+                      'Report: '+str(p.get('report_grid_profit','н/д')),
+                      'Delta: '+str(p.get('delta','н/д')),
+                      'Предупреждение: асинхронные снимки могут временно отличаться'])
+    except (OSError,ValueError,KeyError,ArithmeticError) as exc:
+        lines.append('PnL diagnostic: unavailable ('+type(exc).__name__+')')
     return '\n'.join(lines)
