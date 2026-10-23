@@ -8,7 +8,7 @@ from collections import Counter
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from okx_latency_ui import _records, _percentile
-from okx_latency_rollup import distribution, fresh_rows
+from okx_latency_rollup import distribution, fresh_rows, read_rollups
 from okx_pnl_diagnostics import inspect as pnl_inspect
 
 
@@ -39,13 +39,7 @@ def fifo_report(root, *, now=None):
             ('positions_gate_fifo_wait','FIFO wait (факт)'),
             ('positions_gate','Positions gate'),
             ('http','HTTP общие')]
-    rollups=[]
-    try:
-        for line in (root/'logs/latency_24h_rollups.jsonl').read_text().splitlines():
-            try:rollups.append(json.loads(line))
-            except ValueError:continue
-        rollups=fresh_rows(rollups,now.timestamp())
-    except OSError:pass
+    rollups=read_rollups(root/'logs/latency_24h_rollups.jsonl',now.timestamp())
     lines=[f'FIFO DIAGNOSTICS — {root.name}',
            'Последние 60 минут; raw до 32 MiB, быстрые lock/quota из минутных гистограмм',
            'Quota delay — рекомендованный backoff, НЕ фактическое ожидание.',

@@ -14,17 +14,17 @@ from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from okx_version import ENGINE_VERSION,RELEASE_VERSION,STATE_SCHEMA
-from okx_latency_rollup import MinuteWriter,add_row,distribution,fresh_rows
+from okx_latency_rollup import MinuteWriter,add_row,distribution,fresh_rows,read_rollups
 from okx_execution_observer import sample_state,Observer
 from okx_pnl_diagnostics import inspect
 import okx_telegram_health as health
 
-assert (ENGINE_VERSION,RELEASE_VERSION,STATE_SCHEMA)==('0.7.27','0.7.27',1)
-# The upgrader MUST recognize LIVE v0.7.26, not only the new candidate.
+assert (ENGINE_VERSION,RELEASE_VERSION,STATE_SCHEMA)==('0.7.28','0.7.28',1)
+# The upgrader MUST recognize LIVE v0.7.27, not only the new candidate.
 import okx_live_upgrade as upgrader
-assert upgrader.OLD_VERSION == '0.7.26' and upgrader.NEW_VERSION == '0.7.27'
+assert upgrader.OLD_VERSION == '0.7.27' and upgrader.NEW_VERSION == '0.7.28'
 assert upgrader.OLD_VERSION != upgrader.NEW_VERSION
-assert upgrader.OLD_ENGINE_SHA256 == '13751a351640627035298f77bd436e16a8f81a86711af05f2c42f9d33d82b926'
+assert upgrader.OLD_ENGINE_SHA256 == 'e0d66fc153a2a20d2b9c5df6e79915b73deb1cbd694eae1d153f305284b02717'
 assert health.HEARTBEAT_STALE_SEC==45 and health.HEARTBEAT_CONFIRM_SEC==15
 print('PASS 0727 version+confirmed stale heartbeat timing')
 
@@ -57,7 +57,7 @@ with tempfile.TemporaryDirectory() as td:
     writer.minute=minute
     for _ in range(20):writer.observe(rec)
     writer.flush()
-    loaded=[json.loads(x) for x in file.read_text().splitlines()]
+    loaded=read_rollups(file,now)
     d=distribution(loaded,'http',now,route='/api/v5/account/positions')
     assert d['n']==20 and d['p95_upper_ms']==50 and d['max_ms']==22
     assert distribution(loaded,'http',now,route='/api/v5/trade/order')['n']==0

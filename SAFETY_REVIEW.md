@@ -1,3 +1,32 @@
+# OKX Grid Bot — v0.7.28 Safety Review (release)
+
+**Baseline:** immutable published v0.7.27 final ZIP SHA256 `7c3eeb52385902ea47a621f7835ee2f1a4d2fec281919bfbc1eca791ae632a60`, engine SHA256 `e0d66fc153a2a20d2b9c5df6e79915b73deb1cbd694eae1d153f305284b02717`.
+**Status (2026-10-23):** full offline regressions passed. Four LIVE bots (`near0721`, `btc0721`, `dood0721-2`, `zec0724`) separately passed verified preflight, backup, GET-only audit, upgraded engine v0.7.28 and fresh heartbeat. Four trading services, eight execution/burst observers and Telegram monitor confirmed `active`; provided post-upgrade error check was empty. Each bot created a fresh append-only UTC-hour latency segment with minute records. These point-in-time checks do not certify a full 24-hour retention cycle or destructive LIVE stall scenarios. GitHub publication leaves LIVE untouched.
+**Scope:** two diagnostic fixes and log-field clarity; `ENGINE_VERSION=0.7.28`, `RELEASE_VERSION=0.7.28`, state schema 1; no change to order choices, FIFO quotas, network GET timeout/retries, position ownership, TP targets, or emergency trading operations.
+
+## Grouped heartbeat invariants
+
+- Each confirmed fault stays in the persisted individual watch even when grouped. A common episode remains active while any previously confirmed member is unresolved. Joining/leaving members are announced, and a member that remains stale after two recover is explicitly named in `PARTIAL RECOVERY` / `COMMON STALL UPDATE`; a completed group recovery requires no unresolved members.
+- A missing service record, failed systemd status query, process restart, or inactive unit cannot serve as proof of heartbeat recovery. A fresh active-process heartbeat, independently debounced for the recovery threshold, is needed. Systemd STOP/START alerts remain separate.
+- Telegram durable queue may still duplicate under ambiguous network acknowledgment, but incident identifiers are stable for one episode and progress updates have separate keys.
+
+## Append-only latency storage
+
+- All filesystem work occurs in the existing isolated latency writer worker. Each completed minute is written once, by append to an hour segment. No historic-file `fsync` per minute, no 5MB rewrite. An interrupted final JSONL line is truncated before the next append, and malformed records are skipped by read-only diagnostics. Dropped samples can still occur if worker queue is full or service is interrupted.
+- The old `latency_24h_rollups.jsonl` remains read-only until fully expired. Consumers use both sources during migration, while the queried time horizon is bounded to 24h; UTC-hour segment retention may use approximately one additional hour physically. No seven-day storage or claims of exact histogram percentiles.
+- Disk-write and journal failures are diagnostic errors only; they never become trade-order retries or overrides of safety gates.
+
+## Clear TP diagnostic fields
+
+- Structured events include `buyPx`, `tpPx`, and `cycleId` alongside historical ambiguous `price`. Existing observers/old parsers can continue using `price`; new audits can distinguish BUY level and TP SELL level without assuming the event's price semantics. Financial calculations and the meaning of `price` are unchanged.
+- Existing safety AST guard for 25 critical trading symbols stays pinned. New tests cover group membership transitions, durable restart state, torn latency record, bounded retention, and metadata existence. No destructive LIVE PANIC testing is claimed.
+
+## Explicitly postponed
+
+REST GET timeouts/retries, position polling architecture (/positions FIFO vs WS), BUY protection step count, ZEC real TP target experiment, shared NET ownership and unresolved PANIC MARKET protection remain outside the v0.7.28 patch. They require separate safety validation.
+
+---
+
 # OKX Grid Bot — v0.7.27 Safety Review (release)
 
 **Baseline:** immutable public v0.7.26 release ZIP SHA256 `9a6cffb7bf0028632368966cab39c36e474d664e60831006a0008628654aed08`; pinned engine `13751a351640627035298f77bd436e16a8f81a86711af05f2c42f9d33d82b926`.
@@ -14,7 +43,7 @@
 - Both burst/execution observer services remain independently supervised; only redundant detailed journal outputs removed. Daily counters are local diagnostic counters, not exchange fill ledgers.
 - `okx_live_upgrade.py` hard-pins exact public v0.7.26 engine, requires operator-approved STOP, per-bot backups, GET-only audit and fresh heartbeat. LIVE deployment was separately authorized and verified on 2026-10-23; future deployments still require explicit operator consent before any technical STOP.
 
-## Deferred to v0.7.28
+## Historical v0.7.27 deferrals (remain unresolved)
 
 Changes to HTTP GET timeout/retry budget, position synchronization through private WebSocket / shared reader, BUY protection step count, and ZEC real TP target experiment remain explicitly out of scope. Previous v0.7.26 emergency risks (unknown NET ownership, uncertain/rejected PANIC MARKET, HARD→PANIC, Virtual TP MARKET floor) remain open; do not infer these are fixed.
 

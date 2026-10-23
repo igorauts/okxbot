@@ -13,3 +13,4 @@ python3 -B tests/test_v0725.py
 python3 -B tests/test_v0726.py
 
 python3 -B tests/test_v0727.py
+python3 -B tests/test_v0728.py

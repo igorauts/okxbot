@@ -3,7 +3,7 @@ import json
 import math
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from okx_latency_rollup import distribution, fresh_rows
+from okx_latency_rollup import distribution, fresh_rows, read_rollups
 
 
 def _percentile(xs,p):
@@ -74,16 +74,7 @@ def report(root):
         else:lines.append('Dropped: н/д (старый движок, нет sidecar)')
     except (OSError,ValueError):lines.append('Dropped: н/д (ошибка sidecar)')
     # Accurate 24h rollup counts with bounded histogram approximations.
-    rollup=root/'logs/latency_24h_rollups.jsonl'
-    try:
-        with rollup.open(encoding='utf-8') as source:
-            history=[]
-            for line in source:
-                try:history.append(json.loads(line))
-                except ValueError:continue
-        history=fresh_rows(history,now.timestamp())
-    except OSError:
-        history=[]
+    history=read_rollups(root/'logs/latency_24h_rollups.jsonl',now.timestamp())
     lines.extend(['', '24 часа (минутные агрегаты; P50/P95/P99 округлены вверх до границы корзины)',
                   'Фаза                 N        P50<=      P95<=      P99<=      MAX'])
     for phase in ('loop_pass','position_reconcile','http','rest_gate','positions_gate',

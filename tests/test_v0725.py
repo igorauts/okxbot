@@ -10,7 +10,7 @@ from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from okx_version import RELEASE_VERSION,ENGINE_VERSION
-assert (RELEASE_VERSION,ENGINE_VERSION)==('0.7.27','0.7.27')
+assert (RELEASE_VERSION,ENGINE_VERSION)==('0.7.28','0.7.28')
 import okx_panic_all as panic
 import okx_telegram_delivery as delivery
 import okx_telegram_events as events
@@ -200,11 +200,11 @@ print('PASS PANIC ALL dispatch: independent durable intents sent; skipped bot st
 
 # In-repo updater must not depend on hardcoded live bot names, refuse stop by default.
 # Regression for LIVE RC1 blocker: the v0.7.25 engine's SHA256 must
-# come from the PUBLISHED v0.7.26 release asset, not the candidate v0.7.27.
-# Independently computed from okx_grid_v0726_final.zip/okx_bot.py.
+# come from the PUBLISHED v0.7.27 release asset, not the candidate v0.7.28.
+# Independently computed from okx_grid_v0727_final.zip/okx_bot.py.
 import hashlib
 import okx_live_upgrade as upgrader
-assert upgrader.OLD_ENGINE_SHA256 == '13751a351640627035298f77bd436e16a8f81a86711af05f2c42f9d33d82b926'
+assert upgrader.OLD_ENGINE_SHA256 == 'e0d66fc153a2a20d2b9c5df6e79915b73deb1cbd694eae1d153f305284b02717'
 assert upgrader.OLD_ENGINE_SHA256 != hashlib.sha256((ROOT/'okx_bot.py').read_bytes()).hexdigest()
 assert 'instance_check(bot,cfg[' in (ROOT/'okx_live_upgrade.py').read_text()
 print('PASS updater: pinned original v0.7.26 published engine hash; preflight verifies actual code before any stop')

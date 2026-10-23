@@ -1302,7 +1302,8 @@ def initial_state():
 def journal_tp(event, cycle, **extra):
     item={'time':datetime.now(timezone.utc).isoformat(),
           'event':event,'cycleId':cycle.get('cycleId'),
-          'buyOrdId':cycle.get('ordId'),'buyPx':cycle.get('buyPx'), **extra}
+          'buyOrdId':cycle.get('ordId'),'buyPx':cycle.get('buyPx'),
+          'tpPx':cycle.get('tpPx'), **extra}
     fd=os.open(TP_JOURNAL,os.O_WRONLY|os.O_CREAT|os.O_APPEND,0o600)
     with os.fdopen(fd,'a') as f:
         f.write(json.dumps(item,ensure_ascii=False,sort_keys=True)+'\n')
@@ -1385,6 +1386,7 @@ def register_cancel_attached(st,pending):
                 # Exact clOrdId proves this live SELL belongs to that cycle.
                 c['state']='TP_WAIT'
                 log('MIGRATED_PARTIAL_ATTACHED_TP',price=c['buyPx'],
+                    buyPx=c['buyPx'],tpPx=c['tpPx'],cycleId=c['cycleId'],
                     ordId=o.get('ordId',''))
             tp_records(c).append({'clOrdId':cid,'ordId':o.get('ordId',''),
                 'sz':str(D(o['sz'])),'filled':'0','phase':'PENDING',
@@ -1397,6 +1399,7 @@ def register_cancel_attached(st,pending):
             is_confirmed_partial=(D('0') < observed_buy < D(c['sz']))
             log('PARTIAL_ATTACHED_TP_DISCOVERED' if is_confirmed_partial
                 else 'ATTACHED_TP_DISCOVERED',price=c['buyPx'],
+                buyPx=c['buyPx'],tpPx=c['tpPx'],cycleId=c['cycleId'],
                 ordId=o.get('ordId'),sz=o['sz'],
                 execution_class=('confirmed_partial' if is_confirmed_partial
                                  else 'unconfirmed_at_discovery'))
@@ -1476,8 +1479,9 @@ def tp_record_update(st, c, rec, order):
     changed=False
     if rec.get('ordId')!=order['ordId']:
         rec['ordId']=order['ordId'];changed=True
-        log('TP_LINKED',price=c['buyPx'],tpOrdId=order['ordId'],clOrdId=rec['clOrdId'],
-            buyOrdId=c.get('ordId',''))
+        log('TP_LINKED',price=c['buyPx'],buyPx=c['buyPx'],
+            tpPx=c['tpPx'],cycleId=c['cycleId'],
+            tpOrdId=order['ordId'],clOrdId=rec['clOrdId'],buyOrdId=c.get('ordId',''))
     if filled!=D(rec.get('filled')):
         rec['filled']=str(filled);changed=True
     state=order.get('state')
@@ -1846,6 +1850,7 @@ def track(st,pending):
                     and time.time()-rec.get('lastWaitNotice',0)>60):
                     rec['lastWaitNotice']=time.time();save(st)
                     log('PARTIAL_ATTACHED_TP_DELAYED',price=key,
+                        buyPx=c['buyPx'],tpPx=c['tpPx'],cycleId=c['cycleId'],
                         message='No MARKET until attached TP is positively resolved')
                 all_resolved=False
                 continue
@@ -1867,7 +1872,9 @@ def track(st,pending):
                         qty=str(bought),lastSell=tp_records(c)[-1].get('ordId',''))
                 else:
                     c['state']='CLOSED';st['completed']+=1;save(st)
-                    log('TP_FILLED',price=key,tpId=tp_records(c)[-1].get('ordId',''))
+                    log('TP_FILLED',price=key,buyPx=c['buyPx'],
+                        tpPx=c['tpPx'],cycleId=c['cycleId'],
+                        tpId=tp_records(c)[-1].get('ordId',''))
         elif active:
             if any(r['phase'] in ('PENDING','PLACING','CANCELING') for r in active):
                 all_resolved=False
@@ -1876,7 +1883,8 @@ def track(st,pending):
         else:
             if c['state']!='VIRTUAL_TP':
                 c['state']='VIRTUAL_TP';save(st)
-                log('TP_VIRTUAL',price=key,qty=str(bought-filled),cycleId=c['cycleId'])
+                log('TP_VIRTUAL',price=key,buyPx=c['buyPx'],
+                    tpPx=c['tpPx'],cycleId=c['cycleId'],qty=str(bought-filled))
     return all_resolved
 
 def real_tp_active(st):
@@ -2143,7 +2151,8 @@ def maintain_virtual_tp(st,pending,position,bid=None,tp_buffer=None):
                   if tp_buffer and tp_buffer.quiet_since is not None else None)
         result=cancel_tp(st,c,rec)
         tp_buffer.canceled(time.monotonic())
-        log('TP_BUFFER_CLEANUP',price=c['tpPx'],bid=str(bid),
+        log('TP_BUFFER_CLEANUP',price=c['tpPx'],
+            buyPx=c['buyPx'],tpPx=c['tpPx'],cycleId=c['cycleId'],bid=str(bid),
             active_before=real,buffer_before=real-REAL_TP_TARGET,
             above_max=real>=REAL_TP_MAX,interval_ms=int(1000*TP_BUFFER_CANCEL_INTERVAL),
             quiet_ms=quiet_ms,cancel_gap_ms=gap_ms,
