@@ -320,3 +320,33 @@ def observers_check(api, st, services, roots, now=None):
                 one(api, st, f'observer/normal/{token}/{int(now)}',
                     f'✅ BACK TO NORMAL | {name}\nObserver {kind} работает, данные свежие')
                 rec.update({'fault': None, 'good_since': None, 'good_count': 0})
+
+
+def panic_ack_check(api, st, services, roots):
+    """One critical alert per uninterrupted PANIC manual-review episode.
+
+    Engine can rewrite the same ACK with fresh timestamps every loop;
+    updated_at/remaining_position must NOT become a new alert identity.
+    """
+    notified=st.setdefault('panic_ack_alarms_v0725',{})
+    for name in services:
+        if name not in roots:continue
+        path=Path(roots[name])/'state/control_ack.json'
+        try:ack=json.loads(path.read_text(encoding='utf-8'))
+        except (OSError,ValueError):continue  # No fake healthy indication.
+        if not isinstance(ack,dict):continue
+        phase=str(ack.get('phase') or '')
+        if ack.get('mode')!='PANIC' or phase not in (
+                'PANIC_MANUAL_REVIEW','PANIC_RETRY_EXHAUSTED'):
+            notified.pop(name,None)  # New event can create a NEW episode.
+            continue
+        previous=notified.get(name)
+        if isinstance(previous,dict) and previous.get('phase')==phase:
+            continue
+        stamp=str(ack.get('updated_at') or 'unknown')[:64]
+        remaining=str(ack.get('remaining_position') or 'н/д')[:60]
+        one(api,st,f'panic/ack/{name}/{phase}/{stamp}',
+            f'🚨 PANIC {phase} | {name}\n'
+            f'Остаток позиции: {remaining}\n'
+            'Автоматическое закрытие НЕ подтверждено. Нужен ручной разбор.')
+        notified[name]={'phase':phase,'stamp':stamp}

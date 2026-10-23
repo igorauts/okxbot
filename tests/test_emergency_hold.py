@@ -95,6 +95,29 @@ for field,val in [('side','sell'),('sz','6'),('px','101'),('clOrdId','wrong'),('
     else:raise AssertionError('Unsafe BUY accepted: '+field)
     assert canceled==[]
 
+# P0 v0.7.25: one manually modified own BUY must NOT freeze seven
+# other independently verified BUYs. Unknown BUY stays untouched and
+# the full PANIC/HARD flow remains unresolved; no blind MARKET SELL.
+reset();st=newst();orders=[]
+for i in range(8):
+    orders.append(buy(st,oid=f'owned-{i}',cid=f'cid-{i}'))
+orders[3]['px']='101'   # manual exchange edit of this order
+api.pending_orders=orders
+ns['control_mode']=lambda:'PANIC'
+try:ns['emergency_precancel_own_buys'](st,'PANIC')
+except Unresolved as exc:
+    assert 'identity conflict' in str(exc)
+else:raise AssertionError('Unresolved edited BUY allowed PANIC continuation')
+assert len(canceled)==5 and 'owned-3' not in canceled
+assert st['cycles']['owned-3']['state']=='BUY_LIVE'
+assert any(name=='EMERGENCY_BUY_IDENTITY_CONFLICT' for name,fields in loglines)
+# Next safe batch should cancel remaining verified BUYs without duplicating
+# already durable CANCELING intents.
+try:ns['emergency_precancel_own_buys'](st,'PANIC')
+except Unresolved:pass
+else:raise AssertionError('Conflict unexpectedly resolved')
+assert len(canceled)==7 and len(set(canceled))==7
+
 # Unresolved PLACING must NOT be canceled blindly.
 reset();st=newst();owned=buy(st,state='PLACING');api.pending_orders=[owned]
 assert ns['emergency_precancel_own_buys'](st,'PANIC') is False and not canceled

@@ -49,6 +49,51 @@ def load_registry():
     return raw
 
 
+def display_registry():
+    """Tolerate single broken records for READ-ONLY pages only.
+
+    NEVER use for a control command, SOFT account-reset, bot creation, or
+    registry writes. Corrupt records stay on disk and are not silently erased.
+    """
+    try:
+        raw=load_registry()
+    except (OSError,ValueError,RuntimeError) as exc:
+        return {},['Registry unavailable: '+type(exc).__name__]
+    good={};warnings=[]
+    for name,entry in raw.items():
+        if not isinstance(name,str) or not isinstance(entry,dict):
+            warnings.append(str(name)[:40]+': malformed registry record');continue
+        try:
+            unit=unit_name(entry)
+            root=bot_path(entry)
+            if (entry.get('service')!='okx-grid-'+root.name or
+                    not (SYSTEMD_DIR/unit).is_file()):
+                raise ValueError('registry unit/path mismatch')
+            good[name]=entry
+        except (OSError,ValueError,KeyError,TypeError,RuntimeError) as exc:
+            warnings.append(name[:40]+': '+type(exc).__name__)
+    return good,warnings
+
+
+def display_instances():
+    """Read-only best effort with explicit warning; not authoritative for PANIC."""
+    from types import SimpleNamespace
+    entries,warnings=display_registry()
+    bots=[]
+    for name,entry in entries.items():
+        try:
+            root=bot_path(entry)
+            cfg=json.loads((root/'config.json').read_text(encoding='utf-8'))
+            if not isinstance(cfg,dict) or not re.fullmatch(
+                    r'[A-Z0-9]+-USDT-SWAP',str(cfg.get('instrument',''))):
+                raise ValueError('invalid instrument')
+            bots.append(SimpleNamespace(display_name=name,root=root,
+                instrument=cfg['instrument'],
+                systemd_state='active' if service_running(unit_name(entry)) else 'inactive'))
+        except (OSError,ValueError,RuntimeError) as exc:
+            warnings.append(name[:40]+': '+type(exc).__name__)
+    return bots,warnings
+
 def save_registry(items):
     REGISTRY.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     fd, tmp = tempfile.mkstemp(prefix='.okxbot-', dir=REGISTRY.parent)
@@ -591,7 +636,7 @@ def _account_env_file():
         return account
     # The VPS is deliberately bound to ONE OKX account; fallback credentials
     # are from a currently managed instance only, never arbitrary user input.
-    bots=[b for b in _current_account_bots() if b.systemd_state=='active']
+    bots=[b for b in display_instances()[0] if b.systemd_state=='active']
     if not bots:
         raise RuntimeError('Нет ключа для безопасного GET аккаунта')
     env=bots[0].root/'.env'
@@ -602,8 +647,13 @@ def _account_env_file():
 
 def _account_overview_data():
     from okx_account_ui import get_account_snapshot
-    bots=_current_account_bots()
-    return get_account_snapshot(_account_env_file()),bots,_account_soft_latch_data()
+    bots,warnings=display_instances()
+    env=_account_env_file()  # GET-only; never derives trading authority.
+    snapshot=get_account_snapshot(env)
+    if warnings:
+        snapshot['registry_warnings']=warnings
+        snapshot['registry_partial']=True
+    return snapshot,bots,_account_soft_latch_data()
 
 
 def _account_overview_lines():
@@ -616,81 +666,79 @@ def cmd_account_status():
 
 
 def _panic_all_preflight():
-    """No writes. Require known, non-terminal, independently owned live bots."""
-    bots=_current_account_bots()
-    active=[b for b in bots if b.systemd_state=='active']
-    if any(b.systemd_state in ('activating','deactivating','reloading') for b in bots):
-        raise RuntimeError('Службы переходят между состояниями — PANIC ALL отклонён')
-    if not active:
-        raise RuntimeError('Нет активных торговых ботов для PANIC ALL')
-    registry=load_registry()
-    result=[]
-    seen_pairs=set()
-    for bot in active:
-        entry=registry.get(bot.display_name)
-        if entry is None or bot.instrument in seen_pairs:
-            raise RuntimeError('Дублирующая или неизвестная пара; PANIC ALL заблокирован')
-        seen_pairs.add(bot.instrument)
-        if (not control_supported(entry) or instance_terminal(entry)
-                or not service_running(bot.service)):
-            raise RuntimeError('Бот не готов к PANIC: '+bot.display_name)
-        mode=read_control(entry).get('mode')
-        if mode in ('PANIC','HARD'):
-            raise RuntimeError('Бот уже выполняет аварийную остановку: '+bot.display_name)
-        conflict=scan_other_live_same_instrument(bot.root,bot.instrument)
-        if conflict:
-            raise RuntimeError('Чужой бот на той же NET-паре: '+str(conflict))
-        # Stable id across confirmation and no PID change during the request.
-        pid=subprocess.run(['systemctl','show',bot.service,'-p','MainPID','--value'],
-                            capture_output=True,text=True,timeout=10,check=True).stdout.strip()
-        if not pid.isdecimal() or int(pid)<=0:
-            raise RuntimeError('PID недостоверен: '+bot.display_name)
-        result.append((bot.display_name,bot.instrument,bot.service,int(pid),mode))
-    return tuple(sorted(result))
+    """Read-only individual verification. Incomplete independent bots are skipped.
+
+    Unknown active instruments, duplicate NET pairs or broken service identities
+    still fail globally; they cannot be proven independent of a target bot.
+    """
+    from okx_panic_all import survey
+    plan,skipped,identity=survey(BASE,REGISTRY,SYSTEMD_DIR,control_supported)
+    _panic_all_preflight.last_skipped=skipped
+    _panic_all_preflight.last_identity=identity
+    return plan
 
 
 def cmd_panic_all():
-    """Single typed confirmation; independent durable PANIC per managed bot.
+    """One confirmation. Each eligible bot gets its OWN durable PANIC request.
 
-    Not atomic across bots: partial submission is reported loudly; no rollback.
-    Never sends OKX orders, never treats a submitted command as PANIC_DONE.
+    Partial completion is explicit. A rejected/unknown bot is NEVER assumed
+    flat, nor does it cancel a safe command for an independent instrument.
     """
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         raise RuntimeError('PANIC ALL разрешён только в интерактивном терминале')
     plan=_panic_all_preflight()
+    skipped=getattr(_panic_all_preflight,'last_skipped',())
+    identity=getattr(_panic_all_preflight,'last_identity',())
     print('\n🚨 PANIC ALL — НЕОБРАТИМОЕ ЗАКРЫТИЕ УПРАВЛЯЕМЫХ БОТОВ')
     for name,instrument,service,pid,mode in plan:
         print(f'  {name}: {instrument} (PID {pid}, {mode})')
-    print('Снимаются принадлежащие ботам ордера; остатки позиций закрываются MARKET reduceOnly.')
+    for unit,reason in skipped:
+        print(f'  ⚠️ SKIP {unit}: {reason}')
+    print('Каждый подтверждённый бот получает независимый PANIC. SKIP не закрыт.')
     print('Это запросы к двигателям, НЕ подтверждение фактической ликвидации.')
     if input('Для подтверждения введи PANIC ALL: ').strip()!='PANIC ALL':
         print('Отменено. Команды не отправлены.')
         return
-    # Recheck every service AND its PID before issuing even the FIRST command.
-    if _panic_all_preflight()!=plan:
+    if (_panic_all_preflight()!=plan or
+            getattr(_panic_all_preflight,'last_skipped',())!=skipped or
+            getattr(_panic_all_preflight,'last_identity',())!=identity):
         raise RuntimeError('Состав ботов/PID/режим изменился; ни одной команды не отправлено')
-    sent=[]
+    sent=[];failed=[]
+    from okx_panic_all import survey
     expected_names={row[0] for row in plan}
     for name,instrument,service,pid,mode in plan:
-        _,entry=find_entry(name)
         try:
-            unexpected={b.display_name for b in _current_account_bots()
-                        if b.systemd_state=='active'}-expected_names
-            if unexpected:
-                raise RuntimeError('Появился новый активный бот: '+str(sorted(unexpected)))
+            # Verify the live universe again, but account for previously
+            # submitted PANIC intents now being in a different control mode.
+            _,_,current_identity=survey(BASE,REGISTRY,SYSTEMD_DIR,
+                                          control_supported)
+            if current_identity!=identity:
+                raise RuntimeError('Состав/PID служб изменился во время отправки')
+            _,entry=find_entry(name)
             if not service_running(service):
                 raise RuntimeError('Служба уже остановлена')
-            current_pid=subprocess.run(['systemctl','show',service,'-p','MainPID','--value'],
-                  capture_output=True,text=True,timeout=10,check=True).stdout.strip()
+            current_pid=subprocess.run(['systemctl','show',service,
+                '-p','MainPID','--value'],capture_output=True,text=True,
+                timeout=10,check=True).stdout.strip()
             if current_pid!=str(pid) or read_control(entry).get('mode')!=mode:
                 raise RuntimeError('Состояние бота изменилось после preflight')
             write_control(entry,'PANIC')
             sent.append(name)
-            print(f'✓ {name}: запрос PANIC сохранён')
+            print(f'✓ {name}: durable PANIC запрос сохранён')
         except Exception as exc:
-            print('⛔ PANIC ALL НЕПОЛНЫЙ! Уже отправлены: '+', '.join(sent),file=sys.stderr)
-            raise RuntimeError(f'{name}: PANIC не отправлен: {exc}') from exc
-    print('Отправлено команд: '+str(len(sent))+'. Дождись PANIC_DONE по каждому боту.')
+            failed.append((name,str(exc)))
+            print(f'⛔ {name}: PANIC не отправлен: {exc}',file=sys.stderr)
+            # If universe changed, no OTHER target can be trusted; fail closed.
+            if 'Состав/PID служб изменился' in str(exc):break
+    print(f'ИТОГ PANIC ALL: отправлено {len(sent)}/{len(plan)}, '
+          f'пропущено {len(skipped)}, ошибок {len(failed)}.')
+    if skipped or failed:
+        print('⛔ PANIC ALL ЧАСТИЧНЫЙ: пропущенные/ошибочные боты НЕ подтверждены закрытыми.',
+              file=sys.stderr)
+    print('Ожидай независимо подтверждённого PANIC_DONE каждого адресата.')
+    if skipped or failed:
+        raise RuntimeError('PANIC ALL частично выполнен, не все боты охвачены: '+
+                           str((skipped,failed))[:500])
 
 
 def _account_detail_menu(scr, initial):
@@ -1091,20 +1139,21 @@ def cmd_stats(name):
 
 
 def cmd_list():
-    entries=load_registry()
+    entries,warnings=display_registry()
+    for issue in warnings:print('⚠️ Реестр: '+issue)
     if not entries:
         print('Ботов пока нет. Создать: okxbot new')
         return
     for name,entry in entries.items():
-        if instance_terminal(entry):
-            finalize_registry_if_needed(name,entry)
-            entry=find_entry(name)[1]
-        running=service_running(unit_name(entry))
-        status=('ЗАВЕРШЁН' if instance_terminal(entry) else (
-            (control_desired(entry) if running and control_supported(entry) else 'РАБОТАЕТ')
-            if running else 'ОСТАНОВЛЕН'))
-        print(f'{name:<26} {describe(entry):<17} {status} '
-              f'[{entry["service"]}]')
+        try:
+            running=service_running(unit_name(entry))
+            status=('ЗАВЕРШЁН' if instance_terminal(entry) else (
+                (control_desired(entry) if running and control_supported(entry) else 'РАБОТАЕТ')
+                if running else 'ОСТАНОВЛЕН'))
+            print(f'{name:<26} {describe(entry):<17} {status} '
+                  f'[{entry["service"]}]')
+        except (OSError,RuntimeError,ValueError,KeyError,TypeError) as exc:
+            print(f'⚠️ {name}: запись недоступна ({type(exc).__name__})')
 
 
 def cmd_status(name):
@@ -1477,10 +1526,20 @@ def _menu_timestamp(name,entry,archive=False):
     return final.stat().st_mtime if final.exists() else 0
 
 
+def _display_timestamp(name,entry,archive=False):
+    try:return _menu_timestamp(name,entry,archive)
+    except (OSError,ValueError,RuntimeError,TypeError,KeyError):return 0
+
+
+def _display_description(entry):
+    try:return describe(entry)
+    except (OSError,ValueError,RuntimeError,TypeError,KeyError):return 'Н/Д'
+
+
 def interactive_archive_menu(entries):
     while True:
-        names=sorted(entries,key=lambda n:_menu_timestamp(n,entries[n],True),reverse=True)
-        titles=[f'{name} — {describe(entries[name])}' for name in names]+['Назад']
+        names=sorted(entries,key=lambda n:_display_timestamp(n,entries[n],True),reverse=True)
+        titles=[f'{name} — {_display_description(entries[name])}' for name in names]+['Назад']
         selected=curses.wrapper(lambda s:wizard.menu(s,'OKX GRID BOT — Архив',titles))
         if selected is None or selected==len(names): return
         name=names[selected]
@@ -1496,10 +1555,16 @@ def interactive_archive_menu(entries):
 
 def interactive_main(env_file):
     while True:
-        entries=load_registry()
-        live={name:entry for name,entry in entries.items() if not instance_terminal(entry)}
-        archive={name:entry for name,entry in entries.items() if instance_terminal(entry)}
-        names=sorted(live,key=lambda n:_menu_timestamp(n,live[n]),reverse=True)
+        entries,warnings=display_registry()
+        live={};archive={}
+        for name,entry in entries.items():
+            try:
+                (archive if instance_terminal(entry) else live)[name]=entry
+            except (OSError,ValueError,RuntimeError) as exc:
+                warnings.append(name+': '+type(exc).__name__)
+        if warnings:
+            print('⚠️ Реестр (только чтение): '+', '.join(warnings[:5]),file=sys.stderr)
+        names=sorted(live,key=lambda n:_display_timestamp(n,live[n]),reverse=True)
         def _live_label(name):
             entry=live[name]
             if not service_running(unit_name(entry)):
@@ -1508,7 +1573,7 @@ def interactive_main(env_file):
             if mode in ('PAUSE','SOFT') or account_soft_active():
                 return '🟡 '+mode
             return '🟢 RUN'
-        titles=[f'{_live_label(n)} {n} — {describe(live[n])}' for n in names]
+        titles=[f'{_live_label(n)} {n} — {_display_description(live[n])}' for n in names]
         titles.extend(['➕ Создать бота','📦 Архив',
                        '📱 Telegram-монитор: '+telegram_monitor_label(),
                        '⚙️   Управление аккаунтом','Выход'])

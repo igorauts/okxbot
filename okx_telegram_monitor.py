@@ -27,7 +27,7 @@ from okx_telegram_views import status_one, latency_report, read_json, LINE
 from okx_telegram_events import (one, event_alert, market_event, market_process, zero_buy_scan, observer_fault_scan, gate_alert_scan)
 from okx_telegram_followups import partial_scan, panic_scan
 from okx_telegram_delivery import persist as durable_save, drain as alert_drain
-from okx_telegram_health import service_check, engine_heartbeat_check, observers_check
+from okx_telegram_health import service_check, engine_heartbeat_check, observers_check, panic_ack_check
 
 BASE = Path(os.environ.get('OKXBOT_BASE_DIR','/root/okx')).resolve()
 REGISTRY = Path(os.environ.get('OKXBOT_REGISTRY',str(BASE/'.okxbot_registry.json')))
@@ -155,6 +155,10 @@ def read_env(path):
     return token,chat
 
 
+class TelegramPermanentError(RuntimeError):
+    telegram_permanent=True
+
+
 class Telegram:
     def __init__(self,token,chat):
         self.base='https://api.telegram.org/bot'+token+'/'
@@ -162,8 +166,16 @@ class Telegram:
     def call(self,method,params):
         payload=json.dumps(params).encode()
         req=Request(self.base+method,data=payload,headers={'Content-Type':'application/json'})
-        with urlopen(req,timeout=18) as response:
-            result=json.loads(response.read().decode())
+        from urllib.error import HTTPError
+        try:
+            with urlopen(req,timeout=18) as response:
+                result=json.loads(response.read().decode())
+        except HTTPError as exc:
+            # Permanent, independently established HTTP errors only.
+            # 403 may mean bot blocked; 400 indicates a malformed message.
+            if exc.code in (400,403):
+                raise TelegramPermanentError(f'Telegram permanent HTTP {exc.code}') from exc
+            raise
         if not result.get('ok'):
             raise RuntimeError('Telegram '+method+' returned not-ok')
         return result.get('result')
@@ -423,6 +435,7 @@ def safety_check(api,st):
     st['shared_soft']=is_soft
     engine_heartbeat_check(api,st,SERVICES,BOT_DIRS,now)
     observers_check(api,st,SERVICES,BOT_DIRS,now)
+    panic_ack_check(api,st,SERVICES,BOT_DIRS)
 
 
 def daily_check(api,st,now=None):

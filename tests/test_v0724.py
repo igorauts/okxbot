@@ -1,4 +1,4 @@
-"""v0.7.24 offline P0 and display regressions; no exchange, no live files."""
+"""v0.7.25 offline P0 and display regressions; no exchange, no live files."""
 import ast
 import json
 import sys
@@ -18,37 +18,37 @@ from okx_stats_ui import format_stats
 from okx_positions_fifo import AccountPositionsFIFO
 
 D=lambda n:Decimal(str(n if n is not None and n!='' else '0'))
-assert (RELEASE_VERSION,ENGINE_VERSION,STATE_SCHEMA)==('0.7.24','0.7.24',1)
-assert okxbot.latest_engine()==('okx_bot.py','0.7.24')
-assert validate_version_ids('0.7.24.1','0.7.24')
-for invalid in [('0.7.24.1','0.7.24.1'),('0.7.25','0.7.24'),('0.7.24','0.7.23')]:
+assert (RELEASE_VERSION,ENGINE_VERSION,STATE_SCHEMA)==('0.7.25','0.7.25',1)
+assert okxbot.latest_engine()==('okx_bot.py','0.7.25')
+assert validate_version_ids('0.7.25.1','0.7.25')
+for invalid in [('0.7.25.1','0.7.25.1'),('0.7.25.1','0.7.25.1'),('0.7.25','0.7.24')]:
     try:validate_version_ids(*invalid)
     except RuntimeError:pass
     else:raise AssertionError('Version mismatch allowed: '+str(invalid))
 # Maintenance tag simulation, with a REAL provisional instance package.
 with tempfile.TemporaryDirectory() as d:
-    folder=Path(d);(folder/'config.json').write_text('{"version":"0.7.24.1","instrument":"BTC-USDT-SWAP"}')
-    with patch.object(okxbot,'RELEASE_VERSION','0.7.24.1'):
+    folder=Path(d);(folder/'config.json').write_text('{"version":"0.7.25.1","instrument":"BTC-USDT-SWAP"}')
+    with patch.object(okxbot,'RELEASE_VERSION','0.7.25.1'):
         engine,version=okxbot.provision_latest_engine(folder)
-        assert engine=='okx_bot.py' and version=='0.7.24'
-        assert json.loads((folder/'config.json').read_text())['version']=='0.7.24'
+        assert engine=='okx_bot.py' and version=='0.7.25'
+        assert json.loads((folder/'config.json').read_text())['version']=='0.7.25'
         assert (folder/'okx_version.py').is_file()
         from okx_state import empty
         created=empty(version,'BTC-USDT-SWAP')
-        assert created['version']=='0.7.24'
+        assert created['version']=='0.7.25'
     forged=folder/'wrong_source';forged.mkdir()
     shutil.copy2(ROOT/'okx_bot.py',forged/'okx_bot.py')
-    bad=json.loads((ROOT/'engine_manifest.json').read_text());bad['current_version']='0.7.24.1'
+    bad=json.loads((ROOT/'engine_manifest.json').read_text());bad['current_version']='0.7.25.1'
     (forged/'engine_manifest.json').write_text(json.dumps(bad))
     try:okxbot.latest_engine(forged)
     except RuntimeError:pass
     else:raise AssertionError('Bad release/engine mismatch not rejected')
     # Reject missing engine dependency, not just mismatched versions.
-    bad['current_version']='0.7.24';(forged/'engine_manifest.json').write_text(json.dumps(bad))
-    try:okxbot.latest_dependencies('okx_bot.py','0.7.24',forged)
+    bad['current_version']='0.7.25';(forged/'engine_manifest.json').write_text(json.dumps(bad))
+    try:okxbot.latest_dependencies('okx_bot.py','0.7.25',forged)
     except RuntimeError:pass
     else:raise AssertionError('Missing engine dependency allowed')
-print('PASS P0: new bot engine v0.7.24 despite release v0.7.24.1, malformed sources fail closed')
+print('PASS P0: new bot engine v0.7.25 despite release v0.7.25.1, malformed sources fail closed')
 
 # Extract a pure stats function without importing the LIVE engine module.
 tree=ast.parse((ROOT/'okx_bot.py').read_text())

@@ -26,6 +26,8 @@ EVENT_ALARMS = {
     'BUY_PAUSED_UNPLACEABLE_TP', 'BOT_TERMINAL_STATS_PENDING',
     'EMERGENCY_POSITIONS_GATE_BLOCKED', 'EMERGENCY_POSITIONS_READ',
     'COVERAGE_RECOVERY_WAIT',
+    'PANIC_MARKET_REJECTED','PANIC_RETRY_EXHAUSTED',
+    'EMERGENCY_POSITION_UNRESOLVED','EMERGENCY_BUY_IDENTITY_CONFLICT',
 }
 OBSERVER_ALARMS = {'TP_HARD_CAP_REACHED','TP_BUFFER_OVERFLOW','STATE_READ_FAILED',
                    'PERSISTED_STATE_DIFFERS_FROM_ENGINE','RECONCILIATION_LONG_WAIT'}
@@ -152,7 +154,7 @@ def event_alert(api, st, name, obj):
     counters[base] = episode
     episodes[base] = {'episode': episode, 'last': now}
     extras = []
-    for k in ('code', 'ordId', 'reason', 'message'):
+    for k in ('code', 'ordId', 'reason', 'message', 'remaining', 'remaining_position'):
         val = obj.get(k)
         if val is not None:
             extras.append(f'{k}: {str(val)[:120]}')
