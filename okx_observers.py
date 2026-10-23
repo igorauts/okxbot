@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """One observer pair per active bot; never starts trading services."""
 from __future__ import annotations
-from okx_version import ENGINE_VERSION
+from okx_version import ENGINE_VERSION, STATE_SCHEMA
 import json
 import os
 from pathlib import Path
@@ -39,9 +39,22 @@ def validate_root(root,service,base=Path('/root/okx')):
 def supports_versionless(root, service, base=Path('/root/okx')):
     resolved,cfg=validate_root(root,service,base)
     ver=cfg['version']
-    # Same schema, known unchanged observer ABI: permit v0.7.21 LIVE bots
-    # to retain observer management when shared Telegram/UI moves to 0.7.22.
-    if ver not in (ENGINE_VERSION, '0.7.23', '0.7.21'):
+    # Observer interface ABI v1 was introduced with the clean v0.7.19
+    # engine. Restrict the compatible range AND verify the persisted state
+    # schema and matching engine identity: never infer compatibility from a
+    # future version or a version string alone.
+    match=re.fullmatch(r'(\d+)\.(\d+)\.(\d+)',ver)
+    latest=tuple(map(int,ENGINE_VERSION.split('.')))
+    if not match or not ((0,7,19)<=tuple(map(int,match.groups()))<=latest):
+        return False
+    state_file=resolved/'state/bot_state.json'
+    try:
+        if state_file.is_symlink():return False
+        st=json.loads(state_file.read_text(encoding='utf-8'))
+        if (not isinstance(st,dict) or st.get('schema_version')!=STATE_SCHEMA
+                or st.get('version')!=ver or st.get('instrument')!=cfg.get('instrument')):
+            return False
+    except (OSError,ValueError):
         return False
     engine=resolved/'okx_bot.py'
     return engine.is_file() and not engine.is_symlink()

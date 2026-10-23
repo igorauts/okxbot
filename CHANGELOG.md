@@ -1,3 +1,12 @@
+## v0.7.25 — Emergency Reliability audit hardening (2026-10-22)
+
+- P0: Independently verified owned BUY cancels proceed despite an unrelated manually edited/mismatched BUY; the conflict remains unresolved and prevents an unsafe NET MARKET SELL. Existing durable cancel, batch cap, unknown-POST and position-gate protections retained.
+- P0: Partial PANIC ALL for independent verified NET instruments: unknown or duplicate active NET identity still global fail-closed, other identifiable but unready instances explicitly SKIP, each ready instance gets its own durable intent. Strict confirmation and PID snapshots, partial outcomes return error.
+- P0: PANIC reject/exhausted/unresolved events and persisted PANIC_MANUAL_REVIEW ACK alarms, without recurring ACK spam; Telegram queue bounded, definite permanent HTTP failures dead-lettered without blocking new alerts.
+- P1: Exact `0.7.23.1` PANIC cleanup anomaly accepted with stringent terminal-state proof. Observer compatibility uses schema+version range rather than a manual whitelist.
+- P1: Included one-at-a-time fail-closed in-repository LIVE updater; malformed registry records isolated on read-only list/menu/account pages, safety-sensitive actions retain strong checks; scripts preserve executable modes, updated SAFETY_REVIEW.
+- Offline deterministic tests expanded for failure modes, negative cases and independent return values. On 2026-10-22, the controlled rollout passed GET-only audits and fresh-engine-heartbeat checks for `near0721`, `btc0721`, `dood0721-2` and `zec0724`; all four trading services and Telegram monitor were reported active at the completion of rollout. Live destructive PANIC fault-injection was not attempted. GitHub publication does not alter LIVE processes.
+
 ## v0.7.24 — Statistics & Performance (2026-10-22)
 
 - P0: package `RELEASE_VERSION` separated from three-component `ENGINE_VERSION`, including manager, wizard, observer and state generation. Maintenance simulation `0.7.24.1` creates engine `0.7.24`. State schema stays 1. Existing LIVE config/state not migrated.

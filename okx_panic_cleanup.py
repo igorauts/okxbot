@@ -33,7 +33,8 @@ def confirmed_panic(root):
         return False
     if not (isinstance(cfg.get('version'), str) and
             cfg.get('version')==st.get('version') and
-            re.fullmatch(r'\d+\.\d+\.\d+', cfg['version']) and
+            (re.fullmatch(r'\d+\.\d+\.\d+', cfg['version']) or
+             cfg['version']=='0.7.23.1') and
             tuple(map(int, cfg['version'].split('.'))) >= (0,7,14) and
             cfg.get('instrument')==st.get('instrument') and
             control.get('mode')=='PANIC' and

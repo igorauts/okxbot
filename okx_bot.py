@@ -1174,29 +1174,43 @@ def emergency_precancel_own_buys(st, mode):
             raise ExchangeUnresolved('Emergency pending snapshot has duplicate/missing order IDs')
         by_id[oid]=o
     matches=[]
+    conflicts=[]
     for c in eligible:
         o=by_id.get(str(c['ordId']))
         if o is None:
             continue  # filled/canceled race; full reconciliation must resolve
-        if (o.get('instId')!=INST or o.get('side')!='buy'
-            or o.get('clOrdId')!=c.get('clOrdId')
-            or o.get('state') not in ('live','partially_filled')
-            or D(o.get('sz'))!=D(c['sz'])
-            or D(o.get('px'))!=D(c['buyPx'])):
-            raise ExchangeUnresolved('Emergency BUY identity/price/quantity mismatch')
+        try:
+            identity_ok=(o.get('instId')==INST and o.get('side')=='buy'
+                and o.get('clOrdId')==c.get('clOrdId')
+                and o.get('state') in ('live','partially_filled')
+                and D(o.get('sz'))==D(c['sz'])
+                and D(o.get('px'))==D(c['buyPx']))
+        except (ValueError,TypeError,ArithmeticError):
+            identity_ok=False
+        if not identity_ok:
+            conflicts.append(str(c['ordId']))
+            continue  # NEVER cancel an unverified or manually edited order.
         matches.append(c)
-    if not matches:
-        return False
     if control_mode()!=mode:
         raise ExchangeTemporary('Emergency command changed during BUY snapshot')
+    cancelled=0
     for c in matches[:5]:
         if control_mode()!=mode:
             raise ExchangeTemporary('Emergency command changed during BUY cancellation batch')
         cancel_lowest_specific(st,c)  # durable CANCELING before any cancel POST
-    control_ack(mode,'CANCEL_BUYS')
-    log('EMERGENCY_EARLY_BUY_CANCEL',mode=mode,count=min(len(matches),5),
-        message='Fresh exact-ID BUY snapshot; no position gate bypass for SELL')
-    return True
+        cancelled+=1
+    if cancelled:
+        control_ack(mode,'CANCEL_BUYS')
+        log('EMERGENCY_EARLY_BUY_CANCEL',mode=mode,count=cancelled,
+            message='Independently confirmed exact-ID BUYs only; SELL gate unchanged')
+    if conflicts:
+        # Cancel independently PROVEN own BUYs, then keep emergency unresolved.
+        # Do NOT allow PANIC MARKET to proceed on an unresolved NET position.
+        log('EMERGENCY_BUY_IDENTITY_CONFLICT',severity='CRITICAL',
+            mode=mode,count=len(conflicts),ordIds=conflicts[:8])
+        raise ExchangeUnresolved('Emergency BUY identity conflict; verified BUYs canceled, '
+                                 'unknown BUYs untouched; position requires reconciliation')
+    return bool(cancelled)
 
 
 def cancel_buys_for_soft_stop(st, resolved, pending=None):

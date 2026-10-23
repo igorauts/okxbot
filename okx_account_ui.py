@@ -193,7 +193,12 @@ def format_account(snapshot, bots, latch=None, now=None):
     lines.extend(['',
         'CROSS: маржа общая для аккаунта.',
         '',
-        kv('LIVE-ботов:',str(sum(b.systemd_state=='active' for b in bots))),
+        kv('LIVE-ботов:',('н/д (реестр неполон)' if snapshot.get('registry_partial')
+                           else str(sum(b.systemd_state=='active' for b in bots)))),
         'SOFT-блокировка: '+(str(latch.get('code') or latch.get('reason'))
            if latch else 'отсутствует')])
+    if snapshot.get('registry_warnings'):
+        lines.append('⚠️ Реестр повреждён: часть бот-данных неизвестна; '
+                     'не используйте счётчик ботов для аварийных решений.')
+        lines.extend('  '+str(x)[:120] for x in snapshot['registry_warnings'][:4])
     return lines

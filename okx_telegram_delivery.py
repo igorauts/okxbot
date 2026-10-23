@@ -11,6 +11,27 @@ from pathlib import Path
 
 STATE_PATH = Path('/var/lib/okxbot/telegram_monitor_state.json')
 MAX_PENDING = 5000
+MAX_DEAD_LETTERS = 256
+MAX_SENT_KEYS = 20000
+SENT_KEY_TTL = 90 * 86400
+
+
+def prune_sent(st, now):
+    """Bound persistent dedupe keys without releasing keys still queued."""
+    seen=st.setdefault('incident_sent',{})
+    if len(seen)<=MAX_SENT_KEYS:return
+    pending={item.get('key') for item in st.get('alert_outbox_v0722',[])}
+    old=sorted(((float(v),k) for k,v in seen.items()
+                if k not in pending and isinstance(v,(float,int))),
+               key=lambda pair:pair[0])
+    for ts,k in old:
+        if len(seen)<=MAX_SENT_KEYS or ts>now-SENT_KEY_TTL:break
+        seen.pop(k,None)
+    # If volume still exceeds the bound, expire oldest delivered keys.
+    for _,k in old:
+        if len(seen)<=MAX_SENT_KEYS:break
+        seen.pop(k,None)
+
 
 
 def persist(st, path=None):
@@ -42,6 +63,7 @@ def enqueue(st, key, message, html_mode=False, path=None):
     if len(queue) >= MAX_PENDING:
         raise RuntimeError('Telegram alert outbox full; do not drop critical alerts')
     now = time.time()
+    prune_sent(st, now)
     queue.append({'key': key, 'text': message[:3900], 'html': bool(html_mode),
                   'created': now, 'tries': 0, 'retry_at': now})
     seen[key] = now
@@ -61,10 +83,23 @@ def drain(api, st, path=None, limit=30, now=None):
     for _ in range(min(limit, len(queue))):
         msg = queue[0]
         if now < float(msg.get('retry_at', 0)):
-            break  # Preserve ordering and don't send later alerts ahead of faults.
+            break  # Temporary API/network failures remain retryable in order.
         try:
             api.send(msg['text'], parse_mode='HTML' if msg.get('html') else None)
-        except Exception:
+        except Exception as exc:
+            # Only a structurally confirmed permanent error may be bypassed.
+            # 429 and all network/5xx errors must remain retryable.
+            if getattr(exc,'telegram_permanent',False):
+                dead=st.setdefault('alert_dead_letters_v0725',[])
+                dead.append({'key':msg.get('key'),'error':type(exc).__name__,
+                             'at':now,'tries':int(msg.get('tries',0))+1})
+                if len(dead)>MAX_DEAD_LETTERS:
+                    del dead[:-MAX_DEAD_LETTERS]
+                st['alert_dead_letter_total_v0725']=int(
+                    st.get('alert_dead_letter_total_v0725',0))+1
+                queue.pop(0)
+                persist(st,path)
+                continue  # Release the next independent CRITICAL message.
             msg['tries'] = min(16, int(msg.get('tries', 0)) + 1)
             msg['retry_at'] = now + min(300, 5 * 2 ** (msg['tries'] - 1))
             persist(st, path)

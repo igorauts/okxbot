@@ -146,8 +146,10 @@ assert len(subset)==len(names)
 import types
 from unittest.mock import Mock
 nsp={'sys':SimpleNamespace(stdin=SimpleNamespace(isatty=lambda:True),
-                            stdout=SimpleNamespace(isatty=lambda:True)),
+                            stdout=SimpleNamespace(isatty=lambda:True),stderr=SimpleNamespace(write=lambda x:None)),
      'print':lambda *a,**kw:None,
+     'BASE':Path('/unused'), 'REGISTRY':Path('/unused'),
+     'SYSTEMD_DIR':Path('/unused'), 'control_supported':lambda e:True,
      'input':lambda p='':'PANIC ALL',
      '_panic_all_preflight':None}
 exec(compile(ast.fix_missing_locations(ast.Module(body=[n for n in subset if n.name=='cmd_panic_all'],type_ignores=[])),
@@ -163,10 +165,13 @@ nsp.update({'_panic_all_preflight':lambda:plan,
             '_current_account_bots':lambda:[],
             'subprocess':SimpleNamespace(run=lambda *a,**kw:
                          SimpleNamespace(stdout='123\n' if 'okx-grid-a.service' in a[0] else '456\n'))})
-nsp['cmd_panic_all']()
+with patch('okx_panic_all.survey',return_value=(plan,(),())):
+    nsp['cmd_panic_all']()
 assert sent==[('a','PANIC'),('b','PANIC')]
 sent.clear();nsp['input']=lambda x:''
-nsp['cmd_panic_all']();assert not sent
+with patch('okx_panic_all.survey',return_value=(plan,(),())):
+    nsp['cmd_panic_all']()
+assert not sent
 nsp['input']=lambda x:'PANIC ALL'
 nsp['_panic_all_preflight']=iter([plan,plan[:1]]).__next__
 try:nsp['cmd_panic_all']()
