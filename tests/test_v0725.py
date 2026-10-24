@@ -10,7 +10,7 @@ from unittest.mock import patch
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(ROOT))
 from okx_version import RELEASE_VERSION,ENGINE_VERSION
-assert (RELEASE_VERSION,ENGINE_VERSION)==('0.7.28','0.7.28')
+assert __import__("okx_release_contract").check()
 import okx_panic_all as panic
 import okx_telegram_delivery as delivery
 import okx_telegram_events as events
@@ -220,12 +220,29 @@ import zipfile,hashlib,stat
 import okx_live_upgrade as upgrader
 with tempfile.TemporaryDirectory() as td:
     temp=Path(td);pkg=temp/'candidate.zip';tg=temp/'telegram';tg.mkdir()
+    import shutil as _copy_for_legacy, re as _re_for_legacy
+    legacy_root=temp/'legacy_installer_fixture'
+    _copy_for_legacy.copytree(ROOT,legacy_root,ignore=_copy_for_legacy.ignore_patterns('__pycache__','*.pyc'))
+    identity_file=legacy_root/'okx_version.py'
+    identity_text=identity_file.read_text()
+    for field in ('RELEASE_VERSION','ENGINE_VERSION'):
+        expression=rf'(?m)^({field}\s*=\s*)[^\n]+'
+        identity_text,count=_re_for_legacy.subn(expression,lambda m:m.group(1)+repr(upgrader.NEW_VERSION),identity_text)
+        assert count==1, 'Legacy fixture identity unexpectedly changed'
+    identity_file.write_text(identity_text)
+    legacy_manifest=legacy_root/'engine_manifest.json'
+    legacy_data=json.loads(legacy_manifest.read_text())
+    if legacy_data['current_version']!=upgrader.NEW_VERSION:
+        legacy_data['engines'][upgrader.NEW_VERSION]=legacy_data['engines'][legacy_data['current_version']]
+        legacy_data['current_version']=upgrader.NEW_VERSION
+        legacy_manifest.write_text(json.dumps(legacy_data))
+
     backups=temp/'backups';lock=temp/'upgrade.lock'
     with zipfile.ZipFile(pkg,'w',compression=zipfile.ZIP_DEFLATED) as z:
-        for f in sorted(ROOT.rglob('*')):
+        for f in sorted(legacy_root.rglob('*')):
             # Only files allowed in the release archive. A Git checkout has
             # .git/ and may have test caches: neither belongs in the fixture.
-            rel=f.relative_to(ROOT)
+            rel=f.relative_to(legacy_root)
             if not f.is_file() or f.is_symlink():continue
             if not (len(rel.parts)==1 or
                     (len(rel.parts)==2 and rel.parts[0]=='tests')):continue
@@ -248,19 +265,19 @@ with tempfile.TemporaryDirectory() as td:
             return SimpleNamespace(stdout='')
         raise AssertionError(cmd)
     with patch.object(upgrader,'PACKAGE',pkg), \
-         patch.object(upgrader,'STAGE',ROOT), \
+         patch.object(upgrader,'STAGE',legacy_root), \
          patch.object(upgrader,'PACKAGE_SHA256',digest), \
          patch.object(upgrader,'TELEGRAM_ROOT',tg), \
          patch.object(upgrader,'BACKUPS',backups), \
          patch.object(upgrader,'run',side_effect=fake_operation):
         assert upgrader.stage_check()
         upgrader.install_telegram()
-        assert (tg/files[0]).read_bytes()==(ROOT/files[0]).read_bytes()
+        assert (tg/files[0]).read_bytes()==(legacy_root/files[0]).read_bytes()
         assert len(ops)==2 and ops[0][:2]==('systemctl','restart')
         assert all('okx-grid-' not in ' '.join(cmd) for cmd in ops)
     # No authorization to stop a trading service without explicit flag.
     argv=['okx_live_upgrade.py','bot','--bot','near0721','--package',str(pkg),
-          '--stage',str(ROOT),'--sha256',digest]
+          '--stage',str(legacy_root),'--sha256',digest]
     with patch.object(upgrader.os,'geteuid',return_value=0), \
          patch.object(upgrader,'LOCK',lock),patch.object(upgrader.sys,'argv',argv), \
          patch.object(upgrader,'upgrade_bot',side_effect=AssertionError('called')):

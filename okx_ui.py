@@ -260,7 +260,19 @@ def status(name,root,unit):
     if running and mode=='SOFT':label='SOFT STOP'
     if mode=='HARD' or mode=='PANIC':label='ЗАВЕРШАЕТ РАБОТУ' if running else 'ЗАВЕРШЁН'
     proc,host=uptimes(info)
-    started=info.get('ActiveEnterTimestamp','—') if running else '—'
+    # v0.7.29: original bot launch (like statistics), not systemd process age.
+    launch=None
+    snapshot=read_json(Path(root)/'state/stats.json')
+    if (snapshot and snapshot.get('complete') is True
+        and snapshot.get('instrument')==cfg.get('instrument')):
+        perf=snapshot.get('performance_v0724')
+        if isinstance(perf,dict) and perf.get('schema')==1:
+            ts=dec(perf.get('launch_at'))
+            if ts is not None and 0<ts<=Decimal(str(time.time())):
+                launch=float(ts)
+    started=(datetime.fromtimestamp(launch,timezone.utc).strftime('%d.%m.%Y %H:%M:%S UTC')
+             if launch is not None else '—')
+    bot_age=max(0,time.time()-launch) if launch is not None and running else None
     state=read_json(state_file(root))
     counters=read_local_orders(state)
     buy=int(cfg.get('active_buy_orders',25));real_tp=int(cfg.get('real_tp_target',min(25,int(cfg.get('active_tp_orders',25)))))
@@ -276,7 +288,8 @@ def status(name,root,unit):
        '\nСОСТОЯНИЕ','─'*54,
        table_row('Версия',ver),table_row('Бот',label),
        table_row('Работает с',started),
-       table_row('Аптайм бота',duration(proc)),
+       table_row('Аптайм бота',duration(bot_age)),
+       table_row('Аптайм процесса',duration(proc)),
        table_row('Аптайм VPS',duration(host)),
        '\nРЫНОК И ОРДЕРА','─'*54,
        table_row('BID',fmt_price(bid, cfg) if bid else 'нет свежих данных'),

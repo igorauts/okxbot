@@ -1,3 +1,13 @@
+## v0.7.29 — Maintenance / UI only (2026-10-24)
+- ENGINE_VERSION stays 0.7.28; trading engine, FIFO, funding, strategy and state schema unchanged.
+- Integrate already-LIVE verified observer provisioning for pristine unstarted bots.
+- /status: fail-closed account total PnL from complete, fresh per-bot accounting; two decimals and round sign icons.
+- Market SELL: compact header (base volume, number of closed grids, actual PnL indicator), execution deviation indicator and timing.
+- Manager status: original bot uptime and independent process uptime.
+- Current-version tests validate against metadata and manifest without literal release/engine pins.
+- Existing legacy okx_live_upgrade.py is for 0.7.27 → 0.7.28 only. DO NOT use for v0.7.29.
+- Package build/push does not update any running bot. Never copy okx_version.py into per-bot engine dependencies.
+
 ## v0.7.28 — Monitoring Reliability Fix (2026-10-23 — GitHub Release)
 
 - P0 Telegram: common engine heartbeat incident now retains independently confirmed failed members. A join, partial recovery or registry disappearance cannot silently clear an unresolved bot. The monitor sends composition updates (joined/recovered/still stalled) and issues `ALL RECOVERED` ONLY after every member's fresh heartbeat has independently met the recovery threshold; systemd STOP, invocation change and unavailable service metadata do not count as recovery. Persisted Telegram incident state and durable outbox identities survive monitor restart; standalone alarms still work.

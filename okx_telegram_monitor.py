@@ -314,7 +314,75 @@ def mode_and_stats(name):
     age=_age_label(_launch_epoch(root,values))
     return status_one(name,root,age)
 
-def status_report(requested=None):
+# v0.7.29: account summary is a read-only sum of verified bot snapshots.
+
+def _account_number(value):
+    # Self-contained converter: cannot depend on another monitor's imports.
+    from decimal import Decimal, InvalidOperation
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number=Decimal(str(value))
+    except (InvalidOperation, ValueError, TypeError, OverflowError):
+        return None
+    return number if number.is_finite() else None
+
+
+def _account_total_pnl(active):
+    from decimal import Decimal
+    now=time.time()
+    total=Decimal(0)
+    for _name,root in active:
+        cfg=read_json(root/'config.json')
+        stats=read_json(root/'state/stats.json')
+        perf=stats.get('performance_v0724') if isinstance(stats,dict) else None
+        if (not isinstance(cfg,dict) or not isinstance(stats,dict)
+            or stats.get('complete') is not True or
+                stats.get('instrument')!=cfg.get('instrument') or
+                not isinstance(perf,dict) or perf.get('schema')!=1):
+            return None
+        try:
+            generated=float(stats['generated_at_unix'])
+        except (TypeError,ValueError,KeyError,OverflowError):
+            return None
+        if not (0<=now-generated<=900):
+            return None
+        values={k: _account_number(perf.get(k)) for k in (
+            'total_pnl','grid_profit','limit_tp_net','market_tp_net',
+            'partial_exit_net','floating_pnl','realized_open_components')}
+        if any(v is None for v in values.values()):
+            return None
+        if (abs(values['limit_tp_net']+values['market_tp_net']-values['grid_profit'])>Decimal('0.00000001')
+            or abs(values['grid_profit']+values['partial_exit_net']+
+                   values['floating_pnl']+values['realized_open_components']-
+                   values['total_pnl'])>Decimal('0.00000001')):
+            return None
+        anchor=read_json(root/'state/stats_financial_anchor.json')
+        if not isinstance(anchor,dict):
+            return None
+        anchor_at=_account_number(anchor.get('at'))
+        anchor_total=_account_number(anchor.get('total_pnl_usdt'))
+        if (anchor.get('schema')!=1 or anchor.get('instrument')!=cfg.get('instrument')
+            or anchor_at is None or abs(anchor_at-_account_number(generated))>Decimal('0.5')
+            or anchor_total!=values['total_pnl']):
+            return None
+        total+=values['total_pnl']
+    return total
+
+
+def _account_total_line(active):
+    # An account aggregation fault must not suppress the complete /status.
+    try:
+        total=_account_total_pnl(active)
+    except Exception:
+        total=None
+    if total is None:
+        return '<b>ACCOUNT TOTAL PnL: н/д (нет полной свежей сверки)</b>'
+    label=('+' if total>0 else '−' if total<0 else '')+'$'+f'{abs(total):,.2f}'
+    marker='🟢' if total>0 else '🔴' if total<0 else '⚪'
+    return '<b>'+marker+' ACCOUNT TOTAL PnL: '+html.escape(label)+' '+marker+'</b>'
+
+def status_report(requested=None, *, include_account=False):
     refresh_bots(force=True)
     if requested:
         for name in BOT_DIRS:
@@ -322,14 +390,20 @@ def status_report(requested=None):
                 return mode_and_stats(name)
         return 'Бот '+html.escape(str(requested))+' не найден.'
     out=[]
+    active=[]
     for name in BOT_DIRS:
         if not _active_service(name): continue
         root=Path(BOT_DIRS[name])
         if (root/'state/final_stats.json').exists(): continue
+        active.append((name,root))
         try: out.append(mode_and_stats(name))
         except (OSError,ValueError,KeyError,TypeError):
             out.append('<b>'+html.escape(name)+'</b>\n⚠️ Статистика недоступна')
-    return ('\n'+LINE+'\n').join(out) if out else 'Нет активных ботов.'
+    if not out:
+        return 'Нет активных ботов.'
+    if include_account:
+        out.append(_account_total_line(active))
+    return ('\n'+LINE+'\n').join(out)
 
 def send_report(api,report):
     # HTML messages are split ONLY on bot separators; never break HTML tags.
@@ -403,7 +477,7 @@ def poll_commands(api,st):
             parts=str(data.get('text','')).strip().split()
             cmd=parts[0].split('@')[0] if parts else ''
             if cmd=='/status':
-                send_report(api,status_report(parts[1] if len(parts)>1 else None))
+                send_report(api,status_report(parts[1] if len(parts)>1 else None, include_account=True))
             elif cmd=='/help':
                 api.send('🤖 OKX Grid Bot\n/status — статистика активных ботов'
                          '\n/latency — последние 60 минут'

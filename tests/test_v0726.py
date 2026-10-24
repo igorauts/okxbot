@@ -16,7 +16,7 @@ import okx_position_peak
 from okx_stats_ui import base_quantity, format_stats
 from okx_version import ENGINE_VERSION,RELEASE_VERSION,STATE_SCHEMA
 
-assert (RELEASE_VERSION,ENGINE_VERSION,STATE_SCHEMA)==('0.7.28','0.7.28',1)
+assert __import__("okx_release_contract").check()
 
 # Fixed semantic: trading-engine snapshot must add exchange-active TP records
 # and positive-remaining virtual TP cycles, from the SAME state snapshot.

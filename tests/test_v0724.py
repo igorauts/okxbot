@@ -18,34 +18,34 @@ from okx_stats_ui import format_stats
 from okx_positions_fifo import AccountPositionsFIFO
 
 D=lambda n:Decimal(str(n if n is not None and n!='' else '0'))
-assert (RELEASE_VERSION,ENGINE_VERSION,STATE_SCHEMA)==('0.7.28','0.7.28',1)
-assert okxbot.latest_engine()==('okx_bot.py','0.7.28')
-assert validate_version_ids('0.7.28.1','0.7.28')
+assert __import__("okx_release_contract").check()
+assert okxbot.latest_engine()==('okx_bot.py',ENGINE_VERSION)
+assert validate_version_ids(ENGINE_VERSION+'.1',ENGINE_VERSION)
 for invalid in [('0.7.28.1','0.7.28.1'),('0.7.28.1','0.7.28.1'),('0.7.28','0.7.24')]:
     try:validate_version_ids(*invalid)
     except RuntimeError:pass
     else:raise AssertionError('Version mismatch allowed: '+str(invalid))
 # Maintenance tag simulation, with a REAL provisional instance package.
 with tempfile.TemporaryDirectory() as d:
-    folder=Path(d);(folder/'config.json').write_text('{"version":"0.7.28.1","instrument":"BTC-USDT-SWAP"}')
-    with patch.object(okxbot,'RELEASE_VERSION','0.7.28.1'):
+    folder=Path(d);(folder/'config.json').write_text(json.dumps({'version':ENGINE_VERSION+'.1','instrument':'BTC-USDT-SWAP'}))
+    with patch.object(okxbot,'RELEASE_VERSION',ENGINE_VERSION+'.1'):
         engine,version=okxbot.provision_latest_engine(folder)
-        assert engine=='okx_bot.py' and version=='0.7.28'
-        assert json.loads((folder/'config.json').read_text())['version']=='0.7.28'
+        assert engine=='okx_bot.py' and version==ENGINE_VERSION
+        assert json.loads((folder/'config.json').read_text())['version']==ENGINE_VERSION
         assert (folder/'okx_version.py').is_file()
         from okx_state import empty
         created=empty(version,'BTC-USDT-SWAP')
-        assert created['version']=='0.7.28'
+        assert created['version']==ENGINE_VERSION
     forged=folder/'wrong_source';forged.mkdir()
     shutil.copy2(ROOT/'okx_bot.py',forged/'okx_bot.py')
-    bad=json.loads((ROOT/'engine_manifest.json').read_text());bad['current_version']='0.7.28.1'
+    bad=json.loads((ROOT/'engine_manifest.json').read_text());bad['current_version']=ENGINE_VERSION+'.1'
     (forged/'engine_manifest.json').write_text(json.dumps(bad))
     try:okxbot.latest_engine(forged)
     except RuntimeError:pass
     else:raise AssertionError('Bad release/engine mismatch not rejected')
     # Reject missing engine dependency, not just mismatched versions.
-    bad['current_version']='0.7.28';(forged/'engine_manifest.json').write_text(json.dumps(bad))
-    try:okxbot.latest_dependencies('okx_bot.py','0.7.28',forged)
+    bad['current_version']=ENGINE_VERSION;(forged/'engine_manifest.json').write_text(json.dumps(bad))
+    try:okxbot.latest_dependencies('okx_bot.py',ENGINE_VERSION,forged)
     except RuntimeError:pass
     else:raise AssertionError('Missing engine dependency allowed')
 print('PASS P0: new bot engine v0.7.28 despite release v0.7.28.1, malformed sources fail closed')

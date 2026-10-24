@@ -15,7 +15,7 @@ from okx_version import ENGINE_VERSION, RELEASE_VERSION, STATE_SCHEMA
 import okx_live_upgrade as upgrader
 import okx_telegram_health as health
 
-assert (ENGINE_VERSION,RELEASE_VERSION,STATE_SCHEMA)==('0.7.28','0.7.28',1)
+assert __import__("okx_release_contract").check()
 assert (upgrader.OLD_VERSION,upgrader.NEW_VERSION)==('0.7.27','0.7.28')
 assert upgrader.OLD_ENGINE_SHA256=='e0d66fc153a2a20d2b9c5df6e79915b73deb1cbd694eae1d153f305284b02717'
 assert upgrader.OLD_ENGINE_SHA256 != __import__('hashlib').sha256((ROOT/'okx_bot.py').read_bytes()).hexdigest()

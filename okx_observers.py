@@ -60,6 +60,32 @@ def supports_versionless(root, service, base=Path('/root/okx')):
     return engine.is_file() and not engine.is_symlink()
 
 
+def supports_unstarted_current(root,service,source,base=Path('/root/okx')):
+    """Only a never-started CURRENT engine may provision observers without state.
+
+    Normal existing instances must continue passing supports_versionless().
+    Never create dummy trading state just to satisfy observer provisioning.
+    """
+    import hashlib
+    try:
+        resolved,cfg=validate_root(root,service,base)
+        state=resolved/'state'
+        if (cfg.get('version')!=ENGINE_VERSION or cfg.get('live_trading') is not False
+                or not state.is_dir() or state.is_symlink()
+                or any(state.iterdir())):
+            return False
+        if not re.fullmatch(r'[A-Z0-9]{2,32}-USDT-SWAP',str(cfg.get('instrument',''))):
+            return False
+        installed=resolved/'okx_bot.py'
+        expected=Path(source)/'okx_bot.py'
+        if (not installed.is_file() or installed.is_symlink()
+                or not expected.is_file() or expected.is_symlink()):
+            return False
+        return hashlib.sha256(installed.read_bytes()).digest()==hashlib.sha256(expected.read_bytes()).digest()
+    except (OSError,ValueError,TypeError):
+        return False
+
+
 def unit_text(root,service,kind,source):
     name=unit_name(service,kind)
     root=Path(root)
@@ -117,8 +143,9 @@ def provision_observers(root,service,source,systemd_dir=Path('/etc/systemd/syste
     if os.geteuid()!=0:
         raise RuntimeError('Root required to provision observer systemd units')
     root,cfg=validate_root(root,service,base)
-    if not supports_versionless(root,service,base):
-        raise RuntimeError('Observer provisioning requires the current engine')
+    if not (supports_versionless(root,service,base)
+            or supports_unstarted_current(root,service,source,base)):
+        raise RuntimeError('Observer provisioning requires current engine with matching state, or pristine unstarted current engine')
     systemd_dir=Path(systemd_dir)
     if not systemd_dir.is_dir() or systemd_dir.is_symlink():
         raise RuntimeError('Unsafe systemd directory')

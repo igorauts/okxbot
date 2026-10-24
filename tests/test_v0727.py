@@ -19,7 +19,7 @@ from okx_execution_observer import sample_state,Observer
 from okx_pnl_diagnostics import inspect
 import okx_telegram_health as health
 
-assert (ENGINE_VERSION,RELEASE_VERSION,STATE_SCHEMA)==('0.7.28','0.7.28',1)
+assert __import__("okx_release_contract").check()
 # The upgrader MUST recognize LIVE v0.7.27, not only the new candidate.
 import okx_live_upgrade as upgrader
 assert upgrader.OLD_VERSION == '0.7.27' and upgrader.NEW_VERSION == '0.7.28'

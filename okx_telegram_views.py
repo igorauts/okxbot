@@ -496,6 +496,7 @@ def signed_usd6(value):
     return money(value,6,True)
 
 
+# v0.7.29 Market SELL UI (accounting unchanged)
 def market_message(name, root, event, timing):
     v=market_ledger(root,event)
     if v is None:
@@ -504,7 +505,12 @@ def market_message(name, root, event, timing):
     def ms(key, approx=False):
         n=timing.get(key)
         return ('≈' if approx else '')+str(int(round(n)))+' мс' if isinstance(n,(int,float)) and n>=0 else 'н/д'
-    header=f'💰 Market SELL | {name} | {v["cycles"]} циклов, {format(v["qty_base"].normalize(),"f")} {unit} | {signed_usd6(v["actual"])} в копилку'
+    actual=v['actual']
+    execution=v['execution']
+    circle='🟢' if actual>0 else '🔴' if actual<0 else '⚪'
+    square='🟩' if execution>0 else '🟥' if execution<0 else '⬜'
+    header=(f'💰 Market SELL {format(v["qty_base"].normalize(),"f")} {unit} '
+            f'({v["cycles"]}), {signed_usd6(actual)} в копилку ({circle})')
     return ('<b>'+html.escape(header)+'</b>\n'
-            '<code>'+html.escape(f'План ≈{signed_usd6(v["plan"])} | Исполнение {signed_usd6(v["execution"])}')+'</code>\n'
-            '<code>'+html.escape('⚡ Fill '+ms('fill',True)+' | ACK '+ms('ack')+' | Full '+ms('full',True))+'</code>')
+            +html.escape(f'Исполнение {signed_usd6(execution)} {square}')+'\n'
+            +'<code>'+html.escape('⚡ Fill '+ms('fill',True)+' | ACK '+ms('ack')+' | Full '+ms('full',True))+'</code>')

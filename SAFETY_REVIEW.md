@@ -93,3 +93,14 @@ Changes to HTTP GET timeout/retry budget, position synchronization through priva
 ## Verification limits
 
 `run_checks.sh` includes existing contract/state/finance/Telegram regressions, v0.7.25 emergency fault injections and v0.7.26 mismatch-suppression and terminal-statistics regression. The Telegram delivery suppression is scoped only to diagnostic State/Engine BUY mismatch and associated recovery; other alarms remain unchanged. All are deterministic/mocked; they do NOT prove end-to-end live exchange behavior. Controlled one-bot-at-a-time LIVE preflight and authorized rollout completed on 2026-10-23 with four instances; intentionally destructive emergency fault-injection was only tested offline. Publication must verify immutable release assets and must not restart or alter LIVE instances.
+
+
+## v0.7.29 — Maintenance / UI only (2026-10-24)
+- ENGINE_VERSION stays 0.7.28; trading engine, FIFO, funding, strategy and state schema unchanged.
+- Integrate already-LIVE verified observer provisioning for pristine unstarted bots.
+- /status: fail-closed account total PnL from complete, fresh per-bot accounting; two decimals and round sign icons.
+- Market SELL: compact header (base volume, number of closed grids, actual PnL indicator), execution deviation indicator and timing.
+- Manager status: original bot uptime and independent process uptime.
+- Current-version tests validate against metadata and manifest without literal release/engine pins.
+- Existing legacy okx_live_upgrade.py is for 0.7.27 → 0.7.28 only. DO NOT use for v0.7.29.
+- Package build/push does not update any running bot. Never copy okx_version.py into per-bot engine dependencies.
