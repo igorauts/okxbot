@@ -155,8 +155,12 @@ def latest_engine(source=SOURCE):
     manifest=json.loads((source/'engine_manifest.json').read_text(encoding='utf-8'))
     if manifest.get('schema_version')!=STATE_SCHEMA or manifest.get('current_version')!=ver:
         raise RuntimeError('Несоответствие VER и текущей версии манифеста')
-    if manifest.get('engines',{}).get(ver,{}).get('file')!='okx_bot.py':
+    entry=manifest.get('engines',{}).get(ver,{})
+    if entry.get('file')!='okx_bot.py':
         raise RuntimeError('Манифест не указывает на okx_bot.py')
+    import hashlib
+    if hashlib.sha256(path.read_bytes()).hexdigest()!=entry.get('sha256'):
+        raise RuntimeError('SHA256 движка не соответствует манифесту')
     return 'okx_bot.py',ver
 
 
@@ -196,7 +200,7 @@ def provision_latest_engine(created,source=SOURCE):
     if not (created/'config.json').is_file():
         raise RuntimeError('Wizard did not create config.json')
     cfg=json.loads((created/'config.json').read_text())
-    if (created/'state/bot_state.json').exists() or (created/'state/bot04_state.json').exists():
+    if (created/'state').is_dir() and any((created/'state').iterdir()):
         raise RuntimeError('Never upgrade an existing trading state in wizard')
     shutil.copy2(Path(source)/name,created/name)
     for dependency in latest_dependencies(name,version,source):
@@ -465,7 +469,7 @@ def finalize_registry_if_needed(name, entry):
 
 
 
-# OKX_ACCOUNT_RESET_V0712_MANAGER_PATCH_1
+# Account-wide margin latch recovery
 # Manager-only account-wide margin latch recovery. No exchange orders here.
 ACCOUNT_SOFT_LATCH = Path('/var/lib/okxbot/account_soft_stop.json')
 
@@ -892,7 +896,7 @@ def cmd_control(name, mode):
 
 
 def cmd_stop(name):
-    # Uniform SOFT semantics for v0.6.4. Legacy engines are not supported.
+    # Uniform SOFT semantics; legacy engines are not supported.
     return cmd_control(name,'SOFT')
 
 
@@ -1099,9 +1103,9 @@ def stats_text(name):
         raise RuntimeError(f'Ошибка снимка статистики: {e}') from e
     if snapshot is not None:
         report, ts = snapshot
-        # v0.7.24 structured report; preserve the legacy screen for older engines.
+        # Structured report, otherwise preserve the read-only historical screen.
         data=json.loads((path/'state'/'stats.json').read_text(encoding='utf-8'))
-        if isinstance(data.get('performance_v0724'),dict):
+        if isinstance((data.get('performance') or data.get('performance_v0724')),dict):
             from okx_stats_ui import format_stats
             heartbeat=False
             try:
@@ -1110,7 +1114,7 @@ def stats_text(name):
                     rt=json.loads(runfile.read_text(encoding='utf-8'))
                     heartbeat=0<=time.time()-float(rt['last'])<=90
             except (OSError,ValueError,TypeError,KeyError):pass
-            content=format_stats(path,instrument,data['performance_v0724'],
+            content=format_stats(path,instrument,(data.get('performance') or data.get('performance_v0724')),
                          bot_active=service_running(unit),heartbeat_fresh=heartbeat,
                          snapshot_at=ts)
             return content

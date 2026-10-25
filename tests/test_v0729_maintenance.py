@@ -58,7 +58,7 @@ class Maintenance0729(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             base=Path(tmp)/'bots'; base.mkdir()
             src=Path(tmp)/'shared'; src.mkdir()
-            (src/'okx_bot.py').write_text('original engine bytes')
+            (src/'okx_bot.py').write_bytes((Path(__file__).resolve().parents[1]/'okx_bot.py').read_bytes())
             root=base/'fresh'; root.mkdir()
             (root/'state').mkdir()
             (root/'okx_bot.py').write_bytes((src/'okx_bot.py').read_bytes())
@@ -107,7 +107,7 @@ class Maintenance0729(unittest.TestCase):
                       'realized_open_components':'0'}
                 generated=time.time()
                 (root/'state'/'stats.json').write_text(json.dumps({'instrument':inst,'complete':True,
-                    'generated_at_unix':generated,'performance_v0724':perf}))
+                    'generated_at_unix':generated,'performance':perf}))
                 (root/'state'/'stats_financial_anchor.json').write_text(json.dumps({'schema':1,
                     'instrument':inst,'at':str(generated),'total_pnl_usdt':str(dec)}))
                 pairs.append((name,root))

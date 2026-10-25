@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OKX Grid Bot v0.7.26 24-hour OFFLINE diagnostic collector.
+"""OKX Grid Bot 24-hour OFFLINE diagnostic collector.
 Reads log files, observer sidecars and systemd journal only.
 Never reads .env, API keys, config contents (except a few benign labels), orders via OKX,
 or private fills SQLite. Never touches LIVE files or processes.
@@ -21,7 +21,6 @@ import sys
 import time
 import zipfile
 
-BOTS=('near0721','btc0721','dood0721-2','zec0724')
 BASE=Path('/root/okx')
 OUT=Path('/srv')
 MAX_JSON_LINES=6000000
@@ -115,7 +114,8 @@ def aggreg(xs):
 
 
 class Collector:
-    def __init__(self,hours,outdir):
+    def __init__(self,hours,outdir,bots):
+        self.bots=tuple(bots)
         self.end=time.time();self.start=self.end-hours*3600;self.hours=hours
         self.outdir=outdir;self.zip=None;self.errors=[];self.lines=[]
     def add(self,name,text):
@@ -129,7 +129,7 @@ class Collector:
         except (OSError,subprocess.TimeoutExpired) as e:return '',-1,type(e).__name__
     def services(self):
         names=['okx-telegram-monitor.service']
-        for bot in BOTS:
+        for bot in self.bots:
             names.append(f'okx-grid-{bot}.service')
             for kind in ('burst','execution'):
                 names.append(f'observer-okx-grid-{bot}-{kind}.service')
@@ -323,9 +323,9 @@ class Collector:
         if p.is_file() and not p.is_symlink():
             try:
                 st=json.loads(p.read_text())
-                out={'outbox_len':len(st.get('alert_outbox_v0722',[])),
-                     'dead_letter_total':st.get('alert_dead_letter_total_v0725'),
-                     'dead_letter_count':len(st.get('alert_dead_letters_v0725',[])),
+                out={'outbox_len':len(st.get('alert_outbox',[])),
+                     'dead_letter_total':st.get('alert_dead_letter_total'),
+                     'dead_letter_count':len(st.get('alert_dead_letters',[])),
                      'incident_dedupe_key_count':len(st.get('incident_sent',{})),
                      'offsets_count':len(st.get('offsets',{})),'file_age_sec':round(max(0.0,time.time()-p.stat().st_mtime),1),
                      'NOTICE':'No messages, tokens, identifiers or raw Telegram state exported'}
@@ -342,13 +342,13 @@ class Collector:
             self.zip=z
             self.json('manifest.json',{'collector':'OKX read-only diagnostic collector v1',
                 'window_hours':self.hours,'start_utc':utc(self.start),'end_utc':utc(self.end),
-                'bots':list(BOTS),'script_exec_args':'no API/REST/POST, no trading actions, no service modifications',
+                'bots':list(self.bots),'script_exec_args':'no API/REST/POST, no trading actions, no service modifications',
                 'secrets':'No env, raw configs, raw state, SQLite, Telegram text, order IDs or API credentials copied',
                 'limits':{'event_lines_per_bot':MAX_EVENT_EXPORT,'top_latency_spikes_per_bot':MAX_SLOW_EXPORT,
                           'observer_lines_per_kind_file':MAX_OBSERVER_LINES,'journal_priority_lines_per_unit':1700},
                 'note':'Actual coverage can be under 24h due to log rotation, truncation, service restart, monitoring gaps.'})
             self.services();self.telegram()
-            for bot in BOTS:
+            for bot in self.bots:
                 self.noted(f'{bot}: collecting metadata, latency, execution, observers, journals')
                 self.snapshot(bot)
                 self.reconcile_profile(bot)
@@ -375,7 +375,7 @@ class Collector:
         print('SHA256:',digest.hexdigest())
         print('BYTES:',final.stat().st_size)
         print('COMMAND TO DOWNLOAD ON MAC:')
-        print(f'scp root@108.61.180.131:{final} "$HOME/Downloads/"')
+        print(f'scp root@<vps-host>:{final} "$HOME/Downloads/"')
         print('\n'.join(self.lines))
         if self.errors:print('COLLECTOR WARNINGS:',len(self.errors),'(see collector_errors.json)')
         return final
@@ -385,9 +385,14 @@ def main():
     ap=argparse.ArgumentParser()
     ap.add_argument('--hours',type=int,default=24,choices=(24,))
     ap.add_argument('--output-dir',type=Path,default=OUT)
+    ap.add_argument('--bot',action='append',dest='bots',required=True,
+                    help='Explicit bot instance; repeat for each instrument')
     args=ap.parse_args()
+    if (not args.bots or len(args.bots)>25 or len(set(args.bots))!=len(args.bots)
+        or any(not re.fullmatch(r'[a-z0-9][a-z0-9-]{2,19}',b) for b in args.bots)):
+        ap.error('Provide unique valid --bot names (1..25)')
     if os.geteuid()!=0:
         raise SystemExit('Run as root on VPS for read-only systemd + local log access')
-    Collector(args.hours,args.output_dir).run()
+    Collector(args.hours,args.output_dir,args.bots).run()
 
 if __name__=='__main__':main()

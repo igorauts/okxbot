@@ -22,7 +22,7 @@ def inspect(root, *, now=None):
     doc=json.loads(report_path.read_text())
     if not isinstance(doc,dict) or doc.get('complete') is not True:
         return {'complete':False,'reason':'last report incomplete'}
-    report=doc.get('performance_v0724')
+    report=(doc.get('performance') or doc.get('performance_v0724'))
     if not isinstance(report,dict):return {'complete':False,'reason':'financial snapshot unavailable'}
     expected=Decimal(str(report['grid_profit']))
     if not expected.is_finite():raise ValueError('Non-finite reported PnL')

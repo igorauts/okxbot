@@ -1,43 +1,48 @@
-"""Historical bot paths — READ ONLY. Never used by the trading engine.
+"""Read-only active and archived paths, chosen by observed files, not release numbers.
 
-Never infer missing *new* state from old files: archived legacy modes only.
+No engine imports this module. It never writes files or synthesizes missing state.
+Ambiguous historical candidates fail closed rather than selecting by a version.
 """
-import json
 from pathlib import Path
 
 
-def _legacy(root):
-    root = Path(root)
-    try:
-        cfg = json.loads((root / 'config.json').read_text(encoding='utf-8'))
-        ver = tuple(int(x) for x in cfg['version'].split('.'))
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        raise ValueError('Unrecognized archive config; refusing fallback')
-    return ver < (0, 7, 18)
-
-
-def _old_or_new(root, old, new):
-    root = Path(root)
-    return root / (old if _legacy(root) else new)
+def _file(root, canonical, historical_glob):
+    base=Path(root)
+    current=base/canonical
+    if current.is_symlink():
+        raise ValueError('Unsafe archive symlink')
+    if current.is_file():
+        return current
+    old=sorted(p for p in base.glob(historical_glob) if p.is_file() or p.is_symlink())
+    if len(old)>1 or any(p.is_symlink() for p in old):
+        raise ValueError('Ambiguous or unsafe archived file')
+    return old[0] if old else current
 
 
 def state_file(root):
-    return _old_or_new(root, 'state/bot04_state.json', 'state/bot_state.json')
+    return _file(root,'state/bot_state.json','state/bot*_state.json')
 
 
 def fills_db(root):
-    return _old_or_new(root, 'state/fills_v068.sqlite', 'state/fills.sqlite')
+    return _file(root,'state/fills.sqlite','state/fills_*.sqlite')
 
 
 def pnl_db(root):
-    return _old_or_new(root, 'state/pnl_v068.sqlite', 'state/pnl.sqlite')
+    return _file(root,'state/pnl.sqlite','state/pnl_*.sqlite')
 
 
 def cycles_db(root):
-    return _old_or_new(root, 'state/cycles_v068.sqlite', 'state/cycles.sqlite')
+    return _file(root,'state/cycles.sqlite','state/cycles_*.sqlite')
 
 
-def observer_dir(root, mode):
-    if mode not in ('burst', 'execution'):
+def observer_dir(root,mode):
+    if mode not in ('burst','execution'):
         raise ValueError('Invalid observer kind')
-    return _old_or_new(root, 'diagnostics/' + mode + '_v0711', 'diagnostics/' + mode)
+    base=Path(root)/'diagnostics'
+    current=base/mode
+    if current.is_symlink():raise ValueError('Unsafe observer directory')
+    if current.is_dir():return current
+    old=sorted(p for p in base.glob(mode+'_*') if p.is_dir() or p.is_symlink())
+    if len(old)>1 or any(p.is_symlink() for p in old):
+        raise ValueError('Ambiguous or unsafe observer archive directory')
+    return old[0] if old else current

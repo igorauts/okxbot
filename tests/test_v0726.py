@@ -22,7 +22,7 @@ assert __import__("okx_release_contract").check()
 # and positive-remaining virtual TP cycles, from the SAME state snapshot.
 tree=ast.parse((ROOT/'okx_bot.py').read_text(encoding='utf-8'))
 func=next(n for n in tree.body if isinstance(n,ast.FunctionDef)
-          and n.name=='performance_snapshot_v0724')
+          and n.name=='performance_snapshot')
 ns=dict(Decimal=Decimal,_first_anchor=lambda fills:(100000.,Decimal('1300')),
         STEP=Decimal('1'), CAP=200,QTY=Decimal('0.01'),CONTRACT_VALUE=Decimal('1'),
         _last_24h_profit=lambda *args:Decimal('3'),runtime_pct=lambda now:'99.99%',
@@ -37,7 +37,7 @@ stat={'bid':Decimal('1200'),'open_base':Decimal('0.62'),
       'partial_exit_net':Decimal('0'),'realized_open_components':Decimal('-.154'),
       'total_gain':Decimal('2.9922564'),'volume':Decimal('10'),
       'maker_volume':Decimal('8'),'taker_volume':Decimal('2'),'total_fees':Decimal('-.3')}
-res=ns['performance_snapshot_v0724'](state,[],stat,100100.)
+res=ns['performance_snapshot'](state,[],stat,100100.)
 assert res['tp_waiting']==2 and res['tp_waiting_all']==5
 assert res['open_nominal']==str(stat['open_base']*stat['bid'])
 print('PASS 0726 TP: 2 real + 3 virtual = 5 pending, from one engine snapshot')

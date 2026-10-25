@@ -1,0 +1,59 @@
+"""Strict offline source ZIP verifier; executable as a standalone tool.
+
+This is a build/publish gate. Nothing touches LIVE services or exchange.
+"""
+import ast, hashlib, json, stat, sys, zipfile
+from pathlib import Path
+
+def verify_member_types(z):
+    members=z.infolist()
+    names=[x.filename for x in members]
+    if not members or len(set(names)) != len(names):
+        raise ValueError('Empty or duplicated ZIP members')
+    for info in members:
+        name=info.filename
+        parts=Path(name).parts
+        if (not name or name.startswith('/') or '\\' in name or
+            '..' in parts or len(parts)>2 or
+            (len(parts)==2 and parts[0] not in ('tests','historical')) or
+            (name.startswith('.') and name not in ('.gitignore','.env.example')) or
+            name.endswith('/')):
+            raise ValueError('Unsafe ZIP path: '+name)
+        mode=(info.external_attr>>16)
+        if info.create_system!=3 or stat.S_IFMT(mode)!=stat.S_IFREG:
+            raise ValueError('Non-regular ZIP entry: '+name)
+        if info.file_size > 6_000_000:
+            raise ValueError('Oversized ZIP member: '+name)
+    if z.testzip() is not None:
+        raise ValueError('ZIP CRC mismatch')
+
+def verify(zip_path):
+    with zipfile.ZipFile(zip_path) as z:
+        verify_member_types(z)
+        names=set(z.namelist())
+        for name in ('okx_bot.py','okx_live_upgrade.py',
+                     'engine_manifest.json','okx_version.py',
+                     'run_checks.sh','tests/test_final_release_guards.py'):
+            if name not in names:raise ValueError('Missing: '+name)
+        manifest=json.loads(z.read('engine_manifest.json'))
+        version_ast=ast.parse(z.read('okx_version.py').decode())
+        fields={}
+        for node in version_ast.body:
+            if isinstance(node,ast.Assign) and isinstance(node.value,ast.Constant):
+                for target in node.targets:
+                    if isinstance(target,ast.Name): fields[target.id]=node.value.value
+        engine=fields.get('ENGINE_VERSION')
+        if (engine != manifest.get('current_version') or
+              fields.get('RELEASE_VERSION') != engine or
+              fields.get('STATE_SCHEMA') != manifest.get('schema_version')):
+            raise ValueError('Release / engine / schema contract mismatch')
+        actual=hashlib.sha256(z.read('okx_bot.py')).hexdigest()
+        expected=manifest['engines'][engine]['sha256']
+        if actual!=expected:raise ValueError('Engine checksum mismatch')
+        if b'def audit_output_complete(' not in z.read('okx_live_upgrade.py'):
+            raise ValueError('Missing financial audit completion guard')
+    return engine, actual
+
+if __name__=='__main__':
+    if len(sys.argv)!=2:raise SystemExit('Usage: python3 tests/verify_release_asset.py FILE.zip')
+    print('RELEASE ASSET PASS:',*verify(Path(sys.argv[1])))

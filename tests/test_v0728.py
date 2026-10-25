@@ -12,7 +12,7 @@ sys.path.insert(0,str(ROOT))
 from okx_latency_rollup import (MinuteWriter, add_row, read_rollups,
                                distribution, segment_dir, SECONDS)
 from okx_version import ENGINE_VERSION, RELEASE_VERSION, STATE_SCHEMA
-import okx_live_upgrade as upgrader
+from historical import single_transition_upgrader as upgrader
 import okx_telegram_health as health
 
 assert __import__("okx_release_contract").check()
@@ -98,7 +98,7 @@ print('PASS 0728 singleton heartbeat incidents remain independently actionable')
 # API view, clean legacy migration, tail repair, and hourly cleanup.
 with tempfile.TemporaryDirectory() as td:
     path=Path(td)/'latency_24h_rollups.jsonl'
-    now=time.time();minute=int(now//60)
+    now=int(time.time()//3600)*3600 + 25*60;minute=int(now//60)  # deterministic intra-hour fixture
     row={'phase':'http','ms':23,'method':'GET','route':'/api/v5/account/positions'}
     legacy={'schema':1,'minute':minute-4,'series':{}}
     add_row({'phase':'http','ms':44,'method':'GET','route':'/api/v5/account/positions'},legacy['series'])

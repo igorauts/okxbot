@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Controlled v0.7.27 -> v0.7.28 LIVE upgrade, one bot at a time.
+"""Controlled engine-identity upgrade, one bot at a time.
 
 NO API orders here. systemctl stop leaves exchange orders live. Upgraded engine
 must pass its GET-only audit before systemctl start. Never auto-restart on failure.
@@ -16,20 +16,21 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timezone
+from okx_gate_snapshot import read_gate_snapshot
 
 PACKAGE_SHA256 = None  # REQUIRED --sha256 of operator-reviewed ZIP
-OLD_ENGINE_SHA256 = 'e0d66fc153a2a20d2b9c5df6e79915b73deb1cbd694eae1d153f305284b02717'  # published v0.7.27 final.zip/okx_bot.py
-OLD_VERSION = '0.7.27'
-NEW_VERSION = '0.7.28'
+OLD_ENGINE_SHA256 = None  # loaded from attested staged engine manifest
+OLD_VERSION = None  # explicitly chosen old engine identity, attested by digest
+NEW_VERSION = None  # obtained from the staged manifest
 PACKAGE = None  # set via --package
 STAGE = None  # set via --stage
 SHARED = Path('/opt/okx-grid-live')
 BASE = Path('/root/okx')
-BACKUPS = Path('/srv/okxbot-v0728-live-backups')
+BACKUPS = Path('/srv/okxbot-live-backups')
 TELEGRAM_ROOT = Path('/root/okx')
 TELEGRAM_UNIT = 'okx-telegram-monitor.service'
 BOTS = ()  # assigned from --bot, never a hardcoded list
-LOCK = Path('/run/okxbot-v0728-upgrade.lock')
+LOCK = Path('/run/okxbot-live-upgrade.lock')
 
 
 def fail(message):
@@ -63,7 +64,7 @@ def json_read(path):
 def atomic_replace_file(src, dst):
     src=check_file(src);dst=Path(dst)
     if dst.is_symlink() or not dst.parent.is_dir():fail('Unsafe destination '+str(dst))
-    fd,tmp=tempfile.mkstemp(dir=dst.parent,prefix='.v0728-upgrade-')
+    fd,tmp=tempfile.mkstemp(dir=dst.parent,prefix='.okx-upgrade-')
     try:
         with os.fdopen(fd,'wb') as out,src.open('rb') as inp:
             shutil.copyfileobj(inp,out)
@@ -79,7 +80,7 @@ def atomic_replace_file(src, dst):
 
 def atomic_json(path,obj):
     path=check_file(path)
-    fd,tmp=tempfile.mkstemp(dir=path.parent,prefix='.v0728-json-')
+    fd,tmp=tempfile.mkstemp(dir=path.parent,prefix='.okx-json-')
     try:
         with os.fdopen(fd,'w',encoding='utf-8') as out:
             json.dump(obj,out,ensure_ascii=False,indent=2)
@@ -107,6 +108,8 @@ def files_required():
     if any(not isinstance(x,str) or not re.fullmatch('[A-Za-z0-9_]+\\.py',x) for x in deps):
         fail('Unsafe dependencies')
     for n in ['okx_bot.py', *deps]:check_file(STAGE/n)
+    if sha256(STAGE/'okx_bot.py') != engine.get('sha256'):
+        fail('Current engine bytes not matching manifest')
     return ['okx_bot.py',*deps]
 
 
@@ -121,7 +124,7 @@ def stage_check():
         if len(names)<53 or len(set(names))!=len(names) or any(
             '\\' in n or n.startswith('/') or '..' in Path(n).parts or
             len(Path(n).parts)>2 or
-            (len(Path(n).parts)==2 and Path(n).parts[0]!='tests') or
+            (len(Path(n).parts)==2 and Path(n).parts[0] not in ('tests','historical')) or
             (n.startswith('.') and n not in ('.gitignore','.env.example'))
             for n in names):
             fail('Unexpected ZIP members')
@@ -134,9 +137,10 @@ def stage_check():
                 fail('Staging/ZIP mismatch: '+name)
     files_required()
     from importlib.util import spec_from_file_location, module_from_spec
-    spec=spec_from_file_location('okx_version_v0724_installer',STAGE/'okx_version.py')
+    spec=spec_from_file_location('okx_version_installer',STAGE/'okx_version.py')
     mod=module_from_spec(spec);spec.loader.exec_module(mod)
-    if mod.RELEASE_VERSION!=NEW_VERSION or mod.ENGINE_VERSION!=NEW_VERSION or mod.STATE_SCHEMA!=1:
+    if (mod.ENGINE_VERSION != NEW_VERSION or mod.STATE_SCHEMA != 1
+            or mod.validate_version_ids() is not True):
         fail('Version constants mismatch')
     return True
 
@@ -175,10 +179,56 @@ def instance_check(bot, desired, need_active=True):
             fail(bot+' not in RUN control mode')
     engine=check_file(root/'okx_bot.py')
     if desired==OLD_VERSION and sha256(engine)!=OLD_ENGINE_SHA256:
-        fail(bot+' engine hash not matching published v0.7.27 baseline')
+        fail(bot+' OLD installed engine bytes not matching pinned published baseline')
     if desired==NEW_VERSION and sha256(engine)!=sha256(STAGE/'okx_bot.py'):
         fail(bot+' engine hash not matching candidate')
     return root,unit,kv
+
+
+
+def stop_safety_readonly(root, state):
+    """Recheck invariants immediately before stopping a real-money instance.
+
+    Local snapshot is only an eligibility gate; actual position/ownership requires
+    the separate exchange audit and can change while the engine is stopped.
+    """
+    if not isinstance(state.get('cycles'),dict):
+        fail('Unrecognized bot cycle state; refusing LIVE stop')
+    if state.get('terminal_mode') or state.get('panic_orders'):
+        fail('Terminal/PANIC intent present; refusing LIVE stop')
+    for cycle in state['cycles'].values():
+        if not isinstance(cycle,dict):fail('Malformed cycle; refusing LIVE stop')
+        if cycle.get('state') in ('PLACING','CANCELING'):
+            fail('Unresolved BUY intent; refusing LIVE stop')
+        for rec in cycle.get('tpOrders',[]):
+            if isinstance(rec,dict) and rec.get('phase') in ('PLACING','CANCELING'):
+                fail('Unresolved TP intent; refusing LIVE stop')
+    for group in state.get('aggregate_exits',[]):
+        if (not isinstance(group,dict) or
+                group.get('phase') not in ('FILLED','CANCELED','REJECTED')):
+            fail('Unresolved aggregate MARKET intent; refusing LIVE stop')
+    env_path=root/'.env'
+    check_file(env_path)
+    if env_path.stat().st_mode & 0o077:
+        fail('Bot .env permissions unsafe')
+    expected={
+        'OKX_ACCOUNT_POSITIONS_GATE_PATH':'/root/okx/.account_positions_gate_v075.json',
+        'OKX_FILL_HISTORY_GATE_PATH':'/root/okx/.account_fills_history_gate_v0712.json',
+    }
+    # Never display .env contents or print credentials.
+    for line in env_path.read_text(encoding='utf-8').splitlines():
+        if not line.strip() or line.lstrip().startswith('#') or '=' not in line:
+            continue
+        key,value=line.split('=',1);key=key.strip()
+        if key in expected and value.strip().strip('\"').strip("'")!=expected[key]:
+            fail('Unapproved shared account FIFO override: '+key)
+    for path in map(Path,expected.values()):
+        for target,field in ((path,'calls'),
+                             (path.with_name(path.name+'.fifo-v0712.json'),'waiters')):
+            # Read under same inode flock as the trading processes. Never
+            # replace/unlink or modify the account-wide quota/FIFO files.
+            read_gate_snapshot(target,field,allow_missing=True)
+    return True
 
 
 def backup_dir(label):
@@ -219,7 +269,7 @@ def verify_staging():
         if cfg.get('version') not in (OLD_VERSION, NEW_VERSION):
             fail(bot+' version not in supported upgrade path')
         # Verify the actual on-disk engine BEFORE any stop or destructive write.
-        # Older RC1 accidentally pinned the new engine hash as OLD_ENGINE_SHA256.
+        # Verify old bytes against an immutable digest, not a version label.
         instance_check(bot,cfg['version'],need_active=True)
         print('PREFLIGHT',bot,kv.get('ActiveState'), 'engine',cfg['version'],
               'pid',kv.get('MainPID'),'installed-engine SHA256 PASS')
@@ -299,16 +349,33 @@ def install_telegram():
     print('TELEGRAM PASS:',len(names),'files; monitor ACTIVE; backup:',old)
 
 
+def audit_output_complete(returncode, output):
+    """Require the entire mandatory pre-LIVE financial audit, not an early marker.
+
+    The current engine prints AUDIT CONSISTENT before mandatory PnL/history
+    verification. Its outer exception handler can print STOP while exiting 0.
+    The complete financial report prints the final closed-cycle confirmation.
+    """
+    if returncode != 0 or not isinstance(output, str):
+        return False
+    required = ('AUDIT CONSISTENT', '✅ Все закрытые циклы сопоставлены.')
+    failure = ('⛔ STOP:', '⚠️ Статистика неполная:',
+               '⚠️ Статистика неполная', 'Финансовые суммы не выводятся.')
+    return all(marker in output for marker in required) and not any(
+        marker in output for marker in failure)
+
+
 def upgrade_bot(bot):
     stage_check()
     shared_ver=json_read(SHARED/'engine_manifest.json').get('current_version')
-    if shared_ver!=NEW_VERSION:fail('Shared runtime is not staged v0.7.28')
+    if shared_ver!=NEW_VERSION:fail('Shared runtime is not staged target engine')
     engine_files=files_required()
     # Check staged dependencies are byte-identical to installed shared runtime.
     for name in engine_files:
         if sha256(STAGE/name)!=sha256(check_file(SHARED/name)):
             fail('Shared runtime dependency mismatch: '+name)
     root,unit,kv=instance_check(bot,OLD_VERSION,need_active=True)
+    stop_safety_readonly(root,json_read(root/'state/bot_state.json'))
     before_pid=int(kv['MainPID'])
     print('STOPPING',bot,'PID',before_pid,'(exchange orders remain active)',flush=True)
     run('systemctl','stop',unit,timeout=75)
@@ -321,6 +388,7 @@ def upgrade_bot(bot):
     if stopped_pid not in ('0',None):fail('Nonzero PID after stop; NOTHING overwritten')
     # Re-evaluate state AFTER service actually stopped and flushed any completed writes.
     root,unit,_=instance_check(bot,OLD_VERSION,need_active=False)
+    stop_safety_readonly(root,json_read(root/'state/bot_state.json'))
     dest=backup_dir(bot)
     backup_instance(root,dest,engine_files)
     print('BACKUP PASS:',dest,flush=True)
@@ -340,8 +408,8 @@ def upgrade_bot(bot):
         proc=subprocess.run([str(root/'.venv/bin/python'),'-u',str(root/'okx_bot.py')],
             cwd=root,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=180)
         print('\n'.join(proc.stdout.splitlines()[-28:]),flush=True)
-        if proc.returncode!=0 or 'AUDIT CONSISTENT' not in proc.stdout:
-            fail('READ-ONLY AUDIT did not pass; BOT REMAINS STOPPED')
+        if not audit_output_complete(proc.returncode, proc.stdout):
+            fail('READ-ONLY AUDIT did not fully finish; BOT REMAINS STOPPED')
         print('AUDIT PASS',bot,flush=True)
     except BaseException:
         # Fail before any LIVE start: restore config, state and engine files.
@@ -392,17 +460,31 @@ def main():
     ap.add_argument('--package',type=Path,required=True,help='Pre-reviewed candidate ZIP')
     ap.add_argument('--stage',type=Path,required=True,help='Already unpacked identical ZIP contents')
     ap.add_argument('--sha256',required=True,help='Exact 64-hex reviewed ZIP SHA256')
+    ap.add_argument('--from-engine',required=True,
+                    help='Explicit currently installed engine identity; must have trusted manifest SHA256')
     ap.add_argument('--confirm-live-stop',action='store_true',
                     help='Acknowledge stop leaves exchange orders LIVE; required for bot')
     args=ap.parse_args()
     import re
     if not re.fullmatch(r'[a-z0-9-]{3,32}',args.bot):fail('Invalid bot name')
     if not re.fullmatch(r'[0-9a-f]{64}',args.sha256):fail('Invalid expected SHA256')
-    global PACKAGE_SHA256, PACKAGE, STAGE, BOTS
+    global PACKAGE_SHA256, PACKAGE, STAGE, BOTS, OLD_VERSION, NEW_VERSION, OLD_ENGINE_SHA256
     PACKAGE_SHA256=args.sha256
     PACKAGE=args.package
     STAGE=args.stage
     BOTS=(args.bot,)
+    # Materialize staged source-of-truth; no guessed version ranges or manual maps.
+    expected=json_read(STAGE/'engine_manifest.json')
+    NEW_VERSION=expected.get('current_version')
+    OLD_VERSION=args.from_engine
+    if not isinstance(NEW_VERSION,str) or OLD_VERSION==NEW_VERSION:
+        fail('Upgrade requires different explicit source and target engine identities')
+    old_entry=expected.get('engines',{}).get(OLD_VERSION)
+    if not isinstance(old_entry,dict) or old_entry.get('file')!='okx_bot.py':
+        fail('Source engine identity not attested in target package manifest')
+    OLD_ENGINE_SHA256=old_entry.get('sha256')
+    if not isinstance(OLD_ENGINE_SHA256,str) or not re.fullmatch(r'[0-9a-f]{64}',OLD_ENGINE_SHA256):
+        fail('Source engine lacks exact published SHA256 identity')
     fd=os.open(LOCK,os.O_CREAT|os.O_RDWR,0o600)
     try:
         fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)

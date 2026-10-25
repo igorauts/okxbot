@@ -21,7 +21,7 @@ import okx_telegram_health as health
 
 assert __import__("okx_release_contract").check()
 # The upgrader MUST recognize LIVE v0.7.27, not only the new candidate.
-import okx_live_upgrade as upgrader
+from historical import single_transition_upgrader as upgrader
 assert upgrader.OLD_VERSION == '0.7.27' and upgrader.NEW_VERSION == '0.7.28'
 assert upgrader.OLD_VERSION != upgrader.NEW_VERSION
 assert upgrader.OLD_ENGINE_SHA256 == 'e0d66fc153a2a20d2b9c5df6e79915b73deb1cbd694eae1d153f305284b02717'
@@ -37,7 +37,7 @@ print('PASS 0727 PLACING is durable uncertain intent, not acknowledged BUY')
 
 # Exactness of state machine unchanged, except explicit post-batch save.
 source=(ROOT/'okx_bot.py').read_text();tree=ast.parse(source)
-assert 'if placed:\n                # v0.7.27' in source
+assert 'if placed:' in source and 'placement batch' in source and 'save(st)' in source
 assert "if place(st,price):placed+=1" in source
 assert 'protected_signature!=last_protected_signature' in source
 assert "log('TRADING_LOOP_LONG_PASS'" in source
@@ -99,7 +99,7 @@ with tempfile.TemporaryDirectory() as td:
     db.execute('INSERT INTO accounted VALUES (?,?,?,?)',('1','CLOSED','0.010084','{}'))
     db.commit();db.close()
     rpt=root/'state/stats.json';rpt.write_text(json.dumps({
-        'complete':True,'generated_at_unix':now,'performance_v0724':{'grid_profit':'0'}}))
+        'complete':True,'generated_at_unix':now,'performance':{'grid_profit':'0'}}))
     before=[p.stat().st_mtime_ns,rpt.stat().st_mtime_ns]
     out=inspect(root,now=now+5)
     assert out['delta']=='0.010084' and out['closed_ledger_rows']==1

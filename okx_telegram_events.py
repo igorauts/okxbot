@@ -1,3 +1,4 @@
+from okx_telegram_wire import state_key
 """Read-only Telegram notifications for OKX Grid Bot.
 
 Consumes existing local events, journal and persisted accounting. Never contacts OKX,
@@ -61,8 +62,8 @@ def gate_alert_scan(api, st, now=None):
     of the Telegram monitor. No trading state or FIFO file is touched.
     """
     now = time.time() if now is None else float(now)
-    pending = st.setdefault('positions_gate_pending_v0723', {})
-    counters = st.setdefault('positions_gate_episode_v0723', {})
+    pending = st.setdefault(state_key('positions_gate_pending'), {})
+    counters = st.setdefault(state_key('positions_gate_episode'), {})
     for name, record in list(pending.items()):
         if record.get('sent') or now - float(record['received_at']) < GATE_ALERT_GRACE_SEC:
             continue
@@ -79,7 +80,7 @@ def gate_alert_scan(api, st, now=None):
 
 def _gate_recovered(api, st, name, obj):
     """Close a pending gate episode only on a subsequent explicit recovery."""
-    pending = st.setdefault('positions_gate_pending_v0723', {})
+    pending = st.setdefault(state_key('positions_gate_pending'), {})
     record = pending.get(name)
     if not record:
         return
@@ -93,7 +94,7 @@ def _gate_recovered(api, st, name, obj):
     if record.get('sent'):
         number = record.get('episode')
         alarm_key = f'event/{name}/{GATE_EVENT}/{number}'
-        outbox = st.setdefault('alert_outbox_v0722', [])
+        outbox = st.setdefault(state_key('alert_outbox'), [])
         # Delivery is handled in this very same single-threaded monitor loop.
         # If Telegram had not actually received the alarm, do not deliver a
         # stale alarm *after* reconciliation has already recovered.
@@ -117,11 +118,11 @@ RECOVERY_EVENTS = {
 
 def event_alert(api, st, name, obj):
     typ = str(obj.get('event') or '')
-    episodes = st.setdefault('event_incidents_v0722', {})
-    counters = st.setdefault('event_incident_counters_v0722', {})
+    episodes = st.setdefault(state_key('event_incidents'), {})
+    counters = st.setdefault(state_key('event_incident_counters'), {})
     now = time.time()
     if typ == GATE_EVENT:
-        pending = st.setdefault('positions_gate_pending_v0723', {})
+        pending = st.setdefault(state_key('positions_gate_pending'), {})
         if name not in pending:
             pending[name] = {'received_at': now, 'event_ts': date_epoch(obj.get('ts')),
                              'error': str(obj.get('error') or 'GateUnavailable'),
@@ -178,7 +179,7 @@ def market_event(st,name,obj):
     records=st.setdefault('market_events',{})
     key=f'{name}/{cid}'
     if typ=='AGG_MARKET_REJECTED' and not cid:
-        # v0.7.14 rejection emits no clOrdId. Only one unresolved aggregate
+        # Rejection can carry no clOrdId. Only one unresolved aggregate
         # market intent can exist per bot; link to that record, not a phantom.
         pending=[k for k,v in records.items() if k.startswith(name+'/')
                  and v.get('intent_at') and not v.get('terminal') and not v.get('rejected')]
@@ -351,7 +352,7 @@ def _discard_nonactionable_mismatch_notifications(st):
     Called before durable alert delivery by the main Telegram monitor loop.
     """
     changed=bool(st.pop('state_mismatch_incidents',None))
-    queue=st.get('alert_outbox_v0722')
+    queue=st.get(state_key('alert_outbox'))
     if isinstance(queue,list):
         keep=[row for row in queue if not (isinstance(row,dict) and
               str(row.get('key','')).startswith(('state_mismatch/open/',

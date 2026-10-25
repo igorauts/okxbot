@@ -8,6 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 from okx_paths import state_file
+from okx_version import STATE_SCHEMA
+from okx_engine_integrity import attested_engine
 
 BOT_ROOT = Path('/root/okx')
 UNIT_DIR = Path('/etc/systemd/system')
@@ -41,9 +43,8 @@ def confirmed_panic(root):
         return False
     if not (isinstance(cfg.get('version'), str) and
             cfg.get('version')==st.get('version') and
-            (re.fullmatch(r'\d+\.\d+\.\d+', cfg['version']) or
-             cfg['version']=='0.7.23.1') and
-            tuple(map(int, cfg['version'].split('.'))) >= (0,7,14) and
+            attested_engine(root,cfg,st) and
+            st.get('schema_version')==STATE_SCHEMA and
             cfg.get('instrument')==st.get('instrument') and
             control.get('mode')=='PANIC' and
             st.get('terminal_mode')=='PANIC_DONE' and

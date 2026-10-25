@@ -1,4 +1,5 @@
-"""OKX v0.7.20 Telegram follow-ups; local READ-ONLY observer.
+from okx_telegram_wire import state_key
+"""OKX Telegram follow-ups; local READ-ONLY observer.
 
 Only reads existing bot JSON/SQLite. Never imports the engine, loads account
 credentials, or sends/cancels an OKX order. All persistence is in the existing
@@ -153,12 +154,12 @@ def _followup_message(name, record, cycle, ledger, cv, coin):
 def partial_scan(api, st, names, all_names=None):
     """Initial partial alerts and verified FINAL closed-cycle outcomes.
 
-    Unlike v0.7.19, disappearance from current state does not resolve a watch.
+    Disappearance from current state does not resolve a watch.
     All existing follow-ups survive a restart via the monitor's persisted st.
     """
     now = time.time()
     since = st.setdefault('partial_tracking', {})
-    watches = st.setdefault('partial_followups_v0720', {})
+    watches = st.setdefault(state_key('partial_followups'), {})
     observed = set()
     states = {}
     cfgs = {}
@@ -325,8 +326,8 @@ def _panic_message(name, verified):
 
 def panic_scan(api, st, names):
     """Two independent Telegram milestones; archived bots aren't replayed."""
-    since = st.setdefault('v0720_observing_since', time.time())
-    baseline = st.setdefault('v0720_panic_seen', {})
+    since = st.setdefault(state_key('observing_since'), time.time())
+    baseline = st.setdefault(state_key('panic_seen'), {})
     for name, root in names.items():
         root = Path(root)
         state = read_json(state_file(root))

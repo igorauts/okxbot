@@ -48,7 +48,7 @@ INTERVAL = 1.0  # main safety loop; BID updates independently via public WS
 # after quiet time, one confirmed cancellation per REST reconciliation.
 REAL_TP_CONFIG = int(CFG.get('active_tp_orders',0))
 # BUY remains capped at 30. Real SELL TP may grow up to the 150-order safety cap.
-# Legacy active_tp_orders=75 remains accepted for state migration, but no longer
+# Historical active_tp_orders=75 remains parsed for config safety, but never
 # controls live real TP count. New config uses 1..25 real TP baseline.
 REAL_TP_TARGET = int(CFG.get('real_tp_target', min(25, REAL_TP_CONFIG)))
 # independent user settings are base BUY (1..25) and base TP (1..25).
@@ -243,7 +243,7 @@ def post_absence_confirmed(rec, side, st=None):
     expiry = int(rec.get('expTimeMs') or 0)
     placed = int(float(rec.get('placedAt') or 0) * 1000)
     if not expiry or not placed or side not in ('buy', 'sell'):
-        return False  # legacy v0.6.9 intents are never auto-cleared
+        return False  # unknown historical intents are never auto-cleared
     now = time.time()
     age = now - float(rec['placedAt'])
     if (age < 0 or age > ABSENCE_MAX_AGE_SEC
@@ -793,7 +793,7 @@ def accumulate_expected_sell(expected, leg):
     oid=str(leg.get('ordId') or '')
     if not oid:raise ValueError('Filled SELL missing order ID')
     qty=D(leg['filled'])
-    # Legacy individual SELL has a globally unique order ID. Aggregate SELL
+    # Individual SELL has a globally unique order ID. Aggregate SELL
     # references are shared, so contributions MUST be summed, not overwritten.
     if leg.get('source')=='aggregate_exit':
         expected[oid]=expected.get(oid,Decimal(0))+qty
@@ -2958,7 +2958,7 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                 else:break
                 time.sleep(0.05)  # BUY pacing; keep order rate limit
             if placed:
-                # v0.7.27: persist positively ACKed BUY_LIVE facts after the
+                # persist positively ACKed BUY_LIVE facts after the
                 # placement batch. Pre-POST PLACING remains durably persisted
                 # by place(); unknown POST outcomes still fail closed.
                 save(st)
@@ -3026,7 +3026,7 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                         bid=str(fresh_bid),age_ms=int(
                             1000*(time.monotonic()-live_loop._shift_at)))
                 elif max_remove and protected:
-                    # v0.7.27: emit only when the protected identity set changes.
+                    # emit only when the protected identity set changes.
                     # This does not modify which BUYs are safe to cancel.
                     protected_signature=tuple(sorted(str(c.get('ordId') or c.get('clOrdId') or c['buyPx'])
                                                       for c in protected))
@@ -3534,7 +3534,7 @@ def format_okx_report(st,fills,stats,now=None):
     return '\n'.join(items)
 
 
-def performance_snapshot_v0724(st, fills, stats, now):
+def performance_snapshot(st, fills, stats, now):
     """Read-only presentation payload from exactly the audited fill snapshot.
 
     This does not change PnL and deliberately does not mark unverified
@@ -3637,7 +3637,7 @@ def print_full_stats(pnl=None, *, require_complete=False):
             'signature':financial_signature(st),'total_pnl_usdt':str(d['total_gain']),
             'open_contracts':str(d['open_contracts']),'bid':str(bid),'at':now})
     report=format_okx_report(st,fills,d,now=now)
-    detail=performance_snapshot_v0724(st,fills,d,now)
+    detail=performance_snapshot(st,fills,d,now)
     if LIVE:
         atomic_json(STATS_FILE, {
             'schema_version': 1,
@@ -3646,7 +3646,8 @@ def print_full_stats(pnl=None, *, require_complete=False):
             'bot_version': VER,
             'generated_at': datetime.fromtimestamp(now,timezone.utc).isoformat(),
             'generated_at_unix': now,
-            'performance_v0724': detail,
+            'performance': detail,
+            'performance_v0724': detail,  # stable legacy wire alias; REMOVE only after all readers migrated
             'report': report,
         })
     print('\n'+report+'\n',flush=True)

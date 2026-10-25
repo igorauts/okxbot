@@ -1,4 +1,4 @@
-"""Read-only Telegram presentation and diagnostics for OKX Grid Bot v0.7.16.
+"""Read-only Telegram presentation and diagnostics for OKX Grid Bot.
 
 Never imports a trading engine, reads API credentials, mutates bot state or calls OKX.
 """
@@ -104,7 +104,7 @@ def price_digits(cfg):
 def verified_snapshot_bid(root, cfg, stats):
     """Price from the same confirmed stats sample, never its rounded report.
 
-    The v0.7.21+ running engine publishes stats_financial_anchor.json and
+    The running engine publishes stats_financial_anchor.json and
     stats.json with the *same* timestamp, in that order. The two files can
     briefly be from different samples, so fail closed rather than show a
     spurious $0.000000 / -100% price change. Read-only, no exchange calls.
@@ -164,7 +164,7 @@ def status_one(name, root, age_text='н/д'):
     first = ', '.join([name, 'v'+ver, age_text])
     def row(title, val):
         return title+': '+val
-    # Engine report may contain $0.00 for inexpensive assets (v0.7.21).
+    # Engine report may contain $0.00 for inexpensive assets .
     # Anchor and report must share an identical sample timestamp.
     bid_exact = verified_snapshot_bid(root, cfg, stats)
     bid = ('$' + human_amount(bid_exact, price_digits(cfg))
@@ -311,8 +311,6 @@ def latency_one(name, root, hours):
     root=Path(root)
     cutoff=time.time()-hours*3600
     sources=sorted(root.glob('logs/latency*.jsonl*'))
-    if (root/'logs/latency.jsonl').is_file():
-        sources=[p for p in sources if not p.name.startswith('latency_v0711') or p.name.startswith('latency.jsonl')]
     phases=defaultdict(list)
     sample_count=0
     for src in sources:
@@ -453,9 +451,9 @@ def market_ledger(root, event):
                 # Duplicate identity -> ambiguous accounting, fail closed.
                 return None
             by_buy[buy_id]=c
-    # The engine compacts old completed cycles to cycles_v068.sqlite. A Market
+    # The engine compacts completed cycles into the cycles SQLite ledger. A Market
     # group may be finalized before Telegram reads it, leaving some parent
-    # cycles absent from bot04_state.json; look them up READ ONLY in the archive.
+    # cycles absent from the live state; look them up READ ONLY in the ledger.
     missing={str(r.get('buy_id') or '') for r in rows} - set(by_buy)
     if missing:
         archive=cycles_db(root)
@@ -496,7 +494,7 @@ def signed_usd6(value):
     return money(value,6,True)
 
 
-# v0.7.29 Market SELL UI (accounting unchanged)
+# Market SELL UI (accounting unchanged)
 def market_message(name, root, event, timing):
     v=market_ledger(root,event)
     if v is None:

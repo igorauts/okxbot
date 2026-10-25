@@ -216,7 +216,7 @@ class Observer:
         if t is None:
             return
         if kind == 'PARTIAL_ATTACHED_TP_DISCOVERED' and 'execution_class' not in e:
-            # v077 used this name even for full BUY fills. Do not claim partial.
+            # The event name can also describe a full BUY fill. Do not claim partial.
             self.counters['ATTACHED_TP_LEGACY_UNVERIFIED'] += 1
         else:
             self.counters[kind] += 1

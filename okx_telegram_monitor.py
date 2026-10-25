@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only Telegram control-room for OKX bot instances (status v0.7.7).
+"""Read-only Telegram control-room for OKX bot instances.
 
 One process serves both instruments; it never loads exchange API keys, never
 sends/cancels an exchange order, and never writes trading state/control files.
@@ -189,7 +189,7 @@ class Telegram:
 def load_state():
     try:
         st=json.loads(STATE_PATH.read_text())
-        if st.get('schema')!=1:raise ValueError('wrong schema')
+        if not isinstance(st,dict) or st.get('schema')!=1:raise ValueError('Invalid persisted Telegram monitor schema; manual review required')
         return st
     except FileNotFoundError:
         return {'schema':1,'offsets':{},'last_alerts':{},'service_status':{},
@@ -229,10 +229,7 @@ def _launch_epoch(root,values):
             dt=datetime.strptime(source,'%d.%m.%Y %H:%M:%S UTC')
             possible.append(dt.replace(tzinfo=timezone.utc).timestamp())
         except ValueError:pass
-    for file,key in (
-        (state_file(root),'started_at'),
-        (root/'state/okx_stats_grid_reference_v059.json','started_at'),
-    ):
+    for file,key in ((state_file(root),'started_at'),):
         try:
             val=float(json.loads(file.read_text())[key])
             if 0<val<=time.time():possible.append(val)
@@ -280,7 +277,7 @@ def _historical_max_position(root, instrument):
         # The script and manager may live in different directories on VPS.
         import sys
         format_peak=None
-        for module_dir in ('/root/okx', '/opt/okx-grid-v068'):
+        for module_dir in ('/opt/okx-grid-live', '/root/okx'):
             if not (Path(module_dir)/'okx_position_peak.py').is_file():
                 continue
             if module_dir not in sys.path:
@@ -314,7 +311,7 @@ def mode_and_stats(name):
     age=_age_label(_launch_epoch(root,values))
     return status_one(name,root,age)
 
-# v0.7.29: account summary is a read-only sum of verified bot snapshots.
+# Account summary is a read-only sum of verified bot snapshots.
 
 def _account_number(value):
     # Self-contained converter: cannot depend on another monitor's imports.
@@ -335,7 +332,7 @@ def _account_total_pnl(active):
     for _name,root in active:
         cfg=read_json(root/'config.json')
         stats=read_json(root/'state/stats.json')
-        perf=stats.get('performance_v0724') if isinstance(stats,dict) else None
+        perf=(stats.get('performance') or stats.get('performance_v0724')) if isinstance(stats,dict) else None
         if (not isinstance(cfg,dict) or not isinstance(stats,dict)
             or stats.get('complete') is not True or
                 stats.get('instrument')!=cfg.get('instrument') or

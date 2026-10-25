@@ -14,18 +14,9 @@ from okx_archive_reader import state_file, fills_db, observer_dir
 
 from okx_version import RELEASE_VERSION
 MANAGER_VERSION='v'+RELEASE_VERSION
-ENGINE_PATTERN=re.compile(r'\bokx_bot(\d{3,4})\.py\b')
 GRID_LINE=re.compile(r'BID=([0-9.]+)\b')
 TERMINAL_AGG={'FILLED','CANCELED','REJECTED','DONE','CLOSED'}
 
-
-def version_at_least(ver,minimum):
-    try:
-        a=tuple(int(x) for x in str(ver).removeprefix('v').split('.'))
-        b=tuple(int(x) for x in minimum.split('.'))
-        return len(a)==len(b)==3 and a>=b
-    except (ValueError,TypeError):
-        return False
 
 def dec(x):
     try:
@@ -68,14 +59,6 @@ def systemd_info(unit):
               for k,v in [line.split('=',1)]}
         return rows
     except (OSError,subprocess.TimeoutExpired):return {}
-
-
-def engine_version(info):
-    match=ENGINE_PATTERN.search(info.get('ExecStart',''))
-    if not match:return None
-    value=match.group(1)
-    if len(value)<3:return None
-    return f'v{int(value[0])}.{int(value[1])}.{int(value[2:])}'
 
 
 def uptimes(info,proc_uptime='/proc/uptime'):
@@ -133,11 +116,10 @@ def read_local_orders(state):
 
 
 def read_monitor(root,now=None):
-    """Best-effort local v078 diagnostic summary (no OKX API)."""
+    """Best-effort local diagnostic summary (no OKX API)."""
     now=time.time() if now is None else now
     root=Path(root)
-    for path in (observer_dir(root,'execution')/'summary.json',
-                 root/'diagnostics/execution_v077/summary.json'):
+    for path in (observer_dir(root,'execution')/'summary.json',):
         item=read_json(path)
         if not item:continue
         try:when=datetime.fromisoformat(str(item['ts']).replace('Z','+00:00')).timestamp()
@@ -204,7 +186,7 @@ def table_row(label,value):return f'  {label:<26} {value}'
 def settings(name,root,unit):
     cfg=read_json(Path(root)/'config.json')
     if cfg is None:return f'Бот {name}: настройки недоступны'
-    info=systemd_info(unit);ver=engine_version(info) or (('v'+str(cfg.get('version'))) if cfg.get('version') else 'не определена')
+    info=systemd_info(unit);ver=('v'+str(cfg.get('version'))) if cfg.get('version') else 'не определена'
     buy=int(cfg.get('active_buy_orders',25));real_tp=int(cfg.get('real_tp_target',min(25,int(cfg.get('active_tp_orders',25)))))
     buy_buffer = 5
     tp_buffer = buy+5
@@ -250,7 +232,7 @@ def _monitor_label(unit,root,kind):
 def status(name,root,unit):
     cfg=read_json(Path(root)/'config.json')
     if cfg is None:return f'Бот {name}: конфигурация недоступна'
-    info=systemd_info(unit);ver=engine_version(info) or (('v'+str(cfg.get('version'))) if cfg.get('version') else 'не определена')
+    info=systemd_info(unit);ver=('v'+str(cfg.get('version'))) if cfg.get('version') else 'не определена'
     running=info.get('ActiveState')=='active'
     control=read_json(Path(root)/'state/control.json') or {}
     ack=read_json(Path(root)/'state/control_ack.json') or {}
@@ -260,12 +242,12 @@ def status(name,root,unit):
     if running and mode=='SOFT':label='SOFT STOP'
     if mode=='HARD' or mode=='PANIC':label='ЗАВЕРШАЕТ РАБОТУ' if running else 'ЗАВЕРШЁН'
     proc,host=uptimes(info)
-    # v0.7.29: original bot launch (like statistics), not systemd process age.
+    # Original bot launch (like statistics), not systemd process age.
     launch=None
     snapshot=read_json(Path(root)/'state/stats.json')
     if (snapshot and snapshot.get('complete') is True
         and snapshot.get('instrument')==cfg.get('instrument')):
-        perf=snapshot.get('performance_v0724')
+        perf=(snapshot.get('performance') or snapshot.get('performance_v0724'))
         if isinstance(perf,dict) and perf.get('schema')==1:
             ts=dec(perf.get('launch_at'))
             if ts is not None and 0<ts<=Decimal(str(time.time())):

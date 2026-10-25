@@ -1,3 +1,13 @@
+## v0.7.30 — Compatible Clean Refactor (LIVE-verified, 2026-10-25)
+
+- Genuine trading-engine source identity bump with immutable SHA256 entry in `engine_manifest.json`; preserved trading decisions and account-level FIFO quotas.
+- Removed version-labelled runtime function/data dependencies while freezing wire-format filenames and Telegram durable-state schema to avoid double quota or lost alerts.
+- Dual financial snapshot keys for mixed-fleet compatibility, archive discovery by actual files, `/latency` rotated JSONL support, verified old/new engine attestation for observers and PANIC cleanup.
+- Dynamic one-bot updater with backup, guard against unresolved intents, per-bot GET-only exchange audit and an explicit **complete financial report marker** requirement even when an engine exits zero after a caught exception.
+- Regression checks for missing/truncated financial audit, ZIP Unix regular-file type, source identity and mixed FIFO.
+- Five independent LIVE upgrades on 2026-10-25 (UTC): near0721, btc0721, zec0724, dood0721-2, wld0728. GET-only ownership/TP checks and required services passed in reported post-upgrade audit. GitHub publication does not stop/start any service.
+- No funding collector or trading strategy redesign in this release.
+
 ## v0.7.29 — Maintenance / UI only (2026-10-24)
 - ENGINE_VERSION stays 0.7.28; trading engine, FIFO, funding, strategy and state schema unchanged.
 - Integrate already-LIVE verified observer provisioning for pristine unstarted bots.

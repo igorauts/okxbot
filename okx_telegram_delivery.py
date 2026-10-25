@@ -1,4 +1,5 @@
-"""Durable, local-only Telegram alert queue (v0.7.22).
+from okx_telegram_wire import state_key
+"""Durable, local-only Telegram alert queue.
 
 At-least-once delivery: an ambiguous Telegram network ACK can still duplicate a
 message. Telegram Bot API has no sendMessage idempotency key. Trading files,
@@ -20,7 +21,7 @@ def prune_sent(st, now):
     """Bound persistent dedupe keys without releasing keys still queued."""
     seen=st.setdefault('incident_sent',{})
     if len(seen)<=MAX_SENT_KEYS:return
-    pending={item.get('key') for item in st.get('alert_outbox_v0722',[])}
+    pending={item.get('key') for item in st.get(state_key('alert_outbox'),[])}
     old=sorted(((float(v),k) for k,v in seen.items()
                 if k not in pending and isinstance(v,(float,int))),
                key=lambda pair:pair[0])
@@ -59,7 +60,7 @@ def enqueue(st, key, message, html_mode=False, path=None):
     seen = st.setdefault('incident_sent', {})
     if key in seen:
         return False
-    queue = st.setdefault('alert_outbox_v0722', [])
+    queue = st.setdefault(state_key('alert_outbox'), [])
     if len(queue) >= MAX_PENDING:
         raise RuntimeError('Telegram alert outbox full; do not drop critical alerts')
     now = time.time()
@@ -78,7 +79,7 @@ def enqueue(st, key, message, html_mode=False, path=None):
 
 def drain(api, st, path=None, limit=30, now=None):
     now = time.time() if now is None else now
-    queue = st.setdefault('alert_outbox_v0722', [])
+    queue = st.setdefault(state_key('alert_outbox'), [])
     sent = 0
     for _ in range(min(limit, len(queue))):
         msg = queue[0]
@@ -90,13 +91,13 @@ def drain(api, st, path=None, limit=30, now=None):
             # Only a structurally confirmed permanent error may be bypassed.
             # 429 and all network/5xx errors must remain retryable.
             if getattr(exc,'telegram_permanent',False):
-                dead=st.setdefault('alert_dead_letters_v0725',[])
+                dead=st.setdefault(state_key('alert_dead_letters'),[])
                 dead.append({'key':msg.get('key'),'error':type(exc).__name__,
                              'at':now,'tries':int(msg.get('tries',0))+1})
                 if len(dead)>MAX_DEAD_LETTERS:
                     del dead[:-MAX_DEAD_LETTERS]
-                st['alert_dead_letter_total_v0725']=int(
-                    st.get('alert_dead_letter_total_v0725',0))+1
+                st[state_key('alert_dead_letter_total')]=int(
+                    st.get(state_key('alert_dead_letter_total'),0))+1
                 queue.pop(0)
                 persist(st,path)
                 continue  # Release the next independent CRITICAL message.

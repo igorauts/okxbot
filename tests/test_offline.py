@@ -46,20 +46,26 @@ with tempfile.TemporaryDirectory() as d:
     d=Path(d)
     assert current_state(d)==d/'state/bot_state.json'
     assert current_fills(d)==d/'state/fills.sqlite'
-    (d/'config.json').write_text('{"version":"0.7.17"}')
-    assert archive_state(d)==d/'state/bot04_state.json'
-    assert archive_fills(d)==d/'state/fills_v068.sqlite'
-    (d/'config.json').write_text('{"version":"0.7.19"}')
+    # Physical historical files, not a version-number comparison, select archive paths.
+    state=d/'state';state.mkdir()
+    (state/'bot04_state.json').write_text('{}')
+    (state/'fills_v068.sqlite').write_bytes(b'old')
+    assert archive_state(d)==state/'bot04_state.json'
+    assert archive_fills(d)==state/'fills_v068.sqlite'
+    (state/'bot_state.json').write_text('{}')
+    (state/'fills.sqlite').write_bytes(b'new')
     assert archive_state(d)==current_state(d)
     assert archive_fills(d)==current_fills(d)
-    (d/'config.json').write_text('{"version":"bad"}')
+    (state/'bot_state.json').unlink()
+    (state/'bot03_state.json').write_text('{}')
     try:archive_state(d)
     except ValueError:pass
-    else:raise AssertionError('Invalid archive version accepted')
+    else:raise AssertionError('Ambiguous archived state accepted')
 
 manifest=json.loads((SH/'engine_manifest.json').read_text())
 assert manifest['current_version']==ENGINE_VERSION
-assert list(manifest['engines'])==[ENGINE_VERSION]
+assert ENGINE_VERSION in manifest['engines']
+assert all(isinstance(rec.get('sha256'),str) and len(rec['sha256'])==64 for rec in manifest['engines'].values())
 for dependency in manifest['engines'][ENGINE_VERSION]['dependencies']:
     assert (SH/dependency).is_file(),dependency
 

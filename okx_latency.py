@@ -56,7 +56,7 @@ class LatencyJournal:
                 with self._lock:
                     if self._thread is None:
                         self._thread = threading.Thread(target=self._write_loop,
-                                                        name='okx-latency-v0711', daemon=True)
+                                                        name='okx-latency', daemon=True)
                         self._thread.start()
         except queue.Full:
             self.dropped += 1

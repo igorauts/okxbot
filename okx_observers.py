@@ -2,6 +2,7 @@
 """One observer pair per active bot; never starts trading services."""
 from __future__ import annotations
 from okx_version import ENGINE_VERSION, STATE_SCHEMA
+from okx_engine_integrity import attested_engine
 import json
 import os
 from pathlib import Path
@@ -39,14 +40,8 @@ def validate_root(root,service,base=Path('/root/okx')):
 def supports_versionless(root, service, base=Path('/root/okx')):
     resolved,cfg=validate_root(root,service,base)
     ver=cfg['version']
-    # Observer interface ABI v1 was introduced with the clean v0.7.19
-    # engine. Restrict the compatible range AND verify the persisted state
-    # schema and matching engine identity: never infer compatibility from a
-    # future version or a version string alone.
-    match=re.fullmatch(r'(\d+)\.(\d+)\.(\d+)',ver)
-    latest=tuple(map(int,ENGINE_VERSION.split('.')))
-    if not match or not ((0,7,19)<=tuple(map(int,match.groups()))<=latest):
-        return False
+    # A running instance must match this engine's identity and state schema.
+    # Version syntax or chronology alone does NOT establish ABI compatibility.
     state_file=resolved/'state/bot_state.json'
     try:
         if state_file.is_symlink():return False
@@ -57,7 +52,7 @@ def supports_versionless(root, service, base=Path('/root/okx')):
     except (OSError,ValueError):
         return False
     engine=resolved/'okx_bot.py'
-    return engine.is_file() and not engine.is_symlink()
+    return engine.is_file() and not engine.is_symlink() and attested_engine(resolved,cfg,st)
 
 
 def supports_unstarted_current(root,service,source,base=Path('/root/okx')):
@@ -81,7 +76,8 @@ def supports_unstarted_current(root,service,source,base=Path('/root/okx')):
         if (not installed.is_file() or installed.is_symlink()
                 or not expected.is_file() or expected.is_symlink()):
             return False
-        return hashlib.sha256(installed.read_bytes()).digest()==hashlib.sha256(expected.read_bytes()).digest()
+        return (hashlib.sha256(installed.read_bytes()).digest()==hashlib.sha256(expected.read_bytes()).digest()
+                and attested_engine(resolved,cfg))
     except (OSError,ValueError,TypeError):
         return False
 

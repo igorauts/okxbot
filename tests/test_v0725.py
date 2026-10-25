@@ -76,36 +76,38 @@ print('PASS critical PANIC ACK: independently observable manual review; no dupli
 
 with tempfile.TemporaryDirectory() as td:
     root=Path(td)/'x';(root/'state').mkdir(parents=True)
-    cfg={'version':'0.7.23.1','instrument':'BTC-USDT-SWAP'}
-    st={'version':'0.7.23.1','instrument':'BTC-USDT-SWAP',
+    cfg={'version':ENGINE_VERSION,'instrument':'BTC-USDT-SWAP'}
+    st={'version':ENGINE_VERSION,'schema_version':__import__('okx_version').STATE_SCHEMA,
+        'instrument':'BTC-USDT-SWAP',
         'terminal_mode':'PANIC_DONE','terminal_snapshot':{'position_contracts':'0','mode':'PANIC_DONE'}}
     ack={'mode':'PANIC','phase':'PANIC_DONE','remaining_position':'0'}
     (root/'config.json').write_text(json.dumps(cfg))
+    (root/'okx_bot.py').write_bytes((ROOT/'okx_bot.py').read_bytes())
     (root/'state/bot_state.json').write_text(json.dumps(st))
     (root/'state/control_ack.json').write_text(json.dumps(ack))
     (root/'state/control.json').write_text('{"mode":"PANIC"}')
     assert cleanup.confirmed_panic(root)
-    cfg['version']='0.7.99.1';st['version']='0.7.99.1'
+    cfg['version']=ENGINE_VERSION+'.1';st['version']=ENGINE_VERSION+'.1'
     (root/'config.json').write_text(json.dumps(cfg))
     (root/'state/bot_state.json').write_text(json.dumps(st))
     assert not cleanup.confirmed_panic(root)
-print('PASS PANIC cleanup: exact historical 0.7.23.1 only; arbitrary 4-part versions fail closed')
+print('PASS PANIC cleanup: current engine and current state schema required; arbitrary versions fail closed')
 
 with tempfile.TemporaryDirectory() as td:
     base=Path(td);service='okx-grid-solo';root=base/'solo';root.mkdir();(root/'state').mkdir()
-    cfg={'version':'0.7.22','instrument':'NEAR-USDT-SWAP'}
-    st={'version':'0.7.22','instrument':'NEAR-USDT-SWAP','schema_version':1}
+    cfg={'version':ENGINE_VERSION,'instrument':'NEAR-USDT-SWAP'}
+    st={'version':ENGINE_VERSION,'instrument':'NEAR-USDT-SWAP','schema_version':__import__('okx_version').STATE_SCHEMA}
     (root/'config.json').write_text(json.dumps(cfg))
     (root/'state/bot_state.json').write_text(json.dumps(st))
-    (root/'okx_bot.py').write_text('')
+    (root/'okx_bot.py').write_bytes((ROOT/'okx_bot.py').read_bytes())
     assert observers.supports_versionless(root,service,base)
-    st['version']='0.7.21';(root/'state/bot_state.json').write_text(json.dumps(st))
+    st['version']=ENGINE_VERSION+'.1';(root/'state/bot_state.json').write_text(json.dumps(st))
     assert not observers.supports_versionless(root,service,base)
-    st['version']='0.7.22';cfg['version']='0.7.25.1'
+    st['version']=ENGINE_VERSION;cfg['version']=ENGINE_VERSION+'.1'
     (root/'state/bot_state.json').write_text(json.dumps(st))
     (root/'config.json').write_text(json.dumps(cfg))
     assert not observers.supports_versionless(root,service,base)
-print('PASS observer ABI: 0.7.22 clean schema eligible; inconsistent/fake maintenance version rejected')
+print('PASS observer ABI: current version/schema eligible; mismatches rejected')
 
 with tempfile.TemporaryDirectory() as td:
     base=Path(td);registry=base/'.okxbot_registry.json';units=base/'systemd';units.mkdir()
@@ -203,21 +205,21 @@ print('PASS PANIC ALL dispatch: independent durable intents sent; skipped bot st
 # come from the PUBLISHED v0.7.27 release asset, not the candidate v0.7.28.
 # Independently computed from okx_grid_v0727_final.zip/okx_bot.py.
 import hashlib
-import okx_live_upgrade as upgrader
+from historical import single_transition_upgrader as upgrader
 assert upgrader.OLD_ENGINE_SHA256 == 'e0d66fc153a2a20d2b9c5df6e79915b73deb1cbd694eae1d153f305284b02717'
 assert upgrader.OLD_ENGINE_SHA256 != hashlib.sha256((ROOT/'okx_bot.py').read_bytes()).hexdigest()
-assert 'instance_check(bot,cfg[' in (ROOT/'okx_live_upgrade.py').read_text()
+assert 'instance_check(bot,cfg[' in (ROOT/'historical/single_transition_upgrader.py').read_text()
 print('PASS updater: pinned original v0.7.26 published engine hash; preflight verifies actual code before any stop')
 
-upgrade=ast.parse((ROOT/'okx_live_upgrade.py').read_text())
+upgrade=ast.parse((ROOT/'historical/single_transition_upgrader.py').read_text())
 assert any(isinstance(n,ast.FunctionDef) and n.name=='upgrade_bot' for n in upgrade.body)
-assert '--confirm-live-stop' in (ROOT/'okx_live_upgrade.py').read_text()
-assert '--sha256' in (ROOT/'okx_live_upgrade.py').read_text()
+assert '--confirm-live-stop' in (ROOT/'historical/single_transition_upgrader.py').read_text()
+assert '--sha256' in (ROOT/'historical/single_transition_upgrader.py').read_text()
 print('PASS updater: in-repo controlled single-instance installer, pinned package and explicit stop consent')
 # Exercise actual installer stage checksum and Telegram-only transactional install.
 # No systemctl or live filesystem access is permitted in this test.
 import zipfile,hashlib,stat
-import okx_live_upgrade as upgrader
+from historical import single_transition_upgrader as upgrader
 with tempfile.TemporaryDirectory() as td:
     temp=Path(td);pkg=temp/'candidate.zip';tg=temp/'telegram';tg.mkdir()
     import shutil as _copy_for_legacy, re as _re_for_legacy

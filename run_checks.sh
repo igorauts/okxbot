@@ -15,3 +15,7 @@ python3 -B tests/test_v0726.py
 python3 -B tests/test_v0727.py
 python3 -B tests/test_v0728.py
 python3 -B tests/test_v0729_maintenance.py
+python3 -B tests/test_refactor_contract.py
+python3 -B tests/test_compatibility_mixed.py
+python3 -B tests/test_rollout_guard.py
+python3 -B tests/test_final_release_guards.py

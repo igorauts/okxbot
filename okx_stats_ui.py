@@ -1,4 +1,4 @@
-"""v0.7.24 local, read-only, terminal statistics presentation.
+"""Local, read-only, terminal statistics presentation.
 
 All monetary amounts come from the fill-audited engine snapshot. Never infer
 profits from order prices, archived event counters or independent REST calls.

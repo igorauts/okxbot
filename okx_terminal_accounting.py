@@ -202,7 +202,7 @@ def _finalize_locked(engine, *, max_wait_seconds=0):
             snap=state.get('terminal_snapshot') or {}
             if mode=='RETIRED' and not snap.get('bid'):
                 raise ValueError('No frozen HARD BID; refuse current market substitution')
-            # For historical v0.7.6 PANIC we do NOT invent a shutdown BID: it
+            # For historical PANIC we do NOT invent a shutdown BID: it
             # cancels in the formula for realized closed positions. A positive
             # synthetic marker is used only to satisfy legacy stats calculation.
             bid=dec(snap['bid']) if snap.get('bid') else Decimal('1')

@@ -1,4 +1,5 @@
-"""Read-only systemd / engine / observer health for Telegram v0.7.22.
+from okx_telegram_wire import state_key
+"""Read-only systemd / engine / observer health for Telegram.
 
 Never restarts a service, writes bot state, or accesses the OKX exchange.
 Systemd journal cursors let a fast restart be observed between 5s polls.
@@ -63,7 +64,7 @@ def _action(row):
 
 
 def service_check(api, st, services, roots):
-    recs = st.setdefault('systemd_watch_v0722', {})
+    recs = st.setdefault(state_key('systemd_watch'), {})
     for name, unit in services.items():
         props = _show(unit)
         if props is None:
@@ -172,13 +173,14 @@ OBSERVER_CONFIRM_SEC = 60
 OBSERVER_INACTIVE_CONFIRM_SEC = 10
 RECOVERY_CONFIRM_SEC = 15
 RECOVERY_MIN_SAMPLES = 3
-_HEALTH_RULE = 'debounced-v0722-1'
+from okx_telegram_wire import HEALTH_RULE_WIRE_ID
+_HEALTH_RULE = HEALTH_RULE_WIRE_ID
 
 
 def _health_record(watches, key, now, invocation=None):
     rec = watches.get(key)
     if not isinstance(rec, dict) or rec.get('health_rule') != _HEALTH_RULE:
-        # Old v0.7.22 records (including a spurious active alert) cannot trigger
+        # Earlier health records (including a spurious active alert) cannot trigger
         # an immediate new alarm/recovery on upgrading this monitor.
         rec = {'health_rule': _HEALTH_RULE, 'fault': None, 'bad_since': None,
                'bad_count': 0, 'good_since': None, 'good_count': 0}
@@ -232,7 +234,7 @@ def _confirmed_recovery(rec, now):
 
 def engine_heartbeat_check(api, st, services, roots, now=None):
     now = time.time() if now is None else now
-    watches = st.setdefault('engine_heartbeat_v0722', {})
+    watches = st.setdefault(state_key('engine_heartbeat'), {})
     just_failed=[]
     just_recovered=[]
     for name, unit in services.items():
@@ -271,14 +273,14 @@ def engine_heartbeat_check(api, st, services, roots, now=None):
             just_recovered.append(name)
             rec.update({'fault': None, 'good_since': None, 'good_count': 0})
 
-    # Each fault remains independent in engine_heartbeat_v0722. Grouping is
+    # Each fault remains independent in engine_heartbeat. Grouping is
     # presentation only: a common incident stays open while ANY member is
     # unresolved, including one remaining after partial recovery. Never
     # interpret systemd stop / transient monitoring failures as recovery.
     affected = tuple(sorted(name for name in services
                             if isinstance(watches.get(name), dict)
                             and watches[name].get('fault') == 'heartbeat stale'))
-    correlated = st.setdefault('common_engine_stall_v0727', {})
+    correlated = st.setdefault(state_key('common_engine_stall'), {})
     old_members = set(correlated.get('members', [])) if correlated.get('active') else set()
     new_members = set(affected)
     # Bot discovery/registry loss is not evidence of recovery. Retain any
@@ -324,7 +326,7 @@ def engine_heartbeat_check(api, st, services, roots, now=None):
 
 def observers_check(api, st, services, roots, now=None):
     now = time.time() if now is None else now
-    watches = st.setdefault('observers_health_v0722', {})
+    watches = st.setdefault(state_key('observers_health'), {})
     for name, trade_unit in services.items():
         trade = _show(trade_unit)
         if not trade or trade.get('ActiveState') != 'active':
@@ -383,7 +385,7 @@ def panic_ack_check(api, st, services, roots):
     Engine can rewrite the same ACK with fresh timestamps every loop;
     updated_at/remaining_position must NOT become a new alert identity.
     """
-    notified=st.setdefault('panic_ack_alarms_v0725',{})
+    notified=st.setdefault(state_key('panic_ack_alarms'),{})
     for name in services:
         if name not in roots:continue
         path=Path(roots[name])/'state/control_ack.json'

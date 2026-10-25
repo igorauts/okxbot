@@ -7,6 +7,7 @@ from pathlib import Path
 import json
 import importlib.util
 import re
+import hashlib
 
 
 def check(root=None):
@@ -25,5 +26,9 @@ def check(root=None):
     assert isinstance(dependencies, list) and len(dependencies) == len(set(dependencies))
     assert all(isinstance(name, str) and re.fullmatch(r'[A-Za-z0-9_]+\.py', name)
                and (root/name).is_file() for name in dependencies)
-    assert (root/'okx_bot.py').is_file()
+    engine_path=root/'okx_bot.py'
+    assert engine_path.is_file() and not engine_path.is_symlink(), 'unsafe engine source'
+    digest=registered.get('sha256')
+    assert isinstance(digest,str) and re.fullmatch(r'[0-9a-f]{64}',digest), 'missing engine SHA256'
+    assert hashlib.sha256(engine_path.read_bytes()).hexdigest()==digest, 'engine digest mismatch'
     return True
