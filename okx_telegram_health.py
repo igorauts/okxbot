@@ -128,8 +128,14 @@ def service_check(api, st, services, roots):
                              control.get('mode') in ('HARD', 'PANIC'))
         now = time.time()
         pending = previous.setdefault('pending_starts', [])
+        # A terminal command or confirmed terminal ACK deliberately cannot
+        # produce RUNNING. In particular a PANIC-only restart must not be
+        # remembered as an unconfirmed RUN startup. Drop any start watches
+        # created before the PANIC/HARD command was observed as well.
+        if expected_terminal:
+            pending.clear()
         for kind, identity in transitions:
-            if kind == 'stop' and expected_terminal:
+            if expected_terminal:
                 continue
             if kind == 'stop':
                 one(api, st, f'systemd/stop/{name}/{identity}',

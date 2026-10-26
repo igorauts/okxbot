@@ -66,6 +66,40 @@ def build_pnl_ledger(*, D, STEP, A, RateLimitedError, allocated_market_fills,
         def total_all(self):
             with self.lock:return self.all_sum
 
+        def total_for_snapshot(self, st, archive):
+            """Verify exact CLOSED ledger entries belonging to one pinned snapshot.
+
+            PnL for cycles closed later is intentionally excluded. SQL contents
+            are queried atomically under the ledger lock; a missing or changed
+            cycle is a HARD financial-report error, never silently skipped.
+            """
+            indexed={}
+            for c in list(archive)+list(st.get('archived_cycles',[]))+list(st.get('cycles',{}).values()):
+                ident=str(c.get('cycleId') or c.get('ordId') or '')
+                if not ident:raise ValueError('Financial snapshot cycle missing identity')
+                indexed[ident]=c  # frozen trading state overrides archived duplicates
+            keys=[]
+            for c in indexed.values():
+                if c.get('state')!='CLOSED':continue
+                key=self.identity(c)
+                if not key:raise ValueError('Snapshot CLOSED cycle without PnL identity')
+                keys.append(key)
+            if len(keys)!=len(set(keys)):
+                raise ValueError('Duplicate snapshot CLOSED cycle PnL identity')
+            # Read a single consistent committed SQLite view. Avoid holding
+            # the in-memory PnL mutex while iterating thousands of historical
+            # cycles: the trading loop uses that mutex for the 5s DD sampler.
+            with self.lock,self._managed_conn() as db:
+                accounted={key:(kind,net) for key,kind,net in
+                           db.execute('SELECT id,kind,net FROM accounted')}
+            total=Decimal(0)
+            for key in keys:
+                row=accounted.get(key)
+                if not row or row[0]!='CLOSED':
+                    raise ValueError('Missing/mismatched CLOSED ledger entry for snapshot')
+                total+=D(row[1])
+            return total
+
         def recorded(self, cycle):
             key=self.identity(cycle)
             if not key:return False

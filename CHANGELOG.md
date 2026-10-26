@@ -1,3 +1,27 @@
+# v0.7.33 — LIVE-verified StatsWorker optimization and Telegram PANIC hotfix (2026-10-26)
+
+- Full-source final release incorporating 0.7.31 TP observability and MARKET SELL presentation, 0.7.32 consistent financial snapshots and attached TP failure handling, 0.7.33 CPU optimization, plus an independently deployed Telegram-only terminal startup health hotfix.
+- Preserve exact live engine `okx_bot.py` SHA256 `62202f16e683ef9a1ec91774f033af22d33b3fff2c6e3d4b86b7e86ded1efd97`. Financial calculations and Decimal PnL remain equivalent; full LIVE snapshot duration reduced from approximately two minutes under the preceding engine to 0.78–9.46 seconds over ten observed snapshots. Calculations remained fresh after upgrade with 7,700+ cycles and 12,500+ fills. This is sampled real-world evidence, not a latency SLO.
+- For confirmed attached TP failure `51006`, keep original TP price; virtual TP stays virtual until a free real-TP slot and acceptable price allow safe independent reduceOnly LIMIT placement. Account-wide SOFT latch for confirmed `51008`; unknown failure codes block new BUY and require investigation. Never infer a rejected attached TP from `51603` alone.
+- Unchanged grid strategy, FIFO, 150 ms MARKET grouping and account NET ownership safety.
+- Telegram `okx_telegram_health.py` hotfix: no false `STARTED ... RUN not confirmed` alarm after legitimate PANIC/HARD restart or terminal ACK. Trading engine unaffected.
+- Four live engines `zec0724`, `btc0721`, `near0721`, `wld0728` confirmed ACTIVE on `0.7.33` 2026-10-26. DOOD closed with PANIC SELL and archived, zero position and final exact trading PnL. Offline regressions including terminal startup health, financial snapshots, TP recovery and source-archive integrity passed. No destructive failure injection performed.
+- Publishing a GitHub release does not modify LIVE systemd services, trading state, positions or orders.
+
+## v0.7.32 — Financial snapshots and attached TP recovery (integrated)
+
+- Freeze state/cycle/quantity boundary before REST fill retrieval; verify a complete consistent ledger and retry if incomplete.
+- Handle attached TP failures without changing price or exceeding the configured real SELL TP limit. Hold BUY when uncertainty persists; do not duplicate a SELL.
+
+## v0.7.31 — TP Observability and MARKET SELL message layout (integrated)
+
+
+- Record first locally observed public-WS BID crossing for each virtual TP before subsequent REST reconciliation; the crossing remains non-authoritative for trading. Missing WS timestamps are not replaced by invented crossing times.
+- Diagnostics: BID crossing → collection, collection → durable MARKET intent, intent → REST handoff, additional cycles collected during the 150ms window and after the window. Original FIFO timing remains available independently; after-window time is not falsely labelled as exclusively FIFO.
+- Telegram: `🟢/🔴 Market SELL qty COIN (cycles) @confirmed VWAP`, verified net `к профиту (actual/positive_plan %)`, execution deviation `(+/- % relative to positive plan)`, original Fill/ACK/Full and an optional `⏱ BID TP→Intent` observation.
+- Financial amounts are unchanged. Confirmed SELL VWAP is weighted from accounted exchange fills. The added measurements are diagnostic only: MARKET strategy, REST submission, intent durability, FIFO/quota, current 150ms coalescing, state schema and PANIC/HARD are unchanged.
+- Unpublished candidate: tests offline, LIVE rollout requires separate approval, individual backup/GET-only audit and verified release packaging. No trading services changed by preparing this candidate.
+
 ## v0.7.30 — Compatible Clean Refactor (LIVE-verified, 2026-10-25)
 
 - Genuine trading-engine source identity bump with immutable SHA256 entry in `engine_manifest.json`; preserved trading decisions and account-level FIFO quotas.

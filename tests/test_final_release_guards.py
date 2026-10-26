@@ -22,6 +22,25 @@ class ReleaseSafety(unittest.TestCase):
         ]:
             with self.subTest(rc=rc,output=output):
                 self.assertFalse(U.audit_output_complete(rc,output))
+    def test_manager_mode_prevents_shared_install_before_mutation(self):
+        # Explicit ZIP metadata contract: a normal readable Python file is
+        # insufficient for the system manager launcher, which needs 0755.
+        import hashlib
+        with tempfile.TemporaryDirectory() as td:
+            stage=Path(td)/'stage';stage.mkdir()
+            manager=stage/'okxbot.py';manager.write_text('#!/usr/bin/env python3\n')
+            manager.chmod(0o755)
+            for mode in (0o644, 0o755):
+                pkg=Path(td)/'pkg.zip'
+                with zipfile.ZipFile(pkg,'w') as z:
+                    zi=zipfile.ZipInfo('okxbot.py')
+                    zi.create_system=3
+                    zi.external_attr=(stat.S_IFREG|mode)<<16
+                    z.writestr(zi,manager.read_bytes())
+                with zipfile.ZipFile(pkg) as z:
+                    m=z.getinfo('okxbot.py')
+                    allowed=m.create_system==3 and (m.external_attr>>16)&0o777==0o755
+                    self.assertEqual(allowed,mode==0o755)
     def test_zip_member_types_must_be_regular(self):
         with tempfile.TemporaryDirectory() as td:
             p=Path(td)/'z.zip'

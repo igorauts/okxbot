@@ -117,6 +117,13 @@ def preflight(args):
     with ZipFile(pkg) as archive:
         names=archive.namelist()
         need(len(set(names))==len(names),'Duplicate entries in ZIP')
+        need('okxbot.py' in names, 'Manager missing from package')
+        manager = archive.getinfo('okxbot.py')
+        need(manager.create_system == 3 and
+             (manager.external_attr >> 16) & 0o777 == 0o755,
+             'Manager ZIP permission must be 0755')
+        need(os.access(stage/'okxbot.py',os.X_OK),
+             'Manager staged file is not executable')
         for item in names:
             need('..' not in Path(item).parts and not item.startswith('/'),'Unsafe ZIP member')
             target=stage/item

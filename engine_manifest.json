@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "current_version": "0.7.30",
+  "current_version": "0.7.33",
   "engines": {
     "0.7.28": {
       "file": "okx_bot.py",
@@ -37,6 +37,63 @@
         "okx_latency_rollup.py"
       ],
       "sha256": "6a7608536ee8788d8f67fb2baeb826146b28b0e4df8bf54796a9b42037f40866"
+    },
+    "0.7.31": {
+      "file": "okx_bot.py",
+      "dependencies": [
+        "okx_terminal_accounting.py",
+        "okx_latency.py",
+        "okx_positions_fifo.py",
+        "okx_fill_singleflight.py",
+        "okx_emergency_gate.py",
+        "okx_version.py",
+        "okx_state.py",
+        "okx_contracts.py",
+        "okx_accounting.py",
+        "okx_api.py",
+        "okx_strategy.py",
+        "okx_latency_rollup.py",
+        "okx_tp_telemetry.py"
+      ],
+      "sha256": "fa20dbdab9279fca41f654e0feb960d674e15f331c2a8d0e024d5bfaa3b11fe8"
+    },
+    "0.7.32": {
+      "file": "okx_bot.py",
+      "dependencies": [
+        "okx_terminal_accounting.py",
+        "okx_latency.py",
+        "okx_positions_fifo.py",
+        "okx_fill_singleflight.py",
+        "okx_emergency_gate.py",
+        "okx_version.py",
+        "okx_state.py",
+        "okx_contracts.py",
+        "okx_accounting.py",
+        "okx_api.py",
+        "okx_strategy.py",
+        "okx_latency_rollup.py",
+        "okx_tp_telemetry.py"
+      ],
+      "sha256": "1f35274f4f8570f88e47c5f498172a1839b8c62e9295b5823f59f8a26ae71ea2"
+    },
+    "0.7.33": {
+      "file": "okx_bot.py",
+      "dependencies": [
+        "okx_terminal_accounting.py",
+        "okx_latency.py",
+        "okx_positions_fifo.py",
+        "okx_fill_singleflight.py",
+        "okx_emergency_gate.py",
+        "okx_version.py",
+        "okx_state.py",
+        "okx_contracts.py",
+        "okx_accounting.py",
+        "okx_api.py",
+        "okx_strategy.py",
+        "okx_latency_rollup.py",
+        "okx_tp_telemetry.py"
+      ],
+      "sha256": "62202f16e683ef9a1ec91774f033af22d33b3fff2c6e3d4b86b7e86ded1efd97"
     }
   }
 }

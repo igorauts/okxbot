@@ -37,12 +37,14 @@ class LatencyJournal:
                 'positions_gate_recovery',
                 'buy_post', 'buy_batch', 'ws_drain', 'loop_pass',
                 'fills_history_shared_wait', 'pnl_submit',
-                'drawdown_submit'):
+                'drawdown_submit',
+                'tp_to_intent', 'tp_cross_to_collect',
+                'tp_collect_to_intent', 'tp_intent_to_submit'):
                 return
             permitted = {'route', 'method', 'passes', 'mismatches', 'outcome',
                          'count', 'placed', 'attempted', 'status', 'partial',
                          'resolved', 'active_buys', 'target_buys', 'dropped',
-                         'reason','attempt'}
+                         'reason','attempt','source','cycles','added'}
             safe = {k: v for k,v in fields.items()
                     if k in permitted and (v is None or type(v) in (str, int, float, bool))}
             if 'route' in safe:

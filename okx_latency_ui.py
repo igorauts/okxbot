@@ -79,7 +79,9 @@ def report(root):
                   'Фаза                 N        P50<=      P95<=      P99<=      MAX'])
     for phase in ('loop_pass','position_reconcile','http','rest_gate','positions_gate',
                   'positions_gate_fifo_wait','positions_gate_quota_wait',
-                  'positions_gate_lock_wait','buy_post','ws_drain'):
+                  'positions_gate_lock_wait','buy_post','ws_drain',
+                  'tp_to_intent','tp_cross_to_collect','tp_collect_to_intent',
+                  'tp_intent_to_submit'):
         d=distribution(history,phase,now.timestamp())
         fmt=lambda ms: f'{ms:.2f}ms' if ms is not None else 'н/д'
         lines.append(f'{phase:<22} {d["n"]:<8} {fmt(d["p50_upper_ms"]):<10} '

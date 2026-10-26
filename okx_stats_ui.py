@@ -130,6 +130,17 @@ def format_stats(root, instrument, payload, *, bot_active=False,
         active=False
     else:
         active=bool(bot_active and heartbeat_fresh)
+    # A live process can be in RUN while new BUY are blocked by a
+    # reconciliation/failure hold. RUNNING service != trading available.
+    trade_hold=None
+    try:
+        ack=json.loads((root/'state'/'control_ack.json').read_text(encoding='utf-8'))
+        if ack.get('mode')=='RUN' and ack.get('phase') in (
+                'BUY_HOLD_TP_FAILURE','BUY_HOLD_RECONCILIATION'):
+            trade_hold=ack['phase']
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
+    if trade_hold:active=False
     coin=instrument.split('-',1)[0]
     tick=dec(config.get('tick_size'))
     digits=max(2,-tick.normalize().as_tuple().exponent) if tick and tick>0 else 8
@@ -151,7 +162,8 @@ def format_stats(root, instrument, payload, *, bot_active=False,
         # ALL real+virtual while running mixed-package rollout.
         waiting='н/д'
     lines=[
-        ('🟢 Работает: ' if active else '⚪ Работает (RUN не подтверждён): ')
+        (('🔴 BUY заблокированы ('+trade_hold+'): ') if trade_hold else
+         ('🟢 Работает: ' if active else '⚪ Работает (RUN не подтверждён): '))
             +f'{run_time(elapsed)}, uptime {uptime}',
         'Запущен: '+at_utc(started),
         '',

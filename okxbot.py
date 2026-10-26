@@ -1129,6 +1129,11 @@ def stats_text(name):
         age = max(0, int(time.time() - ts))
         freshness = 'АКТУАЛЬНА' if age <= _STATS_MAX_AGE else 'УСТАРЕЛА'
         status = 'работает' if service_running(unit) else 'остановлен'
+        if status=='работает':
+            ack=read_ack(entry)
+            if ack.get('mode')=='RUN' and ack.get('phase') in (
+                    'BUY_HOLD_TP_FAILURE','BUY_HOLD_RECONCILIATION'):
+                status='BUY заблокированы ('+str(ack['phase'])+')'
         return header + f'Снимок: {freshness} | {age}с назад | бот {status}\n\n' + report
     report = read_legacy_journal(unit, instrument)
     if report is None:

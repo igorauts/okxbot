@@ -26,7 +26,8 @@ EVENT_ALARMS = {
     'TP_CANCEL_REJECTED','PARTIAL_EXIT_MARKET_REJECTED',
     'BUY_PAUSED_UNPLACEABLE_TP', 'BOT_TERMINAL_STATS_PENDING',
     'EMERGENCY_POSITIONS_GATE_BLOCKED', 'EMERGENCY_POSITIONS_READ',
-    'COVERAGE_RECOVERY_WAIT',
+    'COVERAGE_RECOVERY_WAIT','ATTACHED_TP_REJECTED',
+    'TP_PRICE_LIMIT_UNAVAILABLE','TP_FAILURE_BUY_HOLD',
     'PANIC_MARKET_REJECTED','PANIC_RETRY_EXHAUSTED',
     'EMERGENCY_POSITION_UNRESOLVED','EMERGENCY_BUY_IDENTITY_CONFLICT',
 }
@@ -189,9 +190,16 @@ def market_event(st,name,obj):
     if typ=='AGG_MARKET_INTENT':
         item['intent_at']=ts
         item['cycles']=obj.get('cycles')
+        for field in ('tp_to_intent_ms','cross_to_collect_ms',
+                      'collect_to_intent_ms','additional_cycles','cross_source',
+                      'added_during_window','added_after_window','added_unclassified'):
+            if field in obj:
+                item[field]=obj[field]
     elif typ=='AGG_MARKET_ACK':
         item['ack_at']=ts
         item['order_id']=obj.get('ordId')
+        if 'intent_to_submit_ms' in obj:
+            item['intent_to_submit_ms']=obj['intent_to_submit_ms']
     elif typ=='AGG_MARKET_TERMINAL':
         item['terminal_at']=ts
         item['terminal']=obj
@@ -224,6 +232,9 @@ def market_process(api,st,names):
             continue
         root=names[name]
         times={}
+        value=item.get('tp_to_intent_ms')
+        if isinstance(value,(float,int)) and 0<=value<=3600000:
+            times['tp_to_intent_ms']=value
         intent=item.get('intent_at')
         ack=item.get('ack_at')
         done=item.get('terminal_at')

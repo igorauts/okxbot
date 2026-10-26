@@ -31,6 +31,7 @@
     "commit_completed": "3decbdae6dc1ec7920aa04d9007e04e4b4306ad248f0e4a85e82957eba81e10c",
     "ingest_history": "fe492cb2c2a1f7b5a2a5e07a40d3792960facd59f72c29062790d44134a4d953",
     "work": "21511659ba79a3f0cb28968c1d8d0a0494c6b8916825fa808b26f70bb108798f",
-    "status": "c829d48aeba9a7df719a771811ba86d22bb15d8d5bf1c1cb284b6c17dc292e9a"
+    "status": "c829d48aeba9a7df719a771811ba86d22bb15d8d5bf1c1cb284b6c17dc292e9a",
+    "total_for_snapshot": "09066be2141d5456e03dc26aa0412ed513334e0c88b21a35ed10eb0e09b01be6"
   }
 }

@@ -810,9 +810,16 @@ def archived_rows():
         return [json.loads(row[0]) for row in db.execute('SELECT data FROM cycles')]
 
 
-def all_stat_cycles(st):
+def all_stat_cycles(st, *, snapshot_archive=None):
+    """Freeze archive membership for financial reports while trading continues.
+
+    Default live callers retain the current archive view. A stats attempt
+    supplies the archive rows captured at its beginning; later compaction
+    must not change the financial population under calculation.
+    """
+    archive=archived_rows() if snapshot_archive is None else snapshot_archive
     present={}
-    for c in (archived_rows()+list(st.get('archived_cycles',[]))+
+    for c in (list(archive)+list(st.get('archived_cycles',[]))+
               list(st.get('cycles',{}).values())):
         ident=str(c.get('cycleId') or c.get('ordId') or '')
         if not ident:raise ValueError('Archived cycle missing identity')
@@ -1446,14 +1453,94 @@ def verify_existing(st,pending):
         if o.get('ordId') not in known and o.get('clOrdId') not in known_cls:
             die('Unrecognized pending OKX order: '+str(o.get('ordId')))
 
-def parent_tp_failure(c):
+def parent_tp_failure(c, rec):
+    """Authoritative *failed* attached TP, matched to exact filled parent.
+
+    Absence of an order alone is never a failure proof. Parent failCode is
+    authoritative only for the matching attached client ID and original TP
+    parameters; ambiguity or inconsistency stays fail-closed.
+    """
+    if rec.get('source')!='attached' or rec.get('clOrdId')!=c.get('tpClOrdId'):
+        die('Attached TP identity mismatch: '+str(c.get('cycleId')))
     parent=A.order(oid=c['ordId'])
-    if not parent:die('Parent BUY not queryable: '+str(c['ordId']))
-    if parent.get('state')!='filled':return ''
-    for a in parent.get('attachAlgoOrds',[]):
-        if a.get('attachAlgoClOrdId')==c.get('tpClOrdId'):
-            return str(a.get('failCode') or '')
-    return ''
+    if parent is None:
+        raise ExchangeUnresolved('Parent BUY unknown; attached TP still reserved')
+    if (parent.get('instId')!=INST or parent.get('ordId')!=c.get('ordId')
+            or parent.get('side')!='buy' or parent.get('clOrdId')!=c.get('clOrdId')):
+        die('Attached TP parent BUY identity mismatch')
+    if parent.get('state') not in ('filled','canceled','mmp_canceled'):
+        # A canceled partial BUY can also have an attached TP for its fill.
+        return None
+    try:
+        parent_fill=D(parent.get('accFillSz'))
+        cycle_fill=D(c.get('filledBuy'))
+    except (TypeError,ValueError,ArithmeticError) as exc:
+        raise ExchangeUnresolved('Invalid parent BUY fill information') from exc
+    if parent_fill!=cycle_fill or cycle_fill<=0:
+        raise ExchangeUnresolved('Attached TP parent fill not reconciled yet')
+    matches=[a for a in parent.get('attachAlgoOrds',[]) if
+             a.get('attachAlgoClOrdId')==rec['clOrdId']]
+    if len(matches)>1:die('Duplicate attached TP identity on parent')
+    if not matches:return None
+    a=matches[0]
+    if a.get('tpOrdKind') not in ('limit',None,'') or D(a.get('tpOrdPx'))!=D(c['tpPx']):
+        die('Attached TP identity/target does not match original BUY')
+    code=str(a.get('failCode') or '')
+    if code in ('','0'):return None
+    return {'code':code,'reason':str(a.get('failReason') or '')[:180]}
+
+
+def record_attached_tp_failure(st,c,rec,failure):
+    """Complete only an exchange-PROVEN failed attachment, never an unknown POST.
+
+    No replacement SELL is sent here. Normal coverage + cap-based virtual TP
+    maintenance decides later; new BUY is blocked for unclassified failures.
+    """
+    code=failure['code']
+    if not code or code=='0' or rec.get('phase') not in ('PENDING','PLACING'):
+        die('Invalid attached TP failure transition')
+    if margin_rejection(code):
+        # The account-wide SOFT latch must be fsynced BEFORE a local FAILED
+        # transition, or a crash between the two would lose the 51008 alarm.
+        trip_account_soft_stop(code,failure.get('reason',''),'ATTACHED_TP')
+    rec['phase']='FAILED'
+    rec['failCode']=code
+    rec['failReason']=failure.get('reason','')
+    rec['failedAt']=time.time()
+    if code not in ('51006','51165') and not margin_rejection(code):
+        c['tpFailureManualReview']=code
+    save(st)
+    journal_tp('ATTACHED_TP_REJECTED',c,clOrdId=rec['clOrdId'],
+               code=code,message=rec['failReason'])
+    log('ATTACHED_TP_REJECTED',cycleId=c['cycleId'],clOrdId=rec['clOrdId'],
+        code=code,reason=rec['failReason'],
+        severity='CRITICAL' if (margin_rejection(code) or c.get('tpFailureManualReview')) else 'WARNING',
+        message='Failed exchange attachment; original TP becomes virtual. No duplicate SELL.')
+
+
+def tp_price_limit_allows(c):
+    """Never move TP price: if below current OKX sellLmt, keep it virtual.
+
+    A failed or incomplete GET is not permission to place a LIMIT SELL.
+    The actual SELL POST still must handle a moving limit / rejection.
+    """
+    rows=A.req('GET','/api/v5/public/price-limit',{'instId':INST})
+    if (not isinstance(rows,list) or len(rows)!=1 or not isinstance(rows[0],dict)
+            or rows[0].get('instId') not in (None,INST)):
+        raise ExchangeTemporary('Missing/ambiguous instrument price limit')
+    try:
+        limit=D(rows[0].get('sellLmt'))
+    except (TypeError,ValueError,ArithmeticError) as exc:
+        raise ExchangeTemporary('Invalid OKX sell price limit') from exc
+    if not limit.is_finite() or limit<=0:
+        raise ExchangeTemporary('Invalid OKX min sell price')
+    return D(c['tpPx'])>=limit, limit
+
+
+def tp_failure_buy_hold(st):
+    return [(c.get('cycleId'),str(c.get('tpFailureManualReview')))
+            for c in st['cycles'].values() if c.get('tpFailureManualReview')
+            and c.get('state') not in ('CLOSED','CANCELED','EXITED')]
 
 def tp_record_update(st, c, rec, order):
     if order.get('instId')!=INST or order.get('side')!='sell':
@@ -1585,14 +1672,16 @@ def persist_crossed_virtual_tps(st,market):
     Detecting the peak is not trading permission: the normal coverage and
     exchange-side SELL reconciliation still gate a MARKET order.
     """
-    seen=market.take_crossed_virtual_ids()
+    # WS records the FIRST local BID crossing before REST reconciliation.
+    # The timestamps are diagnostic only; crossing remains no trade permission.
+    seen=market.take_crossed_virtual_stamps()
     changed=False
     for c in st['cycles'].values():
         if c.get('state') == 'VIRTUAL_TP':
             if (c['cycleId'] in seen and not c.get('virtualTpCrossed')
                     and not c.get('partial_cleanup')):
                 c['virtualTpCrossed']=True
-                c['virtualTpCrossedAt']=time.time()
+                c['virtualTpCrossedAt']=seen[c['cycleId']]
                 changed=True
         else:
             # New periods of virtual exposure must not inherit old signals
@@ -1621,7 +1710,8 @@ def virtual_escape(st,bid,actual,pending,mode):
     collect=st.get('escape_collection')
     if not collect:
         if not candidates:return 'NONE'
-        st['escape_collection']={'startedAt':now,'cycles':[c['cycleId'] for c in candidates]}
+        st['escape_collection']={'startedAt':now,'cycles':[c['cycleId'] for c in candidates],
+                                 'initialCycleIds':[c['cycleId'] for c in candidates]}
         save(st)
         log('AGG_ESCAPE_COLLECT',cycles=len(candidates),bid=str(bid))
         return 'WAIT'
@@ -1650,13 +1740,36 @@ def virtual_escape(st,bid,actual,pending,mode):
             'aggregatePlan':plan,'aggregateFilledTotal':'0','placedAt':now})
         c['state']='TP_WAIT'
     save(st)  # fsync all parent links + intent BEFORE the network POST
-    log('AGG_MARKET_INTENT',clOrdId=cid,cycles=len(plan),qty=str(qty))
+    # Observe intent AFTER it has been durably saved, never before fsync.
+    try:
+        from okx_tp_telemetry import intent_timing
+        tp_timing=intent_timing(wanted,collect,time.time(),
+                                window_seconds=ESCAPE_COALESCE_SEC)
+    except Exception:
+        tp_timing={}  # Optional diagnostics must not prevent a valid exit.
+    # The durable intent log keeps its original fail-closed I/O semantics.
+    log('AGG_MARKET_INTENT',clOrdId=cid,cycles=len(plan),qty=str(qty),
+        **tp_timing)
+    intent_logged_ns=time.perf_counter_ns()
     body={'instId':INST,'tdMode':'cross','side':'sell','posSide':'net',
           'reduceOnly':True,'ordType':'market','sz':str(qty),'clOrdId':cid}
+    # Precise boundary of transport handoff, before any HTTP retry/gate.
+    submit_start=time.perf_counter_ns()
+    intent_to_submit_ms=round((submit_start-intent_logged_ns)/1_000_000,3)
     try:
         rows=A.req('POST','/api/v5/trade/order',body=body,exp_time_ms=exp)
     except OrderExpiredBeforeSend:
         rows=[{'sCode':'LOCAL_EXPIRED','clOrdId':cid,'ordId':''}]
+    finally:
+        # Even profiling an order must not delay its dispatch. Journal after
+        # the HTTP submission attempt (success or uncertain outcome).
+        for metric,phase in (('tp_to_intent_ms','tp_to_intent'),
+                             ('cross_to_collect_ms','tp_cross_to_collect'),
+                             ('collect_to_intent_ms','tp_collect_to_intent')):
+            if metric in tp_timing:
+                LATENCY.record(phase,tp_timing[metric],source=tp_timing.get('cross_source'),
+                               cycles=len(plan),added=tp_timing.get('additional_cycles',0))
+        LATENCY.record('tp_intent_to_submit',intent_to_submit_ms,cycles=len(plan))
     if len(rows)!=1:raise ExchangeUnresolved('Ambiguous aggregate MARKET response')
     result=rows[0]
     if result.get('sCode')!='0':
@@ -1678,7 +1791,8 @@ def virtual_escape(st,bid,actual,pending,mode):
     group['ordId']=str(result['ordId'])
     for c in wanted:tp_records(c)[-1]['ordId']=group['ordId']
     save(st)
-    log('AGG_MARKET_ACK',ordId=group['ordId'],clOrdId=cid,qty=str(qty))
+    log('AGG_MARKET_ACK',ordId=group['ordId'],clOrdId=cid,qty=str(qty),
+        intent_to_submit_ms=intent_to_submit_ms)
     return 'ACTION'
 
 
@@ -1812,14 +1926,16 @@ def track(st,pending):
             if o is None:o=bycid.get(rec['clOrdId'])
             if o is None:
                 o=A.order(oid=rec['ordId']) if rec.get('ordId') else A.order(cid=rec['clOrdId'])
-            if o is None and rec['phase'] in ('PENDING','PLACING'):
-                # Old 51165 TP failures are authoritative proof that no TP was placed.
-                if rec.get('source')=='attached' and parent_tp_failure(c)=='51165':
-                    rec['phase']='FAILED';rec['failCode']='51165';save(st)
-                    journal_tp('ATTACHED_TP_FAIL_51165',c,clOrdId=rec['clOrdId'])
-                    continue
             if o is None and rec['phase'] in ('PENDING','PLACING','CANCELING'):
+                # A historical match is stronger than a bare 51603 response.
                 o=paged_order(rec['clOrdId'])
+            if o is None and rec.get('source')=='attached' and rec['phase'] in ('PENDING','PLACING'):
+                # A confirmed failCode (including 51006) proves no attached TP
+                # exists. Never resolve on absence/timeout alone.
+                failure=parent_tp_failure(c,rec)
+                if failure:
+                    record_attached_tp_failure(st,c,rec,failure)
+                    continue
             if (o is None and rec.get('source')=='recovery' and rec['phase']=='PLACING'
                 and post_absence_confirmed(rec,'sell',st)):
                 rec['phase']='FAILED';rec['failCode']='EXPIRED_ABSENT'
@@ -1834,9 +1950,6 @@ def track(st,pending):
                         rec['lastWaitNotice']=time.time();save(st)
                         log('KNOWN_TP_UNRESOLVED',cycleId=c['cycleId'],
                             clOrdId=rec['clOrdId'],message='Missing terminal status; SELL still reserved')
-                    continue
-                if rec.get('source')=='attached' and parent_tp_failure(c)=='51165':
-                    rec['phase']='FAILED';rec['failCode']='51165';save(st)
                     continue
                 if rec['phase']=='PLACING' and time.time()-rec.get('placedAt',0)>60:
                     if time.time()-float(rec.get('lastWaitNotice',0))>=60:
@@ -1950,6 +2063,27 @@ def place_virtual_tp(st,c):
         return False
     # Never exceed position coverage or exchange cap, even during surge.
     if len(real_tp_active(st))>=REAL_TP_TARGET:
+        return False
+    if c.get('tpFailureManualReview'):
+        # An unknown attachment rejection requires operator review first.
+        return False
+    try:
+        allowed,minimum_sell=tp_price_limit_allows(c)
+    except (ExchangeTemporary, ExchangeUnresolved, RateLimitedError) as exc:
+        c['tpRestoreRetryAt']=time.time()+30
+        save(st)
+        log('TP_PRICE_LIMIT_UNAVAILABLE',cycleId=c['cycleId'],
+            error=type(exc).__name__,message='Virtual TP retained; no SELL submitted')
+        return False
+    if not allowed:
+        # Preserve strategic TP EXACTLY. No pxAmendType, no ceil-to-limit.
+        c['tpRestoreRetryAt']=time.time()+30
+        save(st)
+        if time.time()-float(c.get('tpLimitLastNotice',0))>=300:
+            c['tpLimitLastNotice']=time.time();save(st)
+            log('TP_PRICE_LIMIT_WAIT',cycleId=c['cycleId'],
+                tpPx=c['tpPx'],sellLmt=str(minimum_sell),
+                message='TP remains virtual; original price never amended')
         return False
     cid=newid('T')
     stamp=time.time();expiry=new_request_deadline_ms()
@@ -2168,12 +2302,24 @@ def maintain_virtual_tp(st,pending,position,bid=None,tp_buffer=None):
     # Do not cancel a live protective TP to make room for a rejected
     # virtual SELL that is still in its cooldown window.
     virtual=[(key,c) for key,c in virtual
-             if time.time()>=float(c.get('tpRestoreRetryAt',0))]
+             if not c.get('tpFailureManualReview')
+             and time.time()>=float(c.get('tpRestoreRetryAt',0))]
     if not virtual:return 'NONE'
     active=real_tp_active(st)
     if active and real>=REAL_TP_TARGET:
         farthest=max(active,key=lambda y:D(y[1]['tpPx']))
-        if D(virtual[0][1]['tpPx'])<D(farthest[1]['tpPx']):
+        if (not virtual[0][1].get('tpFailureManualReview') and
+            D(virtual[0][1]['tpPx'])<D(farthest[1]['tpPx'])):
+            # Never cancel an existing real TP to make room for a virtual
+            # target which OKX currently forbids as a LIMIT SELL.
+            try:
+                allowed,minimum=tp_price_limit_allows(virtual[0][1])
+            except (ExchangeTemporary,ExchangeUnresolved,RateLimitedError):
+                return 'NONE'
+            if not allowed:
+                virtual[0][1]['tpRestoreRetryAt']=time.time()+30
+                save(st)
+                return 'NONE'
             cancel_tp(st,farthest[1],farthest[2]);return 'CANCEL'
         return 'NONE'
     if real<REAL_TP_TARGET:
@@ -2183,8 +2329,8 @@ def maintain_virtual_tp(st,pending,position,bid=None,tp_buffer=None):
         attempted=False
         for _,c in virtual[:n]:
             if len(real_tp_active(st))>=REAL_TP_TARGET:break
-            attempted=True
-            place_virtual_tp(st,c)
+            placed=place_virtual_tp(st,c)
+            attempted=attempted or bool(placed)
         return 'RESTORE' if attempted else 'NONE'
     return 'NONE'
 
@@ -2332,7 +2478,7 @@ class PublicBidWatcher(threading.Thread):
         # WS remembers every crossed virtual TP even if BID retraces before
         # the main REST loop becomes runnable. Only the main thread persists it.
         self._virtual_targets={}
-        self._virtual_crossed=set()
+        self._virtual_crossed={}  # cycle_id -> first local BID observation epoch
         self._lock=threading.Lock()
         self._bid=None
         self._updated=0.0
@@ -2397,10 +2543,12 @@ class PublicBidWatcher(threading.Thread):
                     except Exception: pass
 
     def _capture_crossings(self,bid):
-        # Caller holds _lock. A fast peak must not be lost when BID retreats.
+        # Caller holds _lock. Record FIRST local observation, even if BID
+        # retraces before the main thread completes REST reconciliation.
+        observed_at=time.time()
         for cycle_id,tp in self._virtual_targets.items():
             if bid >= tp:
-                self._virtual_crossed.add(cycle_id)
+                self._virtual_crossed.setdefault(cycle_id,observed_at)
 
     def set_virtual_targets(self,targets):
         # Published by main thread only from reconciled virtual cycles.
@@ -2410,11 +2558,15 @@ class PublicBidWatcher(threading.Thread):
                 and time.monotonic()-self._updated<=3):
                 self._capture_crossings(self._bid)
 
-    def take_crossed_virtual_ids(self):
+    def take_crossed_virtual_stamps(self):
         with self._lock:
-            found=set(self._virtual_crossed)
+            found=dict(self._virtual_crossed)
             self._virtual_crossed.clear()
             return found
+
+    def take_crossed_virtual_ids(self):
+        # Legacy diagnostic helper, not used by the trading decision path.
+        return set(self.take_crossed_virtual_stamps())
 
     def set_grid_reference(self,top):
         with self._lock:self._grid_ref=top
@@ -2644,13 +2796,13 @@ def safe_tp_during_buy_wait(st,pending,actual):
         return 'TP_LIMIT_RESERVED'
     virtuals=sorted(((key,c) for key,c in virtual_cycles(st)
                      if not c.get('partial_cleanup')
+                     and not c.get('tpFailureManualReview')
                      and tp_quantity_placeable(remaining_tp(c))
                      and time.time()>=float(c.get('tpRestoreRetryAt',0))),
                     key=lambda item:D(item[1]['tpPx']))
     if not virtuals:return 'NONE'
     # Account exposure already balanced, and every unknown SELL volume is reserved.
-    place_virtual_tp(st,virtuals[0][1])
-    return 'RESTORE'
+    return 'RESTORE' if place_virtual_tp(st,virtuals[0][1]) else 'NONE'
 
 
 def coverage_hold_delay(attempts):
@@ -2786,7 +2938,19 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             elif mode=='PAUSE':
                 control_ack(mode,'PAUSED')
             else:
-                control_ack(mode,'RUNNING')
+                holds=tp_failure_buy_hold(st)
+                if holds:
+                    control_ack(mode,'BUY_HOLD_TP_FAILURE',reason='UNCLASSIFIED_ATTACHED_TP',
+                                cycles=len(holds))
+                    # Event deduplicated by one timestamp per incident.
+                    if time.time()-float(st.get('tpManualHoldWarnAt',0))>=600:
+                        st['tpManualHoldWarnAt']=time.time();save(st)
+                        log('TP_FAILURE_BUY_HOLD',reason='UNCLASSIFIED_ATTACHED_TP',
+                            cycles=len(holds),code=holds[0][1],severity='CRITICAL')
+                elif not all_resolved and sync_since is not None and time.monotonic()-sync_since>=120:
+                    control_ack(mode,'BUY_HOLD_RECONCILIATION',seconds=120)
+                else:
+                    control_ack(mode,'RUNNING')
             if not all_resolved:
                 buy_cancel_count=sum(c['state']=='CANCELING' for c in st['cycles'].values())
                 tp_cancel_count=sum(r.get('phase')=='CANCELING'
@@ -2864,6 +3028,10 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             if tp_action!='NONE':
                 watcher.wake.wait(0.10 if tp_action=='CANCEL' else 0.15)
                 watcher.wake.clear()
+                continue
+            if mode=='RUN' and tp_failure_buy_hold(st):
+                watcher.private_wake.wait(0.5)
+                watcher.private_wake.clear()
                 continue
             waiting=bool(UPPER and bid>UPPER)
             if waiting and last_sync_kind!='UPPER':
@@ -3134,14 +3302,14 @@ def stats_amount(x, digits=6):
     return f'${x:,.{digits}f}'
 
 
-def full_stats_snapshot(state, fills, bid, contract_value, *, include_durable_archive=True):
+def full_stats_snapshot(state, fills, bid, contract_value, *, include_durable_archive=True, snapshot_archive=None):
     """Pure calculation over authoritative fill rows.
 
     Financial statistics are complete only if *every* expected BUY/TP fill
     for every tracked cycle is present. Partial history is NEVER represented
     as full lifetime accounting.
     """
-    cycles=(all_stat_cycles(state) if include_durable_archive else
+    cycles=(all_stat_cycles(state,snapshot_archive=snapshot_archive) if include_durable_archive else
             list(state.get('cycles',{}).values())+list(state.get('archived_cycles',[])))
     grouped={}
     # idempotent even if API pagination boundaries overlap
@@ -3219,14 +3387,18 @@ def full_stats_snapshot(state, fills, bid, contract_value, *, include_durable_ar
         if f['execType']=='M': maker_volume+=qty*contract_value*px;maker_fee+=fee
         elif f['execType']=='T': taker_volume+=qty*contract_value*px;taker_fee+=fee
 
+    # Build immutable fill lookup ONCE for this verified snapshot. Previously
+    # rebuilt this entire map inside *every* cycle (cycles * fills), which
+    # consumed a full CPU core on long-lived bots without improving safety.
+    fill_by_id={}
+    for f in unique_fills:
+        fill_by_id.setdefault(str(f['ordId']),[]).append(f)
     for c in cycles:
         b=grouped.get(str(c.get('ordId') or ''),None)
         legs=[r for r in c.get('tpOrders',[]) if D(r.get('filled'))>0]
         if not legs and c.get('tpOrdId'):
             legs=[{'ordId':c['tpOrdId'],'filled':c.get('filledTP','0')}]
         sell_parts=[]
-        fill_by_id={}
-        for f in unique_fills:fill_by_id.setdefault(str(f['ordId']),[]).append(f)
         for r in legs:
             oid=str(r['ordId'])
             if oid not in grouped:continue
@@ -3299,8 +3471,8 @@ def full_stats_snapshot(state, fills, bid, contract_value, *, include_durable_ar
                 expected_orders=len(expected))
 
 
-def expected_filled_orders(state, *, include_archive=True):
-    cycles=all_stat_cycles(state) if include_archive else list(state.get('cycles',{}).values()) + list(state.get('archived_cycles',[]))
+def expected_filled_orders(state, *, include_archive=True, snapshot_archive=None):
+    cycles=all_stat_cycles(state,snapshot_archive=snapshot_archive) if include_archive else list(state.get('cycles',{}).values()) + list(state.get('archived_cycles',[]))
     expected={}
     for c in cycles:
         oid=str(c.get('ordId') or '')
@@ -3314,9 +3486,11 @@ def expected_filled_orders(state, *, include_archive=True):
     return expected
 
 
-def stats_exchange_fills(state):
-    # Mandatory archive bootstrap only once, then fetch missing order IDs.
-    return FILL_STORE.ensure_expected(expected_filled_orders(state))
+def stats_exchange_fills(state, *, snapshot_archive=None):
+    # Missing exchange fills may arrive during REST pagination; callers must
+    # pin and verify quantities against the pre-REST state snapshot.
+    return FILL_STORE.ensure_expected(expected_filled_orders(
+        state,snapshot_archive=snapshot_archive))
 
 
 # OKX performance report: fixed capital basis from initial upper bound or creation price.
@@ -3406,7 +3580,7 @@ def runtime_pct(now):
     return f'{min(100.,100.*running/elapsed):.2f}%'
 
 
-def _last_24h_profit(st,fills, contract_value, now_ms):
+def _last_24h_profit(st,fills, contract_value, now_ms, *, snapshot_archive=None):
     """Completed-cycle realized net, using per-cycle shares of aggregate SELL fills.
 
     A single reduce-only MARKET can close several parent BUY cycles. Its full
@@ -3427,7 +3601,7 @@ def _last_24h_profit(st,fills, contract_value, now_ms):
         grouped.setdefault(oid,[]).append(f)
     cutoff=now_ms-86400000
     total=Decimal(0)
-    for c in all_stat_cycles(st):
+    for c in all_stat_cycles(st,snapshot_archive=snapshot_archive):
         if c.get('state')!='CLOSED': continue
         bidid=str(c.get('ordId') or '')
         buys=grouped.get(bidid,[])
@@ -3452,7 +3626,7 @@ def _last_24h_profit(st,fills, contract_value, now_ms):
     return total
 
 
-def format_okx_report(st,fills,stats,now=None):
+def format_okx_report(st,fills,stats,now=None, *, snapshot_archive=None, precomputed_24h=None):
     now = time.time() if now is None else float(now)
     launch,top=_first_anchor(fills)
     elapsed=now-launch if launch is not None else None
@@ -3467,7 +3641,8 @@ def format_okx_report(st,fills,stats,now=None):
     else:
         bottom=average=max_base=capital=None
     if capital is not None:
-        past24=_last_24h_profit(st,fills,CONTRACT_VALUE,int(now*1000))
+        past24=(precomputed_24h if precomputed_24h is not None else
+                _last_24h_profit(st,fills,CONTRACT_VALUE,int(now*1000),snapshot_archive=snapshot_archive))
     else:
         past24=None
     days=Decimal(str(elapsed))/Decimal('86400') if elapsed and elapsed>0 else None
@@ -3534,7 +3709,7 @@ def format_okx_report(st,fills,stats,now=None):
     return '\n'.join(items)
 
 
-def performance_snapshot(st, fills, stats, now):
+def performance_snapshot(st, fills, stats, now, *, snapshot_archive=None, precomputed_24h=None):
     """Read-only presentation payload from exactly the audited fill snapshot.
 
     This does not change PnL and deliberately does not mark unverified
@@ -3551,7 +3726,8 @@ def performance_snapshot(st, fills, stats, now):
     elapsed=now-launched if launched is not None else None
     days=Decimal(str(elapsed))/Decimal(86400) if elapsed and elapsed>0 else None
     daily=stats['grid_gain']/days if days else None
-    past24=_last_24h_profit(st,fills,CONTRACT_VALUE,int(now*1000)) if capital is not None else None
+    past24=(precomputed_24h if precomputed_24h is not None else
+            _last_24h_profit(st,fills,CONTRACT_VALUE,int(now*1000),snapshot_archive=snapshot_archive)) if capital is not None else None
     open_top=[]
     for c in st.get('cycles',{}).values():
         if c.get('state') not in ('TP_WAIT','TP_PARTIAL','VIRTUAL_TP'):continue
@@ -3593,25 +3769,41 @@ def performance_snapshot(st, fills, stats, now):
 
 
 def print_full_stats(pnl=None, *, require_complete=False):
-    """One-shot report / 10-minute background print; NEVER touches orders."""
-    if not DATA.exists():
+    """Complete verified account snapshot anchored to one pre-REST state.
+
+    Never demand that trading stop while the history calls run. The report's
+    timestamp is the actual capture time, NOT the later publication time.
+    Only fully verified, whole exchange fills up to that snapshot are included.
+    """
+    # Diagnostic timings are local to StatsWorker and NEVER affect trading.
+    # Prefer monotonic timing while allowing offline clock-injection tests.
+    clock=getattr(time,'perf_counter',time.time)
+    t_start=clock()
+    st=json.loads(DATA.read_text()) if DATA.exists() else None
+    if st is None:
         print('📊 GRID STATISTICS: торговое состояние ещё не создано',flush=True)
-        return
-    st=json.loads(DATA.read_text())
+        return False
     if st.get('instrument')!=INST:
         raise ValueError('Statistics file is for another instrument')
+    # Archive captured immediately after the state. The state view wins for
+    # duplicate cycle IDs, so a later archive compaction cannot replace it.
+    archive=archived_rows()
     bid=A.ticker()
-    fills=stats_exchange_fills(st)
-    d=full_stats_snapshot(st,fills,bid,CONTRACT_VALUE)
-    if d.get('complete') and pnl is not None:
-        recovered=pnl.ingest_history(st,fills)
-        if recovered:
-            print(f'✅ Финансовый журнал дополнен: {recovered} закрытых TP',flush=True)
-        ledger_total=pnl.total()
-        if abs(ledger_total-d['grid_gain'])>Decimal('0.00000001'):
-            if require_complete:
-                raise ExchangeUnresolved(f'PnL ledger discrepancy: {ledger_total} != {d["grid_gain"]}')
-            print(f'⚠️ Расхождение PnL журнала и отчёта: {ledger_total} / {d["grid_gain"]}',flush=True)
+    captured_at=time.time()
+    t_capture=clock()
+    expected=expected_filled_orders(st,snapshot_archive=archive)
+    fetched=stats_exchange_fills(st,snapshot_archive=archive)
+    t_fills=clock()
+    # A BUY/SELL can fill AGAIN on the same ordId while REST paginates. Its
+    # later fills must not be folded into the earlier snapshot or charged twice.
+    fills=trim_verified_fills_for_snapshot(fetched,expected)
+    if fills is None:
+        print('⏳ Статистика: полный набор fills для снимка ещё не подтверждён',flush=True)
+        if require_complete:
+            raise ExchangeUnresolved('Incomplete/straddling fills in mandatory pre-LIVE audit')
+        return False
+    d=full_stats_snapshot(st,fills,bid,CONTRACT_VALUE,snapshot_archive=archive)
+    t_calculated=clock()
     if not d['complete']:
         print('⚠️ Статистика неполная: часть исполнений отсутствует',flush=True)
         print('Исполнения для ордеров:',d['fill_orders_seen'],'/',d['fill_orders_expected'],flush=True)
@@ -3619,26 +3811,41 @@ def print_full_stats(pnl=None, *, require_complete=False):
         print('Финансовые суммы не выводятся.',flush=True)
         if require_complete:
             raise ExchangeUnresolved('Incomplete statistics in mandatory pre-LIVE audit')
-        return
-    # A fill may have arrived while background history was paginating.
-    # Never persist a false drawdown from an outdated open-position inventory.
-    if LIVE and financial_signature(json.loads(DATA.read_text()))!=financial_signature(st):
-        print('⏳ Статистика: исполнение изменилось во время REST-сверки; ждём нового полного снимка',flush=True)
-        return
-    # Publish a complete, immutable-format report for the external manager.
-    # Crucially, only the active trading process publishes the snapshot.
-    # AUDIT / STATS_ONLY never overwrite a live bot's snapshot.
-    now=time.time()
+        return False
+    if pnl is not None:
+        recovered=pnl.ingest_history(st,fills)
+        if recovered:
+            print(f'✅ Финансовый журнал дополнен: {recovered} закрытых TP',flush=True)
+        # The global pnl.total() may include OTHER trades completed after the
+        # snapshot began. Check only the closed cycles in the pinned snapshot.
+        ledger_total=pnl.total_for_snapshot(st,archive)
+        # Startup/upgrade audit runs without trading. Preserve the historical
+        # whole-ledger invariant there; unknown/orphan CLOSED entries must not
+        # be hidden by snapshot filtering. Live reports may have newer fills.
+        if require_complete and abs(pnl.total()-ledger_total)>Decimal('0.00000001'):
+            raise ExchangeUnresolved('Unaccounted CLOSED entries outside mandatory audit snapshot')
+        if abs(ledger_total-d['grid_gain'])>Decimal('0.00000001'):
+            if require_complete:
+                raise ExchangeUnresolved(f'Snapshot PnL ledger discrepancy: {ledger_total} != {d["grid_gain"]}')
+            print(f'⚠️ Расхождение PnL снимка и журнала: {ledger_total} / {d["grid_gain"]}',flush=True)
+            return False
+    t_ledger=clock()
+    # Don't manufacture fresh data by stamping slow historical calculations
+    # with the completion time.  Consumers assess freshness by captured_at.
+    now=captured_at
+    _, capital_top=_first_anchor(fills)
+    past24=(_last_24h_profit(st,fills,CONTRACT_VALUE,int(now*1000),snapshot_archive=archive)
+            if capital_top is not None else None)
+    report=format_okx_report(st,fills,d,now=now,snapshot_archive=archive,precomputed_24h=past24)
+    detail=performance_snapshot(st,fills,d,now,snapshot_archive=archive,precomputed_24h=past24)
+    t_render=clock()
     if LIVE:
-        # Existing complete PnL uses authoritative BUY/SELL fills and fees.
-        # Only the running engine changes the monitoring baseline.
-        # DD sampled independently from in-memory state every 5s.
+        # Keep anchor + stats timestamps and PnL strictly consistent. The
+        # signature may already differ from current trade state; that is
+        # intentional and prevents DD extrapolation across newer executions.
         atomic_json(STATS_FINANCIAL_ANCHOR, {'schema':1,'instrument':INST,
             'signature':financial_signature(st),'total_pnl_usdt':str(d['total_gain']),
             'open_contracts':str(d['open_contracts']),'bid':str(bid),'at':now})
-    report=format_okx_report(st,fills,d,now=now)
-    detail=performance_snapshot(st,fills,d,now)
-    if LIVE:
         atomic_json(STATS_FILE, {
             'schema_version': 1,
             'complete': True,
@@ -3647,33 +3854,57 @@ def print_full_stats(pnl=None, *, require_complete=False):
             'generated_at': datetime.fromtimestamp(now,timezone.utc).isoformat(),
             'generated_at_unix': now,
             'performance': detail,
-            'performance_v0724': detail,  # stable legacy wire alias; REMOVE only after all readers migrated
+            'performance_v0724': detail,  # stable legacy wire alias
             'report': report,
         })
+    t_written=clock()
+    print(f'⏱ StatsWorker: total={t_written-t_start:.3f}s '
+          f'capture={t_capture-t_start:.3f}s '
+          f'fills={t_fills-t_capture:.3f}s '
+          f'calculation={t_calculated-t_fills:.3f}s '
+          f'ledger={t_ledger-t_calculated:.3f}s '
+          f'report={t_render-t_ledger:.3f}s '
+          f'write={t_written-t_render:.3f}s '
+          f'cycles={len(archive)+len(st.get("archived_cycles",[]))+len(st.get("cycles",{}))} '
+          f'fills_count={len(fills)}',flush=True)
     print('\n'+report+'\n',flush=True)
+    return True
 
 
 def trim_verified_fills_for_snapshot(rows, expected):
-    """Include exact fills existing up to confirmed order quantities at snapshot.
+    """Pin actual, WHOLE exchange fills to the quantity in the captured state.
 
-    A later fill on the same BUY may reach SQLite while an earlier PnL sample
-    is being processed. Preserve the earlier sample by taking complete real
-    individual executions up to the recorded quantity, never rounding.
+    The cache can already contain later fills of a partially filled order.
+    Never invent partial executions, split fees, discard a duplicate billId,
+    or silently use a fill that crosses the snapshot quantity boundary.
     """
     grouped={}
-    for f in rows:grouped.setdefault(str(f['ordId']),[]).append(f)
+    identities=set()
+    for f in rows:
+        oid=str(f.get('ordId') or '')
+        bill=str(f.get('billId') or '')
+        if not oid or not bill or (oid,bill) in identities:
+            raise ValueError('Missing/duplicate immutable exchange fill identity')
+        identities.add((oid,bill))
+        if oid not in expected:
+            raise ValueError('Unexpected fill order in snapshot ledger')
+        grouped.setdefault(oid,[]).append(f)
     kept=[]
     for oid,need in expected.items():
+        if need<=0:raise ValueError('Invalid snapshot fill quantity')
         total=Decimal(0)
         for f in sorted(grouped.get(str(oid),[]),
-                        key=lambda r:(int(r.get('ts') or 0),str(r.get('billId') or ''))):
+                        key=lambda r:(int(r.get('ts') or r.get('fillTime') or 0),
+                                      str(r.get('tradeId') or ''),str(r.get('billId') or ''))):
             q=D(f['fillSz'])
-            if total+q>need:break
+            if q<=0:raise ValueError('Invalid snapshot fill size')
+            if total+q>need:
+                if total<need:return None  # an indivisible fill crosses cutoff
+                break
             kept.append(f)
             total+=q
             if total==need:break
-        if total!=need:
-            return None
+        if total!=need:return None
     return kept
 
 
@@ -3765,29 +3996,38 @@ class BotDrawdownSampler:
                     pass
 
 class StatsWorker(threading.Thread):
-    """Background verified fills; refresh promptly after executions, not every tick."""
+    """Snapshot-based finance; bounded retries even when fills never go quiet."""
     def __init__(self,pnl):
         super().__init__(daemon=True)
         self.pnl=pnl
 
     def run(self):
-        last=0.0
+        last_attempt=0.0
+        last_success=0.0
+        unsuccessful=False
         while True:
             delay=5
             now=time.monotonic()
             try:
-                due=(not last or now-last>=STATS_INTERVAL)
-                if not due and now-last>=60 and DATA.exists() and STATS_FINANCIAL_ANCHOR.exists():
-                    current=json.loads(DATA.read_text())
-                    anchor=json.loads(STATS_FINANCIAL_ANCHOR.read_text())
-                    due=financial_signature(current)!=anchor.get('signature')
+                if unsuccessful:
+                    due=now-last_attempt>=60
+                else:
+                    due=(not last_success or now-last_success>=STATS_INTERVAL)
+                    if not due and now-last_attempt>=60 and DATA.exists() and STATS_FINANCIAL_ANCHOR.exists():
+                        current=json.loads(DATA.read_text())
+                        anchor=json.loads(STATS_FINANCIAL_ANCHOR.read_text())
+                        due=financial_signature(current)!=anchor.get('signature')
                 if due:
-                    last=now
-                    print_full_stats(self.pnl)
+                    last_attempt=now
+                    successful=bool(print_full_stats(self.pnl))
+                    unsuccessful=not successful
+                    if successful:last_success=time.monotonic()
             except RateLimitedError:
+                unsuccessful=True
                 delay=60
                 print('⏳ OKX ограничил историю сделок; статистика повторится через 60с',flush=True)
             except Exception as e:
+                unsuccessful=True
                 print('⚠️ Статистика недоступна:',type(e).__name__,str(e)[:180],flush=True)
             time.sleep(delay)
 

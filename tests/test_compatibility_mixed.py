@@ -138,7 +138,10 @@ print(json.dumps({'grants':count,'path':str(gate.path),'queue':str(gate.queue_pa
                       [v.get('sha256') for v in m['engines'].values()])
         with tempfile.TemporaryDirectory() as td:
             bots=Path(td);bot=bots/'near';bot.mkdir();(bot/'state').mkdir()
-            versions=list(m['engines']);self.assertEqual(len(versions),2)
+            versions=[next(v for v,entry in m['engines'].items()
+                            if entry.get('sha256')==hashlib.sha256(LEGACY_ENGINE_BYTES).hexdigest()),
+                      ENGINE_VERSION]
+            self.assertEqual(len(set(versions)),2)
             for version,source in [(v,None if v!=ENGINE_VERSION else ROOT/'okx_bot.py') for v in versions]:
                 cfg={'version':version,'instrument':'NEAR-USDT-SWAP'}
                 st={'version':version,'schema_version':1,'instrument':'NEAR-USDT-SWAP',

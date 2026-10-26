@@ -77,19 +77,23 @@ class Maintenance0729(unittest.TestCase):
             (root/'config.json').write_text(json.dumps(config))
             self.assertFalse(fn())
 
-    def test_market_sell_format_both_indicators(self):
-        inputs=[('2.0','-0.1','🟢','🟥'),('-2.0','0.1','🔴','🟩'),('0','0','⚪','⬜')]
-        for actual,execution,circle,square in inputs:
+    def test_market_sell_format_single_indicator(self):
+        inputs=[('2.0','-0.1','1.0','🟩'),
+                ('0.5','-0.5','1.0','🟨'),
+                ('-2.0','0.1','1.0','🟥'),
+                ('0','0','1.0','🟨')]
+        for actual,execution,plan,indicator in inputs:
             data={'qty_base':Decimal('0.02'), 'cycles':1,
-                  'actual':Decimal(actual), 'execution':Decimal(execution)}
+                  'actual':Decimal(actual), 'execution':Decimal(execution),
+                  'plan':Decimal(plan), 'avg_price':Decimal('1215.24')}
             with self.subTest(actual=actual),patch.object(views,'market_ledger',return_value=data),\
                  patch.object(views,'read_json',return_value={'instrument':'ZEC-USDT-SWAP'}):
                 msg=views.market_message('zec0724',Path('/not/read'),{},
                     {'fill':3,'ack':33,'full':100})
-                self.assertIn('Market SELL 0.02 ZEC (1)',msg)
-                self.assertIn(circle,msg)
-                self.assertIn(square,msg)
+                self.assertIn(indicator+' Market SELL 0.02 ZEC (1) по 1215.24',msg)
                 self.assertIn('Исполнение',msg)
+                self.assertNotIn('🟩 Исполнение',msg)
+                self.assertNotIn('🟥 Исполнение',msg)
                 self.assertIn('Fill ≈3 мс | ACK 33 мс | Full ≈100 мс',msg)
                 self.assertNotIn('План',msg)
 

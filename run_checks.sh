@@ -19,3 +19,10 @@ python3 -B tests/test_refactor_contract.py
 python3 -B tests/test_compatibility_mixed.py
 python3 -B tests/test_rollout_guard.py
 python3 -B tests/test_final_release_guards.py
+python3 -B tests/test_tp_observability.py
+
+python3 -B tests/test_market_message_ui.py
+python3 -B tests/test_financial_snapshot_0732.py
+python3 -B tests/test_attached_tp_recovery.py
+python3 -B tests/test_stats_worker_optimization.py
+python3 -B tests/test_telegram_terminal_health.py

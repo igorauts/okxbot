@@ -55,7 +55,7 @@ tree=ast.parse((ROOT/'okx_bot.py').read_text())
 funcs={n.name:n for n in tree.body if isinstance(n,ast.FunctionDef)}
 import copy
 snap=copy.deepcopy(funcs['full_stats_snapshot']);scope={
-    'Decimal':Decimal,'D':D,'all_stat_cycles':lambda state:list(state['cycles'].values()),
+    'Decimal':Decimal,'D':D,'all_stat_cycles':lambda state,**kw:list(state['cycles'].values()),
     'allocated_market_fills':lambda fills,plan,cid:fills,
     'accumulate_expected_sell':lambda expected,leg:expected.__setitem__(leg['ordId'],D(leg['filled'])),
     'stats_pct':lambda n,d:'—' if d<=0 else str(n/d*100)+'%',

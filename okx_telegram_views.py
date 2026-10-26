@@ -316,7 +316,9 @@ def latency_one(name, root, hours):
     for src in sources:
         for row in jsonl(src,cutoff):
             phase=row.get('phase')
-            if phase in ('loop_pass','positions_gate_fifo_wait','buy_post','http','position_reconcile'):
+            if phase in ('loop_pass','positions_gate_fifo_wait','buy_post','http','position_reconcile',
+                         'tp_to_intent','tp_cross_to_collect','tp_collect_to_intent',
+                         'tp_intent_to_submit'):
                 n=row.get('ms')
                 if isinstance(n,(int,float)) and math.isfinite(n) and 0<=n<1_000_000:
                     phases[phase].append(float(n))
@@ -341,6 +343,13 @@ def latency_one(name, root, hours):
         'BUY POST: '+quantiles(phases['buy_post']),
         'REST:     '+quantiles(phases['http']),
         'Сверка:   '+quantiles(phases['position_reconcile']),
+        '',
+        'VIRTUAL TP → MARKET (local BID observation)',
+        'BID→Intent:     '+quantiles(phases['tp_to_intent']),
+        'BID→Collect:    '+quantiles(phases['tp_cross_to_collect']),
+        'Collect→Intent: '+quantiles(phases['tp_collect_to_intent']),
+        'Intent→Submit:  '+quantiles(phases['tp_intent_to_submit']),
+        f'Measured SELL intents: {len(phases["tp_to_intent"])}',
         '',
         'BUY DEFICIT',
         f'Эпизодов: {episodes}, минимум: {coverage(mincov)}',
@@ -438,6 +447,14 @@ def market_ledger(root, event):
            for r in rows):
         return None
     actual=sum((number(r['net']) for r in rows),Decimal(0))
+    # Use persisted exchange-fill accounting, not the event's unverified avgPx.
+    sell_values=[(number(r.get('sell_px')),number(r.get('qty_base'))) for r in rows]
+    if any(px is None or px<=0 or size is None or size<=0 for px,size in sell_values):
+        return None
+    actual_base=sum((size for _,size in sell_values),Decimal(0))
+    if actual_base!=qty*cv:
+        return None
+    avg_price=sum((px*size for px,size in sell_values),Decimal(0))/actual_base
     planned_gross=sum((number(r['planned_gross']) for r in rows),Decimal(0))
     # Original LIMIT TP price must come from each persisted cycle, NOT from
     # ledger.planned_gross, because the recorded limit BUY price may differ
@@ -487,28 +504,55 @@ def market_ledger(root, event):
         expected_sell_fee+=tp*size*rate
     plan_net=expected_gross+buy_fees-expected_sell_fee
     return dict(actual=actual,plan=plan_net,execution=actual-plan_net,
-                qty_base=qty*cv,cycles=len(rows),order_id=oid)
+                avg_price=avg_price,qty_base=qty*cv,cycles=len(rows),order_id=oid)
 
 
 def signed_usd6(value):
     return money(value,6,True)
 
 
-# Market SELL UI (accounting unchanged)
+# Market SELL UI — financial figures come only from verified fill accounting.
 def market_message(name, root, event, timing):
     v=market_ledger(root,event)
     if v is None:
         return None
-    unit=read_json(Path(root)/'config.json').get('instrument','').split('-')[0]
+    cfg=read_json(Path(root)/'config.json')
+    unit=cfg.get('instrument','').split('-')[0]
     def ms(key, approx=False):
         n=timing.get(key)
         return ('≈' if approx else '')+str(int(round(n)))+' мс' if isinstance(n,(int,float)) and n>=0 else 'н/д'
     actual=v['actual']
     execution=v['execution']
-    circle='🟢' if actual>0 else '🔴' if actual<0 else '⚪'
-    square='🟩' if execution>0 else '🟥' if execution<0 else '⬜'
-    header=(f'💰 Market SELL {format(v["qty_base"].normalize(),"f")} {unit} '
-            f'({v["cycles"]}), {signed_usd6(actual)} в копилку ({circle})')
-    return ('<b>'+html.escape(header)+'</b>\n'
-            +html.escape(f'Исполнение {signed_usd6(execution)} {square}')+'\n'
-            +'<code>'+html.escape('⚡ Fill '+ms('fill',True)+' | ACK '+ms('ack')+' | Full '+ms('full',True))+'</code>')
+    plan=v.get('plan')
+    price=v.get('avg_price')
+    # Profit percentage is meaningful only with a strictly positive plan.
+    if isinstance(plan,Decimal) and plan>0:
+        pct_total=f'{actual/plan*100:.1f}%'
+        pct_delta=f'{execution/plan*100:+.1f}%'
+    else:
+        pct_total='н/д'
+        pct_delta='н/д'
+    tick=number(cfg.get('tick_size'))
+    digits=max(2,min(8,-tick.normalize().as_tuple().exponent)) if tick is not None and tick>0 else 2
+    price_label=(f'{price:.{digits}f}' if isinstance(price,Decimal) and price>0
+                 else 'н/д')
+    # A single status represents achieved PnL relative to a *positive* plan.
+    # A nonpositive plan has no meaningful ratio: never paint it green by guess.
+    if actual < 0:
+        indicator='🟥'
+    elif isinstance(plan,Decimal) and plan > 0 and actual >= plan:
+        indicator='🟩'
+    else:
+        indicator='🟨'
+    header=(f'{indicator} Market SELL {format(v["qty_base"].normalize(),"f")} {unit} '
+            f'({v["cycles"]}) по {price_label}')
+    profit=f'{signed_usd6(actual)} к профиту ({pct_total})'
+    execution_text=f'Исполнение {signed_usd6(execution)} ({pct_delta})'
+    latency='⚡ Fill '+ms('fill',True)+' | ACK '+ms('ack')+' | Full '+ms('full',True)
+    text=('<b>'+html.escape(header)+'\n'+html.escape(profit)+'</b>\n'
+          +html.escape(execution_text)+'\n'
+          +'<code>'+html.escape(latency)+'</code>')
+    # New end-to-end diagnostic is shown only when recorded by the new engine.
+    if isinstance(timing.get('tp_to_intent_ms'),(int,float)) and timing['tp_to_intent_ms']>=0:
+        text+='\n<code>'+html.escape('⏱ BID TP→Intent '+ms('tp_to_intent_ms',True))+'</code>'
+    return text

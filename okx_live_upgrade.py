@@ -128,6 +128,14 @@ def stage_check():
             (n.startswith('.') and n not in ('.gitignore','.env.example'))
             for n in names):
             fail('Unexpected ZIP members')
+        # Fail before writing ANY shared file if packaging stripped the manager's
+        # executable bit. The source 0.7.30 manager was executable (0755).
+        manager = z.getinfo('okxbot.py')
+        manager_mode = manager.external_attr >> 16
+        if manager.create_system != 3 or (manager_mode & 0o777) != 0o755:
+            fail('Manager ZIP permission must be 0755; refuse shared install')
+        if not os.access(STAGE/'okxbot.py', os.X_OK):
+            fail('Manager staged file is not executable; refuse shared install')
         for name in names:
             if (z.getinfo(name).create_system==3 and
                     (z.getinfo(name).external_attr >> 16) & 0o170000 != 0o100000):

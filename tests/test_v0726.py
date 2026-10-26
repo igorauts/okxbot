@@ -25,7 +25,7 @@ func=next(n for n in tree.body if isinstance(n,ast.FunctionDef)
           and n.name=='performance_snapshot')
 ns=dict(Decimal=Decimal,_first_anchor=lambda fills:(100000.,Decimal('1300')),
         STEP=Decimal('1'), CAP=200,QTY=Decimal('0.01'),CONTRACT_VALUE=Decimal('1'),
-        _last_24h_profit=lambda *args:Decimal('3'),runtime_pct=lambda now:'99.99%',
+        _last_24h_profit=lambda *args,**kw:Decimal('3'),runtime_pct=lambda now:'99.99%',
         real_tp_active=lambda st:st['active_real'],
         virtual_cycles=lambda st:st['active_virtual'])
 exec(compile(ast.Module(body=[copy.deepcopy(func)],type_ignores=[]),'<snapshot-test>','exec'),ns)

@@ -69,15 +69,16 @@ assert all(isinstance(rec.get('sha256'),str) and len(rec['sha256'])==64 for rec 
 for dependency in manifest['engines'][ENGINE_VERSION]['dependencies']:
     assert (SH/dependency).is_file(),dependency
 
-# Main safety-critical functions are pinned to reviewed AST (v0.7.21 scope only).
+# Main safety-critical functions are pinned to reviewed AST; telemetry-only
+# changes require explicit reference review and isolated behavioral tests.
 candidate=ast.parse((SH/'okx_bot.py').read_text())
 references=json.loads((ROOT/'tests/reference_safety_ast.json').read_text())
 new_ast={n.name:n for n in candidate.body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
 strategy_tree=ast.parse((SH/'okx_strategy.py').read_text())
 strategy_factory=next(n for n in strategy_tree.body if isinstance(n,ast.FunctionDef) and n.name=='build_grid_rules')
 new_ast.update({n.name:n for n in strategy_factory.body if isinstance(n,ast.FunctionDef)})
-unchanged=['RestGovernor','ExchangeUnresolved','ExchangeTemporary','place','cancel_tp',
-    'place_virtual_tp','virtual_escape','reconcile_position','reconcile_panic_orders',
+reviewed=['RestGovernor','ExchangeUnresolved','ExchangeTemporary','place','cancel_tp',
+    'place_virtual_tp','virtual_escape','persist_crossed_virtual_tps','reconcile_position','reconcile_panic_orders',
     'place_panic_sell','controlled_shutdown','market_exit_partial','partial_cleanup_action',
     'TPBufferScheduler','coverage_audit','WSWatcher','PublicBidWatcher',
     'grid_top','desired_buy_levels','missing_buy_levels_for_addition',
@@ -89,7 +90,7 @@ def operational_ast(node):
         node.body.pop(0)  # Docstring is presentation, not trading behavior.
     return ast.dump(node,include_attributes=False)
 
-for name in unchanged:
+for name in reviewed:
     assert name in new_ast and name in references,name
     actual=hashlib.sha256(operational_ast(new_ast[name]).encode()).hexdigest()
     assert actual==references[name],('TRADING BEHAVIOR CHANGED',name)
@@ -112,7 +113,7 @@ for name in ['okx_monitor','okxbot','okx_ui','okx_setup','okx_observers','okx_ar
 for p in ROOT.rglob('*.py'):
     compile(p.read_bytes(),str(p),'exec')
 print('PASS: contracts, state, archive, stable paths, import smoke')
-print('PASS: critical trading AST guarded ('+str(len(unchanged))+' symbols); v0.7.23 shutdown/WS unchanged; diagnostic worker re-pinned')
+print('PASS: critical trading AST guarded ('+str(len(reviewed))+' symbols); v0.7.23 shutdown/WS unchanged; diagnostic worker re-pinned')
 print('PASS: legacy migrations absent; all Python syntax valid')
 print('OFFLINE ONLY — no OKX connection or orders')
 
