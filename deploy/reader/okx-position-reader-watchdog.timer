@@ -1,0 +1,12 @@
+[Unit]
+Description=Check OKX Shared Position Reader health every 20 seconds
+
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=20s
+AccuracySec=2s
+Unit=okx-position-reader-watchdog.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target

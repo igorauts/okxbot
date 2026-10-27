@@ -83,7 +83,8 @@ class SustainedBidNoStorm(unittest.TestCase):
         self.assertFalse(w._capture_crossings(Decimal('101')))
         self.assertFalse(w._capture_crossings(Decimal('99.9')))
         self.assertNotIn('a',w._virtual_woken)
-        self.assertTrue(w._capture_crossings(Decimal('100')))
+        # Quick retrace is suppressed; first WS stamp persists.
+        self.assertFalse(w._capture_crossings(Decimal('100')))
         self.assertFalse(w._capture_crossings(Decimal('101')))
         self.assertIn('a',w.take_crossed_virtual_stamps())
 

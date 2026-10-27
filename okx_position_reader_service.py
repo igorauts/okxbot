@@ -76,7 +76,7 @@ class ReadOnlyOKXProvider:
 
     def __init__(self, key, secret, passphrase):
         if not all(isinstance(s,str) and s for s in (key,secret,passphrase)):
-            raise ValueError('Missing dedicated read-only credentials')
+            raise ValueError('Missing account credentials')
         self._key,self._secret,self._passphrase=key,secret,passphrase
         self._thread = threading.local()
 
@@ -156,7 +156,39 @@ def read_credentials(path):
             lines[k.strip()]=v.strip().strip('"').strip("'")
     return [lines[k] for k in ('OKX_API_KEY','OKX_API_SECRET','OKX_API_PASSPHRASE')]
 
-def _terminal_unit_inactive(service: str) -> bool:
+def _bot_engine_process_absent(root: Path) -> bool:
+    """Fail closed on any uncertain /proc scan of the terminal bot.
+
+    Only used to supplement a terminal ACK + missing/failed systemd unit.
+    Never regards a missing unit ALONE as proof of an archived bot.
+    """
+    root = Path(root).resolve()
+    try:
+        for p in Path('/proc').iterdir():
+            if not p.name.isdecimal():
+                continue
+            try:
+                data=(p/'cmdline').read_bytes()
+                if b'okx_bot.py' not in data:
+                    continue
+                argv=[x.decode('utf-8','surrogateescape') for x in data.split(b'\0') if x]
+                direct=any(Path(x).is_absolute() and
+                           Path(x).resolve()==root/'okx_bot.py' for x in argv)
+                try:
+                    cwd=(p/'cwd').resolve(strict=True)
+                except FileNotFoundError:
+                    continue  # raced with an exited process
+                if direct or cwd==root:
+                    return False
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except (PermissionError, OSError, UnicodeError):
+                return False
+    except (OSError, PermissionError):
+        return False
+    return True
+
+def _terminal_unit_inactive(service: str, root: Path = None) -> bool:
     """Archive proof must include a known, stopped systemd unit (PID 0).
 
     `systemctl is-active` returning nonzero alone is insufficient: missing,
@@ -182,9 +214,16 @@ def _terminal_unit_inactive(service: str) -> bool:
         if key in values:
             return False
         values[key] = value
-    return (values.get('LoadState') == 'loaded'
-            and values.get('ActiveState') == 'inactive'
-            and values.get('MainPID') == '0')
+    if values.get('MainPID') != '0':
+        return False
+    if values.get('LoadState') == 'loaded' and values.get('ActiveState') == 'inactive':
+        return True
+    # Only a separately validated terminal ACK may reach here. Missing / failed
+    # units must also have a proven-absent bot process; uncertainty keeps slot.
+    if (root is not None and values.get('LoadState') in ('not-found','loaded')
+            and values.get('ActiveState') in ('inactive','failed')):
+        return _bot_engine_process_absent(root)
+    return False
 
 
 def load_registry(path):
@@ -224,7 +263,7 @@ def load_registry(path):
                 f'Retired bot {name!r} missing control_ack.json at {ack_path}; '
                 'Reader startup refused, existing bots may use shared-gate direct GET')
         terminal = (ack is not None and ack.get('phase') in ('PANIC_DONE', 'RETIRED'))
-        archived = bool(terminal and _terminal_unit_inactive(entry.get('service')))
+        archived = bool(terminal and _terminal_unit_inactive(entry.get('service'), d))
         records.append(Registration(name, cfg['instrument'], archived))
     return records
 

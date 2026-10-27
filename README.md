@@ -1,4 +1,6 @@
-> **v0.7.34 LIVE-verified, 27.10.2026.** Все четыре бота работают через Shared Position Reader,
+> **v0.7.35 LIVE-verified, 27.10.2026 UTC.** Три действующих торговых бота NEAR/WLD/BTC обновлены по одному с резервными копиями, GET-only аудитами, свежими heartbeat. Shared Reader использует существующий общий account env; watchdog timer и Telegram Reader FLAPPING/anti-spam LIVE-verified. ZEC и DOOD терминальны, не перезапускались. Исходная офлайн-заметка сохранена: [V0735_OFFLINE_RELEASE_NOTES_RU.md](V0735_OFFLINE_RELEASE_NOTES_RU.md); подтверждения: [V0735_LIVE_RELEASE_NOTES_RU.md](V0735_LIVE_RELEASE_NOTES_RU.md).**
+
+> **v0.7.34 LIVE-verified, 27.10.2026.** При релизном LIVE-аудите все четыре бота работали через Shared Position Reader,
 > Telegram Reader watchdog включён. Priority FIFO **не включён**, используется mixed-fifo.
 > Исходники и проверки: `V0734_LIVE_RELEASE_NOTES_RU.md`. Публикация GitHub не меняет LIVE.
 
@@ -6,7 +8,7 @@
 
 Алгоритмический LONG Grid Bot для бессрочных линейных USDT-SWAP OKX.
 
-**Текущая версия движка: 0.7.34 (LIVE-проверена 27 октября 2026).** Четыре активных бота (`zec0724`, `near0721`, `wld0728`, `btc0721`) работают с общим локальным Reader (`mixed-fifo`), подтверждены 4/4 финансовых аудита и обмен IPC. При сбоях Reader предусмотрен прямой GET через исходную общую квоту. Telegram DOWN/RECOVERED/FAILED включён и начальная доставка подтверждена. Priority FIFO остаётся выключенным.
+**Последний LIVE-verified engine: 0.7.35 (срез 27 октября 2026).** На момент rollout v0.7.34 проверены 4/4 бота. После релиза архивный `zec0724` завершён PANIC SELL (позиция 0); `dood0721-2` тоже терминальный. Последние ожидаемые рабочие: `near0721`, `wld0728`, `btc0721`. Их свежий статус перед LIVE проверяется отдельно, а не выводится из README.
 
 **DOOD `dood0721-2` завершён PANIC SELL**, позиция 0 DOOD, финальный торговый PnL подтверждён исполнениями OKX. В архиве; не включать его в обычное обновление.
 

@@ -103,91 +103,109 @@ def _reader_health_ipc(path):
 
 
 def position_reader_health_check(api, st):
-    """Reader DOWN/RECOVERED/FAILED via existing durable Telegram outbox.
+    """Bounded, durable, GET-free Reader incident monitoring.
 
-    Health is GET-free. NRestarts catches a crash and auto-recovery that both
-    happen between the 5s monitor polls. Alerts are deduplicated per incident.
-    The monitoring service must explicitly opt in with a Reader socket env var.
+    Systemd FAILED always alerts once until a verified recovery. The other
+    alerts are limited per rolling episode; a crash-loop is explicitly FLAPPING.
+    No trading commands, service restarts, or exchange API calls.
     """
     path=os.environ.get('OKX_POSITION_READER_SOCKET', '').strip()
     if not path:
         return
-    record=st.setdefault('position_reader_health',
-                         {'down':False,'episode':0,'fetch_failed':0,'quota_failed':0})
+    rec=st.setdefault('position_reader_health', {})
+    now=time.time()
     info=_reader_health_ipc(path)
     props=_show('okx-position-reader.service')
     active=props.get('ActiveState') if props else None
-    # A healthy stray socket cannot conceal a failed/stopped systemd unit.
     online=(info is not None and (props is None or active=='active'))
     failed=(props is not None and active=='failed')
-
-    # Restart count is local, never reset manually; decreasing value means
-    # systemd itself reset/rebooted, which is not a new reader crash.
+    prev_down=rec.get('down') is True
+    ep=int(rec.get('episode',0))
     n_restarts=None
     if props is not None:
-        try:
-            raw=props.get('NRestarts')
-            if raw is not None and str(raw).isdecimal():
-                n_restarts=int(raw)
-        except (ValueError,TypeError):
-            pass
-    prev_restarts=record.get('systemd_n_restarts')
-    missed_crash=(online and record.get('down') is not True
-                  and type(prev_restarts) is int
-                  and n_restarts is not None and n_restarts>prev_restarts)
+        val=str(props.get('NRestarts',''))
+        if val.isdecimal():n_restarts=int(val)
+    prior=rec.get('systemd_n_restarts')
+    missed_crash=(online and not prev_down and type(prior) is int
+                  and n_restarts is not None and n_restarts>prior)
     if n_restarts is not None:
-        record['systemd_n_restarts']=n_restarts
-
-    if online and not record.get('monitor_armed'):
-        one(api,st,'reader/watchdog/armed',
+        rec['systemd_n_restarts']=n_restarts
+    if online and not rec.get('monitor_armed'):
+        one(api, st, 'reader/watchdog/armed',
             'ℹ️ Shared Position Reader: Telegram-контроль включён. '
             'DOWN / RECOVERED / FAILED; без торговых команд.')
-        record['monitor_armed']=True
+        rec['monitor_armed']=True
 
-    if not online and record.get('down') is not True:
-        record['episode']=int(record.get('episode',0))+1
-        one(api,st,'reader/unavailable/'+str(record['episode']),
-            '🚨 Shared Position Reader DOWN: нет подтверждённого health IPC '
-            'или служба systemd неактивна. Боты должны использовать '
-            'резервный прямой GET через общую квоту.')
-    elif online and record.get('down') is True:
-        one(api,st,'reader/recovered/'+str(record['episode']),
-            '✅ Shared Position Reader RECOVERED: systemd active, health IPC PASS.')
-    elif missed_crash:
-        # Health may already be restored by the next monitor tick: record both
-        # boundaries instead of silently missing a fast automatic restart.
-        record['episode']=int(record.get('episode',0))+1
-        incident=str(record['episode'])
-        one(api,st,'reader/unavailable/'+incident,
-            '🚨 Shared Position Reader DOWN: systemd обнаружил аварийный '
-            'перезапуск между опросами. Проверить journalctl.')
-        one(api,st,'reader/recovered/'+incident,
-            '✅ Shared Position Reader RECOVERED: автоматический рестарт, '
-            'health IPC PASS.')
+    def alert(key, text):
+        one(api,st,key,text)
 
-    if failed and not record.get('failed_alerted'):
+    # A time-bounded window persists across monitor restarts. Guard against
+    # system clock adjustments and reboot; never replay a stale crash burst.
+    times=[float(x) for x in rec.get('down_times',[]) if
+           isinstance(x,(int,float)) and 0 <= now-float(x) < 600]
+    new_down=(not online and not prev_down) or missed_crash
+    if new_down:
+        ep+=1
+        rec['episode']=ep
+        rec['stable_since']=0  # missed in-between crash resets stability too
+        times.append(now)
+    rec['down_times']=times[-64:]
+    if new_down and len(times)>=3 and not rec.get('flapping'):
+        rec['flapping']=True
+        alert('reader/flapping/'+str(ep),
+              '🚨 Shared Position Reader FLAPPING: ≥3 DOWN за 10 минут. '
+              'Повторные сообщения подавлены до устойчивого восстановления.')
+
+    if new_down and not rec.get('flapping'):
+        alert('reader/unavailable/'+str(ep),
+              '🚨 Shared Position Reader DOWN: health IPC/systemd не подтвердили '
+              'работоспособность; боты используют резервный GET через общую квоту.')
+    if failed and not rec.get('failed_alerted'):
         reason=str(props.get('Result') or 'unknown')[:80]
-        one(api,st,'reader/failed/'+str(record['episode']),
-            '🔴 Shared Position Reader FAILED: systemd перевёл службу '
-            'в failed и не выполняет восстановление. '
-            'Result='+reason+'. Проверить systemctl status и journalctl.')
-        record['failed_alerted']=True
-    if online:
-        record['failed_alerted']=False
-
+        alert('reader/failed/'+str(ep),
+              '🔴 Shared Position Reader FAILED: systemd, Result='+reason)
+        rec['failed_alerted']=True
+    if not online:
+        rec['stable_since']=0
+    else:
+        if not isinstance(rec.get('stable_since'),(int,float)) or rec['stable_since']<=0:
+            rec['stable_since']=now
+        # Do not send 120 recoveries in crash loops; require 120s stability
+        # to exit FLAPPING and clear the notification suppression episode.
+        if rec.get('flapping'):
+            if now-float(rec['stable_since']) >= 120:
+                rec['flapping']=False
+                rec['down_times']=[]
+                rec['failed_alerted']=False
+                alert('reader/stable/'+str(ep),
+                      '✅ Shared Position Reader STABLE: 120с устойчивой работы после FLAPPING.')
+        elif prev_down or missed_crash:
+            alert('reader/recovered/'+str(ep),
+                  '✅ Shared Position Reader RECOVERED: active + health IPC PASS.')
+        if not rec.get('flapping'):
+            rec['failed_alerted']=False
+    # A first new GET/quota failure is actionable; further increments are
+    # aggregated, never one Telegram message per 5-second poll.
     if info is not None:
         counters=(info['fetch_failed'],info['quota_failed'])
-        if record.get('counters_initialized'):
-            prev=(int(record.get('fetch_failed',0)),int(record.get('quota_failed',0)))
-            if counters[0]>prev[0] or counters[1]>prev[1]:
-                record['episode']=int(record.get('episode',0))+1
-                one(api,st,'reader/errors/'+str(record['episode']),
-                    '⚠️ Shared Position Reader: новые ошибки GET/quota; '
-                    'проверьте journal и прямые fallback GET.')
-        # Baseline historical counters on first activation: no false warning.
-        record['fetch_failed'],record['quota_failed']=counters
-        record['counters_initialized']=True
-    record['down']=not online
+        if rec.get('counters_initialized'):
+            old=(int(rec.get('fetch_failed',0)),int(rec.get('quota_failed',0)))
+            delta=sum(max(0,new-prev) for new,prev in zip(counters,old))
+            if delta:
+                rec['pending_errors']=int(rec.get('pending_errors',0))+delta
+            last=float(rec.get('error_notice_at',0))
+            pending=int(rec.get('pending_errors',0))
+            if pending and (not rec.get('error_notice_at') or not (0 <= now-last < 600)):
+                label=('новых ошибок' if not rec.get('error_notice_at')
+                       else 'дополнительных ошибок за окно')
+                alert('reader/errors/'+str(int(now//600)),
+                      f'⚠️ Shared Position Reader: {pending} {label} GET/quota; '
+                      'следующая сводка не раньше чем через 10 минут.')
+                rec['pending_errors']=0
+                rec['error_notice_at']=now
+        rec['fetch_failed'],rec['quota_failed']=counters
+        rec['counters_initialized']=True
+    rec['down']=not online
 
 
 def service_check(api, st, services, roots):

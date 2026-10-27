@@ -10,6 +10,7 @@ import json
 import os
 import socket
 import struct
+import time
 from pathlib import Path
 
 from okx_position_reader_core import Priority, ReaderError, SharedReaderCore
@@ -76,6 +77,9 @@ class ReaderIPCServer:
                     "quota_abandoned":self.core.counters.get('quota_abandoned',0),
                     "unused_quota_grants":self.core.counters.get('unused_quota_grants',0),
                     "pending":len(self.core._pending()),
+                    "inflight_age_ms":(max(0,round((time.monotonic_ns()
+                        - self.core._inflight_since_ns)/1_000_000,3))
+                        if self.core._inflight_since_ns else 0),
                 }}
             elif obj.get('op') == 'positions':
                 requested = obj.get('priority')

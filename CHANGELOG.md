@@ -1,3 +1,20 @@
+## v0.7.35 — LIVE-verified reliability update (2026-10-27)
+
+- Controlled LIVE rollouts: `near0721`, `wld0728`, `btc0721` upgraded separately from 0.7.34 to engine 0.7.35, with backups, GET-only financial audits and fresh heartbeats; ZEC/DOOD terminal instances not restarted.
+- P0: suppress repeated same-TP WS BID wakeups to at most one per second without delaying the first crossing; no change to durable intent, MARKET POST, or 150 ms coalescing.
+- Shared Position Reader reads existing `/root/okx/.okxbot_account.env`; fail-closed registry/archive rules, IPC health and bounded watchdog timer. `mixed-fifo`, no Priority FIFO migration.
+- Telegram Reader alerts: durable anti-spam and FLAPPING status; actual running `/root/okx/okx_telegram_health.py` updated, monitor restarted alone.
+- GET-free offline diagnostics for historical MARKET fill stages, systemd recovery templates, historical RC docs archived. Funding and trading strategy unchanged.
+- Offline regression 179 tests PASS; asset SHA256 and engine manifest verified. Post-deploy: three engines/Reader/watchdog/Telegram ACTIVE, Reader IPC and watchdog checks PASS; final account GET-only snapshot at 2026-10-27 22:50:02 UTC. No LIVE fault-injection to provoke reader failure or test actual Telegram alarm delivery.
+- Full checks and limits: [V0735_LIVE_RELEASE_NOTES_RU.md](V0735_LIVE_RELEASE_NOTES_RU.md).
+
+# 0.7.35 — OFFLINE Reliability candidate (НЕ LIVE, НЕ GitHub)
+- Исправлен повторный WS wake, Reader watchdog / terminal registry / Telegram FLAPPING.
+- Новый Reader unit читает существующие account credentials, без новых ключей.
+- READ-ONLY WS→intent→exchange fill analysis, systemd recovery templates, архив RC-документов.
+- Trading POST, PANIC, стратегия, комиссия, PnL, FIFO/priority сохранены.
+- Детали: [V0735_OFFLINE_RELEASE_NOTES_RU.md](V0735_OFFLINE_RELEASE_NOTES_RU.md).
+
 ## v0.7.34 — Shared Position Reader + faster virtual TP MARKET (LIVE verified, 2026-10-27)
 
 - LIVE: four bots verified on 0.7.34, common GET-only Reader RC12, Telegram Reader alerts RC13 and durable service recovery; priority FIFO remains OFF (`mixed-fifo`).

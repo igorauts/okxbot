@@ -45,3 +45,6 @@ python3 -B -m unittest tests.test_rc11_wake_latch_mixed_fifo -q
 
 # Shared Reader Telegram watchdog incident/dedup regressions.
 python3 -B -m unittest tests.test_reader_telegram_alerts -q
+
+# Repeated TP crossings, terminal/missing service, Reader safety.
+python3 -B -m unittest tests.test_v0735_reliability -q

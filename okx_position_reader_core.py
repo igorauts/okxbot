@@ -210,6 +210,7 @@ class SharedReaderCore:
         self._wake = asyncio.Event()
         self._closed = False
         self._inflight = False
+        self._inflight_since_ns = 0  # diagnostic only, monotonic
         self._worker_task: asyncio.Task | None = None
         self.metrics = deque(maxlen=1024)
         self.counters = {'get_batches': 0, 'coalesced_clients': 0, 'quota_failed': 0,
@@ -315,6 +316,7 @@ class SharedReaderCore:
                     continue
             claimed: list[_Waiter] = []
             self._inflight = True
+            self._inflight_since_ns = time.monotonic_ns()
             try:
                 # Quota acquisition is account-wide responsibility. During
                 # mixed fleet this MUST be original shared FIFO, not new quota.
@@ -382,6 +384,7 @@ class SharedReaderCore:
                         w.future.set_exception(ReaderError(f'Reader operation failed: {type(exc).__name__}'))
             finally:
                 self._inflight = False
+                self._inflight_since_ns = 0
                 self._waiters = [w for w in self._waiters if not w.future.done()]
                 if self._waiters and not self._closed:
                     self._wake.set()

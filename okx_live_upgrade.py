@@ -113,6 +113,23 @@ def files_required():
     return ['okx_bot.py',*deps]
 
 
+def allowed_package_member(name):
+    """Permit only documented source/test/historical and Reader recovery paths."""
+    if (not isinstance(name, str) or not name or name.endswith('/') or
+            '\\' in name or '\x00' in name or name.startswith('/')):
+        return False
+    parts = Path(name).parts
+    if '..' in parts or any(x in ('', '.') or x.startswith('.') for x in parts[1:]):
+        return False
+    if name.startswith('.') and name not in ('.gitignore', '.env.example'):
+        return False
+    if len(parts) == 1:
+        return True
+    if len(parts) == 2:
+        return parts[0] in ('tests', 'historical')
+    return len(parts) == 3 and parts[:2] == ('deploy', 'reader')
+
+
 def stage_check():
     check_file(PACKAGE)
     if sha256(PACKAGE)!=PACKAGE_SHA256:fail('ZIP SHA256 mismatch')
@@ -122,11 +139,7 @@ def stage_check():
     with ZipFile(PACKAGE) as z:
         names=z.namelist()
         if len(names)<53 or len(set(names))!=len(names) or any(
-            '\\' in n or n.startswith('/') or '..' in Path(n).parts or
-            len(Path(n).parts)>2 or
-            (len(Path(n).parts)==2 and Path(n).parts[0] not in ('tests','historical')) or
-            (n.startswith('.') and n not in ('.gitignore','.env.example'))
-            for n in names):
+            not allowed_package_member(n) for n in names):
             fail('Unexpected ZIP members')
         # Fail before writing ANY shared file if packaging stripped the manager's
         # executable bit. The source 0.7.30 manager was executable (0755).

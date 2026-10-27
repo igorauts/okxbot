@@ -4,7 +4,7 @@ from pathlib import Path
 R=Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(R))
 import okx_live_upgrade as U
-from tests.verify_release_asset import verify_member_types
+from tests.verify_release_asset import verify_member_types, allowed_package_member as verifier_member_allowed
 
 GOOD='AUDIT CONSISTENT\nGRID PROFIT: +$1.0\n✅ Все закрытые циклы сопоставлены.\n'
 class ReleaseSafety(unittest.TestCase):
@@ -41,6 +41,23 @@ class ReleaseSafety(unittest.TestCase):
                     m=z.getinfo('okxbot.py')
                     allowed=m.create_system==3 and (m.external_attr>>16)&0o777==0o755
                     self.assertEqual(allowed,mode==0o755)
+    def test_reader_template_paths_and_archive_layout(self):
+        allowed=('okx_bot.py','tests/test_packaging.py','historical/a.md',
+                 'deploy/reader/okx-position-reader.service',
+                 'deploy/reader/okx-position-reader-watchdog.timer')
+        forbidden=('../bad','/etc/passwd','deploy/reader/../../oops',
+                   'deploy/other/something.service','random/sub/file.txt',
+                   'deploy/reader/very/deep.file','deploy/reader/.secrets',
+                   'secrets/.env')
+        for path in allowed:
+            with self.subTest(allowed=path):
+                self.assertTrue(U.allowed_package_member(path))
+                self.assertTrue(verifier_member_allowed(path))
+        for path in forbidden:
+            with self.subTest(forbidden=path):
+                self.assertFalse(U.allowed_package_member(path))
+                self.assertFalse(verifier_member_allowed(path))
+
     def test_zip_member_types_must_be_regular(self):
         with tempfile.TemporaryDirectory() as td:
             p=Path(td)/'z.zip'

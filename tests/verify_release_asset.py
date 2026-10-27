@@ -5,6 +5,21 @@ This is a build/publish gate. Nothing touches LIVE services or exchange.
 import ast, hashlib, json, stat, sys, zipfile
 from pathlib import Path
 
+def allowed_package_member(name):
+    """Strict source ZIP layout; Reader deployment recovery templates are data."""
+    if (not isinstance(name,str) or not name or name.endswith('/') or
+            '\\' in name or '\x00' in name or name.startswith('/')):
+        return False
+    parts=Path(name).parts
+    if '..' in parts or any(x in ('', '.') or x.startswith('.') for x in parts[1:]):
+        return False
+    if name.startswith('.') and name not in ('.gitignore','.env.example'):
+        return False
+    if len(parts)==1:return True
+    if len(parts)==2:return parts[0] in ('tests','historical')
+    return len(parts)==3 and parts[:2]==('deploy','reader')
+
+
 def verify_member_types(z):
     members=z.infolist()
     names=[x.filename for x in members]
@@ -12,12 +27,7 @@ def verify_member_types(z):
         raise ValueError('Empty or duplicated ZIP members')
     for info in members:
         name=info.filename
-        parts=Path(name).parts
-        if (not name or name.startswith('/') or '\\' in name or
-            '..' in parts or len(parts)>2 or
-            (len(parts)==2 and parts[0] not in ('tests','historical')) or
-            (name.startswith('.') and name not in ('.gitignore','.env.example')) or
-            name.endswith('/')):
+        if not allowed_package_member(name):
             raise ValueError('Unsafe ZIP path: '+name)
         mode=(info.external_attr>>16)
         if info.create_system!=3 or stat.S_IFMT(mode)!=stat.S_IFREG:

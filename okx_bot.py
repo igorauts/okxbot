@@ -2551,6 +2551,8 @@ class PublicBidWatcher(threading.Thread):
         # Re-arm only after BID retraces BELOW TP, target disappears, or TP
         # price itself changes. WS still never authorizes an order.
         self._virtual_woken=set()
+        # Keep last wake across a brief BID retrace; NOT a trading throttle.
+        self._virtual_last_wake={}  # cycleId -> monotonic timestamp
         self._lock=threading.Lock()
         self._bid=None
         self._updated=0.0
@@ -2628,6 +2630,7 @@ class PublicBidWatcher(threading.Thread):
         # A still-crossed TP must therefore never trigger another wake merely
         # because the same target list was republished after REST.
         observed_at=time.time()
+        mono_now=time.monotonic()
         new_crossing=False
         for cycle_id,tp in self._virtual_targets.items():
             if bid < tp:
@@ -2635,10 +2638,14 @@ class PublicBidWatcher(threading.Thread):
                 continue
             if cycle_id not in self._virtual_woken:
                 self._virtual_woken.add(cycle_id)
-                # Preserve the FIRST local observation until consumed.
+                # Preserve FIRST local crossing for the trading loop even if
+                # the extra wake is suppressed by the per-cycle cooldown.
                 if cycle_id not in self._virtual_crossed:
                     self._virtual_crossed[cycle_id]=observed_at
-                new_crossing=True
+                last=self._virtual_last_wake.get(cycle_id)
+                if last is None or mono_now-last>=1.0:
+                    self._virtual_last_wake[cycle_id]=mono_now
+                    new_crossing=True
         return new_crossing
 
     def set_virtual_targets(self,targets):
@@ -2651,6 +2658,9 @@ class PublicBidWatcher(threading.Thread):
             retained={cycle_id for cycle_id,tp in incoming.items()
                       if self._virtual_targets.get(cycle_id)==tp}
             self._virtual_woken.intersection_update(retained)
+            # Removed/repriced TP is a new wake period: do not inherit cooldown.
+            self._virtual_last_wake={k:v for k,v in self._virtual_last_wake.items()
+                                     if k in retained}
             # An old observation cannot belong to a removed/repriced TP.
             for cycle_id in set(self._virtual_crossed)-retained:
                 self._virtual_crossed.pop(cycle_id,None)

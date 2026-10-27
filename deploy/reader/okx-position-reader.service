@@ -1,0 +1,22 @@
+[Unit]
+Description=OKX account-wide GET-only Shared Position Reader
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=8
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/okx-grid-live
+Environment=PYTHONUNBUFFERED=1
+RuntimeDirectory=okx-position-reader
+RuntimeDirectoryMode=0700
+ExecStart=/usr/bin/python3 -u /opt/okx-grid-live/okx_position_reader_service.py --registry /root/okx/.okxbot_registry.json --credentials-file /root/okx/.okxbot_account.env --shared-gate /root/okx/.account_positions_gate_v075.json --socket /run/okx-position-reader/positions.sock --read-only-ack POSITIONS_GET_ONLY --quota-scheduling mixed-fifo
+Restart=on-failure
+RestartSec=3s
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

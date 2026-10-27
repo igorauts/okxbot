@@ -74,7 +74,8 @@ class ReaderAlertTests(unittest.TestCase):
         self.poll();self.sent.clear()
         self.poll(info={'reader_running':True,'fetch_failed':3,'quota_failed':0})
         self.poll(info={'reader_running':True,'fetch_failed':3,'quota_failed':0})
-        self.assertEqual(self.keys(),['reader/errors/1'])
+        self.assertEqual(len(self.keys()),1)
+        self.assertTrue(self.keys()[0].startswith('reader/errors/'))
 
     def test_watcher_disabled_without_environment(self):
         with patch.dict(os.environ,{'OKX_POSITION_READER_SOCKET':''}),patch.object(h,'_show') as show:
