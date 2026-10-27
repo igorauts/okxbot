@@ -121,14 +121,26 @@ def _append_recon_profile(result):
             os.close(fd)
 
 class _ReconProfiler:
-    def __init__(self):
+    def __init__(self, *, trace_supplier=None, trace_sink=None):
         self.started_ns=time.perf_counter_ns()
         self.timings_ms={}
         self.counts={}
         self.passes=0
         self.mismatches=0
+        self.trace_supplier=trace_supplier
+        self.trace_sink=trace_sink
 
     def run(self, phase, fun, *args, **kwargs):
+        # Capture BEFORE the phase: crossing during a slow HTTP request must
+        # not retroactively label its entire duration as post-cross latency.
+        trace=''
+        if self.trace_supplier and self.trace_sink:
+            try:
+                label=self.trace_supplier()
+                if isinstance(label,str) and len(label)==24 and label.isascii() and label.isalnum():
+                    trace=label
+            except Exception:
+                pass
         start=time.perf_counter_ns()
         try:
             return fun(*args, **kwargs)
@@ -136,6 +148,13 @@ class _ReconProfiler:
             milliseconds=(time.perf_counter_ns()-start)/1_000_000
             self.timings_ms[phase]=self.timings_ms.get(phase,0.0)+milliseconds
             self.counts[phase]=self.counts.get(phase,0)+1
+            if trace and phase in ('pending','register_attached','track',
+                                   'verify_existing','positions',
+                                   'rest_governor','rest_http','retry_sleep'):
+                try:
+                    self.trace_sink('tp_recon_phase',milliseconds,step=phase,trace_id=trace)
+                except Exception:
+                    pass  # Diagnostic path MUST NOT affect trade/result.
 
     def finish(self, error_type=None):
         elapsed=(time.perf_counter_ns()-self.started_ns)/1_000_000
@@ -479,6 +498,7 @@ class RestGovernor:
 REST_GATE=RestGovernor()
 
 from okx_positions_fifo import AccountPositionsFIFO, GateUnavailable
+from okx_positions_priority import PriorityPositionsFIFO
 from okx_emergency_gate import (EmergencyPositionsGate, EmergencyGateUnavailable,
                                 eligible_emergency_failure)
 EMERGENCY_POSITIONS_GATE = EmergencyPositionsGate()
@@ -490,8 +510,14 @@ class _AccountPositionsGate(AccountPositionsFIFO):
                          LATENCY.record(phase,ms,**fields))
         self._last_warning=0.0
         self._last_emergency_notice=float('-inf')
-    def take(self):
+        self._priority_gate=PriorityPositionsFIFO(shared, reporter=self.reporter)
+    def take(self, priority_supplier=None):
         try:
+            # No Reader opt-in => EXACT previous FIFO path. With Reader, only
+            # direct 0.7.34 requests are explicitly labeled; legacy tickets
+            # remain unlabeled and conservatively EMERGENCY under priority sort.
+            if priority_supplier is not None:
+                return self._priority_gate.take_prioritized(priority_supplier)
             return super().take()
         except (GateUnavailable, OSError) as exc:
             # Only a genuine STORAGE failure can enable emergency GET.
@@ -545,7 +571,8 @@ API=build_api(
     FILL_FETCH_FLIGHT=FILL_FETCH_FLIGHT, _PERF_LOCAL=_PERF_LOCAL,
     _PERF_RECON_ENABLED=_PERF_RECON_ENABLED,
     _flush_confirmed_facts=lambda: _flush_confirmed_facts(),
-    latency_ms=latency_ms, fill_store=lambda: globals().get('FILL_STORE'))
+    latency_ms=latency_ms, fill_store=lambda: globals().get('FILL_STORE'),
+    control_mode=lambda: control_mode())
 A=API()
 
 # account-wide safety latch. Each bot trading the SAME margin account
@@ -640,6 +667,8 @@ ARCHIVE_DB = ROOT / 'state' / 'cycles.sqlite'
 class FillStore:
     def __init__(self):
         self.lock=threading.RLock()
+        # Per-thread metrics only. Never persisted as financial source of truth.
+        self.perf=threading.local()
 
     def _conn(self):
         FILL_DB.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
@@ -707,9 +736,21 @@ class FillStore:
             db.execute('INSERT OR REPLACE INTO meta VALUES (?,?)',('complete_bootstrap','1'))
 
     def get_rows(self,order_ids):
+        """Consistent read-only WAL snapshot, without holding writer's RLock.
+
+        The writer retains its original validated FULL-sync insert path. SQLite
+        WAL readers do not block its writes; all batches share ONE snapshot.
+        Existing quantity/identity/snapshot checks still validate every fill.
+        Missing/uninitialized database is an error, never an empty ledger.
+        """
         order_ids=[str(x) for x in order_ids if x]
         if not order_ids:return []
-        with self.lock,self._managed_conn() as db:
+        # This file was created/bootstrapped before LIVE; never create a new
+        # ledger from a background statistics read. Read-only also avoids
+        # repeating DDL / journal_mode=WAL on each stats connection.
+        uri=FILL_DB.resolve().as_uri()+'?mode=ro'
+        with contextlib.closing(sqlite3.connect(uri,uri=True,timeout=20)) as db:
+            db.execute('BEGIN')
             rows=[]
             for i in range(0,len(order_ids),250):
                 batch=order_ids[i:i+250]
@@ -718,18 +759,32 @@ class FillStore:
             return rows
 
     def ensure_expected(self,expected):
-        if not expected:return []
+        # Diagnostics-only wall durations; exact fills and order ownership
+        # logic is intentionally unchanged. No additional API/SQLite queries.
+        t0=time.perf_counter()
+        if not expected:
+            self.perf.last={'sqlite_first':0.0,'qty_index':0.0,
+                            'missing_recovery':0.0,'sqlite_second':0.0,
+                            'expected':0,'missing':0}
+            return []
         rows=self.get_rows(expected.keys())
+        t1=time.perf_counter()
         volumes={}
         for f in rows:
             oid=str(f['ordId'])
             volumes[oid]=volumes.get(oid,Decimal(0))+D(f['fillSz'])
         missing=[oid for oid,qty in expected.items() if volumes.get(oid,Decimal(0))<qty]
+        t2=time.perf_counter()
         for oid in missing:
             # After bootstrap ONLY exact missing order IDs are downloaded,
             # never a full historic scan per report. Safe, bounded GET retries.
             A.fills_by_order(oid)
+        t3=time.perf_counter()
         if missing:rows=self.get_rows(expected.keys())
+        t4=time.perf_counter()
+        self.perf.last={'sqlite_first':t1-t0,'qty_index':t2-t1,
+                        'missing_recovery':t3-t2,'sqlite_second':t4-t3,
+                        'expected':len(expected),'missing':len(missing)}
         return rows
 
 FILL_STORE=FillStore()
@@ -1713,7 +1768,12 @@ def virtual_escape(st,bid,actual,pending,mode):
         st['escape_collection']={'startedAt':now,'cycles':[c['cycleId'] for c in candidates],
                                  'initialCycleIds':[c['cycleId'] for c in candidates]}
         save(st)
-        log('AGG_ESCAPE_COLLECT',cycles=len(candidates),bid=str(bid))
+        from okx_tp_telemetry import crossing_trace_id
+        collect_trace=crossing_trace_id({c['cycleId']:c.get('virtualTpCrossedAt')
+                                         for c in candidates})
+        LATENCY.record('tp_collect_started',0,trace_id=collect_trace,cycles=len(candidates))
+        log('AGG_ESCAPE_COLLECT',cycles=len(candidates),bid=str(bid),
+            trace_id=collect_trace)
         return 'WAIT'
     ids=set(collect['cycles']) | {c['cycleId'] for c in candidates}
     if now-float(collect['startedAt'])<ESCAPE_COALESCE_SEC:
@@ -1767,9 +1827,16 @@ def virtual_escape(st,bid,actual,pending,mode):
                              ('cross_to_collect_ms','tp_cross_to_collect'),
                              ('collect_to_intent_ms','tp_collect_to_intent')):
             if metric in tp_timing:
+                extra=({'start_unix_ms':tp_timing['first_cross_unix_ms'],
+                        'end_unix_ms':tp_timing['intent_unix_ms']}
+                       if phase=='tp_to_intent' and
+                       'first_cross_unix_ms' in tp_timing and
+                       'intent_unix_ms' in tp_timing else {})
                 LATENCY.record(phase,tp_timing[metric],source=tp_timing.get('cross_source'),
-                               cycles=len(plan),added=tp_timing.get('additional_cycles',0))
-        LATENCY.record('tp_intent_to_submit',intent_to_submit_ms,cycles=len(plan))
+                               cycles=len(plan),added=tp_timing.get('additional_cycles',0),
+                               trace_id=tp_timing.get('trace_id'),**extra)
+        LATENCY.record('tp_intent_to_submit',intent_to_submit_ms,cycles=len(plan),
+                       trace_id=tp_timing.get('trace_id'))
     if len(rows)!=1:raise ExchangeUnresolved('Ambiguous aggregate MARKET response')
     result=rows[0]
     if result.get('sCode')!='0':
@@ -1792,7 +1859,7 @@ def virtual_escape(st,bid,actual,pending,mode):
     for c in wanted:tp_records(c)[-1]['ordId']=group['ordId']
     save(st)
     log('AGG_MARKET_ACK',ordId=group['ordId'],clOrdId=cid,qty=str(qty),
-        intent_to_submit_ms=intent_to_submit_ms)
+        intent_to_submit_ms=intent_to_submit_ms,trace_id=tp_timing.get('trace_id'))
     return 'ACTION'
 
 
@@ -2479,6 +2546,11 @@ class PublicBidWatcher(threading.Thread):
         # the main REST loop becomes runnable. Only the main thread persists it.
         self._virtual_targets={}
         self._virtual_crossed={}  # cycle_id -> first local BID observation epoch
+        # Independent wake latch: consuming timestamps must NEVER re-arm an
+        # unchanged TP while BID remains above it (PAUSE/SOFT/HOLD storm).
+        # Re-arm only after BID retraces BELOW TP, target disappears, or TP
+        # price itself changes. WS still never authorizes an order.
+        self._virtual_woken=set()
         self._lock=threading.Lock()
         self._bid=None
         self._updated=0.0
@@ -2522,15 +2594,22 @@ class PublicBidWatcher(threading.Thread):
                         with self._lock:
                             self._bid=bid
                             self._updated=time.monotonic()
-                            self._capture_crossings(bid)
+                            new_crossing=self._capture_crossings(bid)
                             new_top=grid_top(bid)
                             trigger=(self._grid_ref is not None
                                 and new_top>self._grid_ref
                                 and time.monotonic()-self._last_price_wake>=PRICE_WAKE_COOLDOWN)
                             if trigger:self._last_price_wake=time.monotonic()
                         self.wake.set()
-                        if trigger and self._shared_wake is not None:
+                        # Signal trading thread FIRST; optional diagnostics must
+                        # never delay the wake on a fresh TP crossing.
+                        if (trigger or new_crossing) and self._shared_wake is not None:
                             self._shared_wake.set()
+                        if new_crossing:
+                            from okx_tp_telemetry import crossing_trace_id
+                            with self._lock:
+                                trace_id=crossing_trace_id(self._virtual_crossed)
+                            LATENCY.record('tp_ws_cross',0,trace_id=trace_id)
             except Exception as e:
                 print('[BID WS] reconnect in 5s:',type(e).__name__,flush=True)
                 time.sleep(5)
@@ -2543,20 +2622,46 @@ class PublicBidWatcher(threading.Thread):
                     except Exception: pass
 
     def _capture_crossings(self,bid):
-        # Caller holds _lock. Record FIRST local observation, even if BID
-        # retraces before the main thread completes REST reconciliation.
+        # Caller holds _lock. _virtual_crossed is an unconsumed timestamp
+        # buffer, NOT the wake latch. The main loop consumes it each pass,
+        # including when virtual MARKET is forbidden by PAUSE/SOFT/HOLD.
+        # A still-crossed TP must therefore never trigger another wake merely
+        # because the same target list was republished after REST.
         observed_at=time.time()
+        new_crossing=False
         for cycle_id,tp in self._virtual_targets.items():
-            if bid >= tp:
-                self._virtual_crossed.setdefault(cycle_id,observed_at)
+            if bid < tp:
+                self._virtual_woken.discard(cycle_id)
+                continue
+            if cycle_id not in self._virtual_woken:
+                self._virtual_woken.add(cycle_id)
+                # Preserve the FIRST local observation until consumed.
+                if cycle_id not in self._virtual_crossed:
+                    self._virtual_crossed[cycle_id]=observed_at
+                new_crossing=True
+        return new_crossing
 
     def set_virtual_targets(self,targets):
         # Published by main thread only from reconciled virtual cycles.
+        new_crossing=False
         with self._lock:
-            self._virtual_targets=dict(targets)
+            incoming=dict(targets)
+            # Removed/repriced virtual exposures are different wake periods.
+            # Do not retain a notification latch for an old target level.
+            retained={cycle_id for cycle_id,tp in incoming.items()
+                      if self._virtual_targets.get(cycle_id)==tp}
+            self._virtual_woken.intersection_update(retained)
+            # An old observation cannot belong to a removed/repriced TP.
+            for cycle_id in set(self._virtual_crossed)-retained:
+                self._virtual_crossed.pop(cycle_id,None)
+            self._virtual_targets=incoming
             if (self.connected and self._bid is not None
                 and time.monotonic()-self._updated<=3):
-                self._capture_crossings(self._bid)
+                new_crossing=self._capture_crossings(self._bid)
+        # Target publication after REST may reveal a crossing already present
+        # in the current fresh quote. Wake promptly without placing orders.
+        if new_crossing and self._shared_wake is not None:
+            self._shared_wake.set()
 
     def take_crossed_virtual_stamps(self):
         with self._lock:
@@ -2675,7 +2780,9 @@ def reconcile_position(st, timeout=30, pause=0.5, *, allow_mismatch=False):
     mismatch persists beyond the timeout, fail closed with existing orders
     still on the exchange.
     """
-    p=_ReconProfiler() if globals().get('_PERF_RECON_ENABLED',False) else None
+    p=(_ReconProfiler(trace_supplier=getattr(A,'_reader_trace_id',None),
+                      trace_sink=LATENCY.record)
+       if globals().get('_PERF_RECON_ENABLED',False) else None)
     if p is not None:_PERF_LOCAL.current=p
     try:
         started=time.monotonic()
@@ -3779,6 +3886,7 @@ def print_full_stats(pnl=None, *, require_complete=False):
     # Prefer monotonic timing while allowing offline clock-injection tests.
     clock=getattr(time,'perf_counter',time.time)
     t_start=clock()
+    t_start_unix_ms=time.time()*1000
     st=json.loads(DATA.read_text()) if DATA.exists() else None
     if st is None:
         print('📊 GRID STATISTICS: торговое состояние ещё не создано',flush=True)
@@ -3794,6 +3902,7 @@ def print_full_stats(pnl=None, *, require_complete=False):
     expected=expected_filled_orders(st,snapshot_archive=archive)
     fetched=stats_exchange_fills(st,snapshot_archive=archive)
     t_fills=clock()
+    fills_breakdown=getattr(getattr(globals().get('FILL_STORE'),'perf',None),'last',{})
     # A BUY/SELL can fill AGAIN on the same ordId while REST paginates. Its
     # later fills must not be folded into the earlier snapshot or charged twice.
     fills=trim_verified_fills_for_snapshot(fetched,expected)
@@ -3858,6 +3967,21 @@ def print_full_stats(pnl=None, *, require_complete=False):
             'report': report,
         })
     t_written=clock()
+    # Wall interval anchors allow OFFLINE overlap analysis with WS→intent.
+    # These records are enqueued asynchronously *after* finance calculation;
+    # they cannot modify rows, PnL, rate limits or market submissions.
+    try:
+        journal=globals().get('LATENCY')
+        if journal is not None:
+            for step,begin,end in (
+                    ('capture',t_start,t_capture),('fills',t_capture,t_fills),
+                    ('calculation',t_fills,t_calculated),('ledger',t_calculated,t_ledger),
+                    ('report',t_ledger,t_render),('write',t_render,t_written)):
+                journal.record('stats_stage',(end-begin)*1000,step=step,
+                               start_unix_ms=round(t_start_unix_ms+(begin-t_start)*1000,3),
+                               end_unix_ms=round(t_start_unix_ms+(end-t_start)*1000,3))
+    except Exception:
+        pass  # Diagnostics must never stop publishing verified financial data.
     print(f'⏱ StatsWorker: total={t_written-t_start:.3f}s '
           f'capture={t_capture-t_start:.3f}s '
           f'fills={t_fills-t_capture:.3f}s '
@@ -3866,7 +3990,13 @@ def print_full_stats(pnl=None, *, require_complete=False):
           f'report={t_render-t_ledger:.3f}s '
           f'write={t_written-t_render:.3f}s '
           f'cycles={len(archive)+len(st.get("archived_cycles",[]))+len(st.get("cycles",{}))} '
-          f'fills_count={len(fills)}',flush=True)
+          f'fills_count={len(fills)} '
+          f'fills_sqlite_first={fills_breakdown.get("sqlite_first",0):.3f}s '
+          f'fills_qty_index={fills_breakdown.get("qty_index",0):.3f}s '
+          f'fills_missing_recovery={fills_breakdown.get("missing_recovery",0):.3f}s '
+          f'fills_sqlite_second={fills_breakdown.get("sqlite_second",0):.3f}s '
+          f'fills_expected_orders={fills_breakdown.get("expected",0)} '
+          f'fills_missing_orders={fills_breakdown.get("missing",0)}',flush=True)
     print('\n'+report+'\n',flush=True)
     return True
 
@@ -4032,6 +4162,26 @@ class StatsWorker(threading.Thread):
             time.sleep(delay)
 
 
+def active_tp_trace_id(st, market):
+    """Best-effort WS cohort ID only; no trade authorization or state changes."""
+    from okx_tp_telemetry import crossing_trace_id
+    with market._lock:
+        crossed=dict(market._virtual_crossed)
+    for cycle in st.get('cycles',{}).values():
+        if cycle.get('state')=='VIRTUAL_TP' and cycle.get('virtualTpCrossed'):
+            crossed.setdefault(cycle.get('cycleId'),cycle.get('virtualTpCrossedAt'))
+    return crossing_trace_id(crossed)
+
+
+def reader_exit_priority_hint(st, market):
+    # Scheduling hint only; no trading authorization or WS mutation.
+    with market._lock:
+        crossed = bool(market._virtual_crossed)
+    return (crossed or bool(st.get('escape_collection')) or any(
+        c.get('virtualTpCrossed') and c.get('state') == 'VIRTUAL_TP'
+        for c in st.get('cycles', {}).values()))
+
+
 def main():
     if TERMINAL_ONLY:
         # Explicit historical/backfill mode: never acquires the trading lock,
@@ -4086,6 +4236,11 @@ def main():
             return
         watcher=WSWatcher();watcher.start()
         market=PublicBidWatcher(shared_wake=watcher.wake);market.start()
+        # Prefer EXIT position GET while an observed virtual TP crossing or
+        # durable collection remains pending. This changes only IPC queue
+        # priority, never the position/order safety reconciliation itself.
+        A._reader_exit_hint=lambda: reader_exit_priority_hint(st,market)
+        A._reader_trace_id=lambda: active_tp_trace_id(st,market)
         pnl_worker=PnLWorker(pnl);pnl_worker.start()
         stats_worker=StatsWorker(pnl);stats_worker.start()
         dd_worker=BotDrawdownSampler(market,pnl)

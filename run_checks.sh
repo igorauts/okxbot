@@ -26,3 +26,22 @@ python3 -B tests/test_financial_snapshot_0732.py
 python3 -B tests/test_attached_tp_recovery.py
 python3 -B tests/test_stats_worker_optimization.py
 python3 -B tests/test_telegram_terminal_health.py
+
+# New offline-only reader/manager regressions, no OKX API access.
+python3 -B -m unittest tests.test_position_reader tests.test_position_reader_integration tests.test_reader_manager_cap tests.test_position_priority_rc4 tests.test_reader_service_archive_rc4 tests.test_priority_multiprocess_rc4 tests.test_stats_fills_stages_rc5 -q
+python3 -B -m unittest tests.test_reader_resilience_rc6 -q
+python3 -B -m unittest tests.test_reader_deadlines_stress -q
+
+# RC8: quota fairness during mixed rollout, direct tickets, breaker and registry.
+python3 -B -m unittest tests.test_reader_mixed_rollout_rc8 -q
+# RC9: event-specific WS wake and linked GET/intent telemetry (offline).
+python3 -B -m unittest tests.test_rc9_ws_wake_trace -q
+
+# WAL concurrency and causal-only reconciliation diagnostics, OFFLINE.
+python3 -B -m unittest tests.test_rc10_stats_wal_recon -q
+
+# RC11 P0 blockers: no repeated WS wake in PAUSE/SOFT, strict mixed FIFO.
+python3 -B -m unittest tests.test_rc11_wake_latch_mixed_fifo -q
+
+# Shared Reader Telegram watchdog incident/dedup regressions.
+python3 -B -m unittest tests.test_reader_telegram_alerts -q

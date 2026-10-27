@@ -7,4 +7,5 @@ ASSETS = {
     'Zcash': 'ZEC',
     'Sui': 'SUI',
     'Doodles': 'DOOD',
+    'Rayls': 'RLS',
 }

@@ -1,3 +1,9 @@
+## v0.7.34 — Shared Position Reader + faster virtual TP MARKET (LIVE verified, 2026-10-27)
+
+- LIVE: four bots verified on 0.7.34, common GET-only Reader RC12, Telegram Reader alerts RC13 and durable service recovery; priority FIFO remains OFF (`mixed-fifo`).
+- Financial pre/post GET-only audits 4/4 PASS; four ZEC MARKET SELL completed after rollout, Telegram delivery confirmed. First-cross TP→intent N=4, P50 558.4 ms (not fill latency).
+- Offline regressions and release archive verification, no LIVE changes during GitHub publication. See `V0734_LIVE_RELEASE_NOTES_RU.md`.
+
 # v0.7.33 — LIVE-verified StatsWorker optimization and Telegram PANIC hotfix (2026-10-26)
 
 - Full-source final release incorporating 0.7.31 TP observability and MARKET SELL presentation, 0.7.32 consistent financial snapshots and attached TP failure handling, 0.7.33 CPU optimization, plus an independently deployed Telegram-only terminal startup health hotfix.

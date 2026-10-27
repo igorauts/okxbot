@@ -5,6 +5,8 @@ Never restarts a service, writes bot state, or accesses the OKX exchange.
 Systemd journal cursors let a fast restart be observed between 5s polls.
 """
 import json
+import os
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -21,7 +23,8 @@ def _show(unit):
     try:
         p = _run(['systemctl', 'show', unit, '--no-pager',
                   '-p', 'ActiveState', '-p', 'SubState', '-p', 'InvocationID',
-                  '-p', 'MainPID', '-p', 'ActiveEnterTimestampMonotonic'], timeout=4)
+                  '-p', 'MainPID', '-p', 'ActiveEnterTimestampMonotonic',
+                  '-p', 'Result', '-p', 'NRestarts'], timeout=4)
         if p.returncode:
             return None
         return dict(line.split('=', 1) for line in p.stdout.splitlines() if '=' in line)
@@ -61,6 +64,130 @@ def _action(row):
     if msg.startswith('Started '):
         return 'start'
     return None
+
+
+def _reader_health_ipc(path):
+    """GET-free, bounded local health check. No trading credentials or OKX REST."""
+    if not os.path.isabs(path):
+        return None
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+            deadline = time.monotonic() + 2.0
+            client.settimeout(max(0.05, deadline-time.monotonic()))
+            client.connect(path)
+            client.settimeout(max(0.05, deadline-time.monotonic()))
+            client.sendall(b'{"schema":1,"op":"health"}\n')
+            result=bytearray()
+            while b'\n' not in result and len(result)<=4096:
+                left=deadline-time.monotonic()
+                if left<=0:
+                    raise TimeoutError('Reader health deadline expired')
+                client.settimeout(left)
+                chunk=client.recv(4096)
+                if not chunk:
+                    raise OSError('Reader health socket closed')
+                result.extend(chunk)
+                if len(result)>4096:
+                    raise ValueError('Reader health oversized response')
+        payload=json.loads(bytes(result).split(b'\n',1)[0])
+        info=payload.get('data') if isinstance(payload,dict) else None
+        if (isinstance(payload,dict) and payload.get('ok') is True and isinstance(info,dict)
+                and info.get('reader_running') is True
+                and type(info.get('fetch_failed')) is int
+                and type(info.get('quota_failed')) is int
+                and info['fetch_failed']>=0 and info['quota_failed']>=0):
+            return info
+    except (OSError,ValueError,TypeError,KeyError,TimeoutError,UnicodeError):
+        pass
+    return None
+
+
+def position_reader_health_check(api, st):
+    """Reader DOWN/RECOVERED/FAILED via existing durable Telegram outbox.
+
+    Health is GET-free. NRestarts catches a crash and auto-recovery that both
+    happen between the 5s monitor polls. Alerts are deduplicated per incident.
+    The monitoring service must explicitly opt in with a Reader socket env var.
+    """
+    path=os.environ.get('OKX_POSITION_READER_SOCKET', '').strip()
+    if not path:
+        return
+    record=st.setdefault('position_reader_health',
+                         {'down':False,'episode':0,'fetch_failed':0,'quota_failed':0})
+    info=_reader_health_ipc(path)
+    props=_show('okx-position-reader.service')
+    active=props.get('ActiveState') if props else None
+    # A healthy stray socket cannot conceal a failed/stopped systemd unit.
+    online=(info is not None and (props is None or active=='active'))
+    failed=(props is not None and active=='failed')
+
+    # Restart count is local, never reset manually; decreasing value means
+    # systemd itself reset/rebooted, which is not a new reader crash.
+    n_restarts=None
+    if props is not None:
+        try:
+            raw=props.get('NRestarts')
+            if raw is not None and str(raw).isdecimal():
+                n_restarts=int(raw)
+        except (ValueError,TypeError):
+            pass
+    prev_restarts=record.get('systemd_n_restarts')
+    missed_crash=(online and record.get('down') is not True
+                  and type(prev_restarts) is int
+                  and n_restarts is not None and n_restarts>prev_restarts)
+    if n_restarts is not None:
+        record['systemd_n_restarts']=n_restarts
+
+    if online and not record.get('monitor_armed'):
+        one(api,st,'reader/watchdog/armed',
+            'ℹ️ Shared Position Reader: Telegram-контроль включён. '
+            'DOWN / RECOVERED / FAILED; без торговых команд.')
+        record['monitor_armed']=True
+
+    if not online and record.get('down') is not True:
+        record['episode']=int(record.get('episode',0))+1
+        one(api,st,'reader/unavailable/'+str(record['episode']),
+            '🚨 Shared Position Reader DOWN: нет подтверждённого health IPC '
+            'или служба systemd неактивна. Боты должны использовать '
+            'резервный прямой GET через общую квоту.')
+    elif online and record.get('down') is True:
+        one(api,st,'reader/recovered/'+str(record['episode']),
+            '✅ Shared Position Reader RECOVERED: systemd active, health IPC PASS.')
+    elif missed_crash:
+        # Health may already be restored by the next monitor tick: record both
+        # boundaries instead of silently missing a fast automatic restart.
+        record['episode']=int(record.get('episode',0))+1
+        incident=str(record['episode'])
+        one(api,st,'reader/unavailable/'+incident,
+            '🚨 Shared Position Reader DOWN: systemd обнаружил аварийный '
+            'перезапуск между опросами. Проверить journalctl.')
+        one(api,st,'reader/recovered/'+incident,
+            '✅ Shared Position Reader RECOVERED: автоматический рестарт, '
+            'health IPC PASS.')
+
+    if failed and not record.get('failed_alerted'):
+        reason=str(props.get('Result') or 'unknown')[:80]
+        one(api,st,'reader/failed/'+str(record['episode']),
+            '🔴 Shared Position Reader FAILED: systemd перевёл службу '
+            'в failed и не выполняет восстановление. '
+            'Result='+reason+'. Проверить systemctl status и journalctl.')
+        record['failed_alerted']=True
+    if online:
+        record['failed_alerted']=False
+
+    if info is not None:
+        counters=(info['fetch_failed'],info['quota_failed'])
+        if record.get('counters_initialized'):
+            prev=(int(record.get('fetch_failed',0)),int(record.get('quota_failed',0)))
+            if counters[0]>prev[0] or counters[1]>prev[1]:
+                record['episode']=int(record.get('episode',0))+1
+                one(api,st,'reader/errors/'+str(record['episode']),
+                    '⚠️ Shared Position Reader: новые ошибки GET/quota; '
+                    'проверьте journal и прямые fallback GET.')
+        # Baseline historical counters on first activation: no false warning.
+        record['fetch_failed'],record['quota_failed']=counters
+        record['counters_initialized']=True
+    record['down']=not online
 
 
 def service_check(api, st, services, roots):

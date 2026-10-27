@@ -38,15 +38,37 @@ class LatencyJournal:
                 'buy_post', 'buy_batch', 'ws_drain', 'loop_pass',
                 'fills_history_shared_wait', 'pnl_submit',
                 'drawdown_submit',
+                'tp_ws_cross','tp_collect_started',
                 'tp_to_intent', 'tp_cross_to_collect',
-                'tp_collect_to_intent', 'tp_intent_to_submit'):
+                'tp_collect_to_intent', 'tp_intent_to_submit',
+                'position_reader_ipc','position_reader_quota','position_reader_http',
+                'tp_recon_phase','stats_stage'):
                 return
             permitted = {'route', 'method', 'passes', 'mismatches', 'outcome',
                          'count', 'placed', 'attempted', 'status', 'partial',
                          'resolved', 'active_buys', 'target_buys', 'dropped',
-                         'reason','attempt','source','cycles','added'}
+                         'reason','attempt','source','cycles','added',
+                         'priority','batch_size','trace_id','step',
+                         'start_unix_ms','end_unix_ms'}
             safe = {k: v for k,v in fields.items()
                     if k in permitted and (v is None or type(v) in (str, int, float, bool))}
+            if 'trace_id' in safe and (len(str(safe['trace_id']))>32 or
+                                       not str(safe['trace_id']).isascii() or
+                                       not str(safe['trace_id']).isalnum()):
+                safe.pop('trace_id')
+            if 'step' in safe and safe['step'] not in (
+                    'pending','register_attached','track','verify_existing',
+                    'positions','rest_governor','rest_http','retry_sleep',
+                    'capture','fills','calculation','ledger','report','write'):
+                safe.pop('step')
+            # A precise local-clock interval is only a diagnostic observation.
+            # Reject nonsensical bounds; never use them as trade permission.
+            if 'start_unix_ms' in safe or 'end_unix_ms' in safe:
+                start=safe.get('start_unix_ms');end=safe.get('end_unix_ms')
+                if not (type(start) in (int,float) and type(end) in (int,float)
+                        and 0<start<=end and end-start<=3_600_000):
+                    safe.pop('start_unix_ms',None)
+                    safe.pop('end_unix_ms',None)
             if 'route' in safe:
                 route = safe['route']
                 if not route.startswith('/api/v5/') or '?' in route or len(route) > 100:

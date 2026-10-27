@@ -179,6 +179,14 @@ class AccountPositionsFIFO:
         finally:
             os.close(fd)
 
+    def _entry_extension(self):
+        """Default legacy FIFO ticket has no priority fields."""
+        return {}
+
+    def _sort_queue(self, queue, now):
+        """Original client preserves strict FIFO and wire-format semantics."""
+        return queue
+
     def _visit(self, ticket, born, *, cancel=False):
         fd = self._open(self.queue_path)
         try:
@@ -212,6 +220,7 @@ class AccountPositionsFIFO:
                 # scheduler suspension), fail closed rather than cut the line.
                 if born is None:
                     entry = {'id': ticket, 'pid': os.getpid(), 'created': now, 'seen': now}
+                    entry.update(self._entry_extension())
                     queue.append(entry)
                     dirty = True
                     born = now
@@ -220,6 +229,11 @@ class AccountPositionsFIFO:
             elif now - found['seen'] >= 2.0:
                 found['seen'] = now
                 dirty = True
+            # Extension hook: default is a strict no-op for existing engines.
+            reordered = self._sort_queue(queue, now)
+            if reordered != queue:
+                dirty = True
+                queue = reordered
             delay = 0.05
             granted = False
             if queue and queue[0]['id'] == ticket:

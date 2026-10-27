@@ -17,13 +17,74 @@ from decimal import Decimal
 from okx_contracts import validate_spec
 
 
+def verify_reader_uid(api):
+    """Prove account identity using THIS engine's own credentials on first use.
+
+    This is a GET-only startup guard. No UID may be supplied merely from .env.
+    """
+    from okx_position_reader_client import PositionReaderUnavailable
+    uid=getattr(api,'_reader_uid_verified',None)
+    if uid is not None:
+        return uid
+    rows=api.req('GET','/api/v5/account/config')
+    if len(rows)!=1 or not isinstance(rows[0],dict):
+        raise PositionReaderUnavailable('Account Reader identity not verifiable')
+    uid=rows[0].get('uid')
+    if not isinstance(uid,str) or not uid.strip() or len(uid)>64:
+        raise PositionReaderUnavailable('Account Reader UID missing')
+    api._reader_uid_verified=uid
+    return uid
+
+
+def direct_position_priority(api, control_mode):
+    """Re-evaluated at every FIFO visit; PANIC can promote a waiting ticket.
+
+    Only scheduling differs. Verification of quantity, ownership and durable
+    intents stays with the trading engine.
+    """
+    mode=control_mode() if callable(control_mode) else None
+    if mode in ('HARD','PANIC'):
+        return 0  # EMERGENCY
+    hint=getattr(api,'_reader_exit_hint',None)
+    if callable(hint):
+        try:
+            if hint(): return 1  # EXIT
+        except Exception:
+            pass
+    return 2  # NORMAL
+
+
+def use_priority_positions_fifo(env):
+    """Never demote direct GET behind legacy tickets during mixed rollout.
+
+    Both the Reader service AND each bot must be explicitly switched by the
+    operator only after all account engines understand priority tickets.
+    Default (and invalid/incomplete opt-in) is original strict FIFO.
+    """
+    return bool(env.get('OKX_POSITION_READER_SOCKET')
+                and env.get('OKX_POSITION_READER_QUOTA_SCHEDULING')=='priority'
+                and env.get('OKX_POSITION_READER_PRIORITY_ACK')
+                    =='ALL_BOTS_PRIORITY_AWARE')
+
+
+def position_trace_id(api):
+    """Read an optional diagnostic label without influencing trading."""
+    supplier=getattr(api,'_reader_trace_id',None)
+    if not callable(supplier):return ''
+    try:
+        value=supplier()
+        return value if isinstance(value,str) and len(value)==24 and value.isalnum() else ''
+    except Exception:
+        return ''
+
+
 def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
               CONTRACT_LOT, CONTRACT_MIN, CONTRACT_VALUE, PRICE_STEP,
               QTY, STEP, TP, ExchangeTemporary, ExchangeUnresolved,
               OrderExpiredBeforeSend, RateLimitedError, GateUnavailable,
               REST_GATE, FILL_HISTORY_GATE, ACCOUNT_POSITIONS_GATE,
               FILL_FETCH_FLIGHT, _PERF_LOCAL, _PERF_RECON_ENABLED,
-              _flush_confirmed_facts, latency_ms, fill_store):
+              _flush_confirmed_facts, latency_ms, fill_store, control_mode=None):
     class API:
         """One verified TLS keep-alive connection PER THREAD, never shared across threads.
 
@@ -87,7 +148,10 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
                 gate_start=time.perf_counter_ns()
                 urgent=(p.run('rest_governor',REST_GATE.begin,method,route,background=background)
                         if p is not None else REST_GATE.begin(method,route,background=background))
-                latency_ms('rest_gate',gate_start,method=method,route=route)
+                tp_trace=position_trace_id(self) if method=='GET' and route in (
+                    '/api/v5/account/positions','/api/v5/trade/orders-pending') else ''
+                latency_ms('rest_gate',gate_start,method=method,route=route,
+                           trace_id=tp_trace)
                 limited=False
                 try:
                     if method=='GET' and route=='/api/v5/trade/fills-history':
@@ -102,9 +166,20 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
                     if method=='GET' and route=='/api/v5/account/positions':
                         position_gate_start=time.perf_counter_ns()
                         try:
-                            ACCOUNT_POSITIONS_GATE.take()
+                            # Mixed-version fleet must use EXACT legacy FIFO
+                            # for all direct reads, including Reader fallback
+                            # and no-position narrow GET. Otherwise NORMAL
+                            # tickets starve behind unlabeled v0.7.33 entries.
+                            # Opt in to priority ONLY after every active engine
+                            # is updated and Reader has been explicitly switched
+                            # to priority with the same operator acknowledgment.
+                            if use_priority_positions_fifo(ENV):
+                                ACCOUNT_POSITIONS_GATE.take(lambda: direct_position_priority(self,control_mode))
+                            else:
+                                ACCOUNT_POSITIONS_GATE.take()
                         finally:
-                            latency_ms('positions_gate',position_gate_start,method=method,route=route)
+                            latency_ms('positions_gate',position_gate_start,method=method,route=route,
+                                       trace_id=tp_trace)
                     ts=datetime.now(timezone.utc).isoformat(timespec='milliseconds').replace('+00:00','Z')
                     sig=base64.b64encode(hmac.new(ENV['OKX_API_SECRET'].encode(),
                         (ts+method+path+payload).encode(),hashlib.sha256).digest()).decode()
@@ -124,7 +199,7 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
                             http_status=status
                         finally:
                             latency_ms('http',http_start,method=method,route=route,
-                                       status=http_status,attempt=attempt+1)
+                                       status=http_status,attempt=attempt+1,trace_id=tp_trace)
                     except ExchangeTemporary:
                         if method!='GET':raise ExchangeUnresolved('Uncertain POST response; saved intent must reconcile')
                         if attempt==attempts-1:raise
@@ -211,6 +286,70 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
             return data[0] if data else None
 
         def positions(self):
+            # Explicit OFFLINE-candidate opt-in. The published engine path is
+            # unchanged unless an operator separately provisions the Reader.
+            # No trading TTL: the Reader must start a GET AFTER each request.
+            socket_path=ENV.get('OKX_POSITION_READER_SOCKET')
+            if socket_path:
+                # Reader failure must NOT cost 5s on each subsequent pass.
+                # A bounded circuit breaker uses direct GET via SAME gate.
+                if time.monotonic()<getattr(self,'_reader_bypass_until',0.0):
+                    return self.req('GET','/api/v5/account/positions',{'instId':INST})
+                from okx_position_reader_client import (read_positions,
+                                                       PositionReaderUnavailable,
+                                                       PositionReaderEmpty)
+                import secrets
+                try:
+                    emergency=bool(control_mode is not None and
+                                   control_mode() in ('HARD','PANIC'))
+                    trace_id=position_trace_id(self) or secrets.token_hex(12)
+                    hint=getattr(self,'_reader_exit_hint',None)
+                    # Priority is scheduling-only and cannot affect REST safety.
+                    exit_priority=False
+                    if callable(hint) and not emergency:
+                        try:exit_priority=bool(hint())
+                        except Exception:exit_priority=False
+                    started=time.perf_counter_ns()
+                    priority_name=('emergency' if emergency else ('exit' if exit_priority else 'normal'))
+                    result='unavailable'
+                    def record_snapshot_timing(diag):
+                        # Only the already-validated Reader result can supply
+                        # these diagnostic values. They never authorize POST.
+                        if 'quota_wait_ms' in diag:
+                            latency_ms('position_reader_quota',
+                                       time.perf_counter_ns()-int(diag['quota_wait_ms']*1_000_000),
+                                       priority=priority_name,trace_id=trace_id,
+                                       batch_size=diag.get('batch_size'))
+                        if 'fetch_ms' in diag:
+                            latency_ms('position_reader_http',
+                                       time.perf_counter_ns()-int(diag['fetch_ms']*1_000_000),
+                                       priority=priority_name,trace_id=trace_id,
+                                       batch_size=diag.get('batch_size'))
+                    try:
+                        data=read_positions(socket_path,INST,
+                                            account_uid=verify_reader_uid(self),
+                                            emergency=emergency,exit_priority=exit_priority,
+                                            trace_id=trace_id,on_trace=record_snapshot_timing)
+                        result='ok'
+                        self._reader_bypass_until=0.0
+                        return data
+                    finally:
+                        latency_ms('position_reader_ipc',started,method='GET',
+                                   route='/api/v5/account/positions',outcome=result,
+                                   trace_id=trace_id,priority=priority_name)
+                except PositionReaderEmpty:
+                    # An omitted instrument does NOT prove zero. Avoid a
+                    # duplicate broad GET on every pass for a flat bot.
+                    self._reader_bypass_until=time.monotonic()+60.0
+                    return self.req('GET','/api/v5/account/positions',{'instId':INST})
+                except (PositionReaderUnavailable, ExchangeTemporary) as exc:
+                    self._reader_bypass_until=time.monotonic()+60.0
+                    # RUN must not be blinded by a Reader outage or unknown
+                    # instrument. A direct GET consumes the SAME original
+                    # account FIFO permit as other bots, never a second quota.
+                    # Never trust rejected Reader data. Original engine still
+                    # performs all position/order/ownership safety checks.
+                    return self.req('GET','/api/v5/account/positions',{'instId':INST})
             return self.req('GET','/api/v5/account/positions',{'instId':INST})
 
         def ticker(self):

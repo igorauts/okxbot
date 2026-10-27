@@ -8,6 +8,8 @@ import argparse
 import curses
 import codecs
 import contextlib
+import fcntl
+import functools
 import io
 import selectors
 import json
@@ -274,9 +276,63 @@ def scan_other_live_same_instrument(current_path, instrument):
     return None
 
 
+def registration_guard(fn):
+    """Serialize account-level new/attach operations, never replace live inode."""
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        BASE.mkdir(mode=0o700,parents=True,exist_ok=True)
+        fd=os.open(BASE/'.okxbot_registration.lock',
+                   os.O_CREAT|os.O_RDWR|getattr(os,'O_NOFOLLOW',0),0o600)
+        try:
+            fcntl.flock(fd,fcntl.LOCK_EX)
+            return fn(*args,**kwargs)
+        finally:
+            fcntl.flock(fd,fcntl.LOCK_UN)
+            os.close(fd)
+    return wrapped
+
+
+def require_account_capacity(entries, *, proposed_instrument=None, proposed_name=None):
+    """Cap nonterminal (including stopped/restartable) bots at ten per account."""
+    if not isinstance(entries,dict):
+        raise RuntimeError('Malformed account registry')
+    active=[];instruments=set()
+    for name,entry in entries.items():
+        if not isinstance(name,str) or not isinstance(entry,dict):
+            raise RuntimeError('Malformed account registry entry')
+        try:
+            root=bot_path(entry)  # malformed/missing instance blocks a registry write
+            cfg=json.loads((root/'config.json').read_text(encoding='utf-8'))
+        except (KeyError, TypeError, ValueError, OSError) as exc:
+            raise RuntimeError('Unverifiable account registry entry') from exc
+        instrument=cfg.get('instrument')
+        if not isinstance(instrument,str) or not re.fullmatch(r'[A-Z0-9]+-USDT-SWAP',instrument):
+            raise RuntimeError('Bad instrument in account registry')
+        # ONLY explicitly terminal, inactive instances can be excluded.
+        # A stopped RUN/SOFT bot still occupies a slot and cannot be replaced.
+        if instance_terminal(entry) and not service_running(unit_name(entry)):
+            continue
+        if instrument in instruments:
+            raise RuntimeError('Duplicate nonterminal instrument in NET account')
+        instruments.add(instrument)
+        active.append(name)
+    if proposed_instrument is not None:
+        if proposed_instrument in instruments:
+            raise RuntimeError('Only one nonterminal bot per NET instrument')
+        active.append(proposed_name or proposed_instrument)
+    if len(active)>10:
+        raise RuntimeError('Account limit: maximum ten nonterminal bots')
+    return len(active)
+
+
+@registration_guard
 def cmd_new(env_file):
     latest_engine()  # Fail closed BEFORE a wizard can write a new bot.
     entries = load_registry()
+    require_account_capacity(entries)  # includes malformed registry fail-closed
+    if sum(not instance_terminal(e) or service_running(unit_name(e))
+           for e in entries.values())>=10:
+        raise RuntimeError('Account limit: maximum ten nonterminal bots')
     env, raw = wizard.read_env(env_file)
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         raise RuntimeError('Для опросника нужен интерактивный SSH-терминал')
@@ -285,6 +341,7 @@ def cmd_new(env_file):
         print('Отменено. Нового бота нет.')
         return
     name = wizard.validate_name(ctx['name'], entries.keys())
+    require_account_capacity(entries,proposed_instrument=ctx['instrument'],proposed_name=name)
     slug = safe_slug(name, entries)
     path = BASE / slug
     service = f'okx-grid-{slug}'
@@ -315,6 +372,7 @@ def cmd_new(env_file):
             cmd_start(name)
 
 
+@registration_guard
 def cmd_attach(name, path, service):
     """Read-only registration of an EXISTING systemd bot, never restart it."""
     entries = load_registry()
@@ -332,6 +390,8 @@ def cmd_attach(name, path, service):
     if any(e['path'] == str(source) or e['service'] == service for e in entries.values()):
         raise RuntimeError('Этот бот или служба уже привязаны к другому имени')
     slug=safe_slug(name,entries)
+    cfg=json.loads((source/'config.json').read_text(encoding='utf-8'))
+    require_account_capacity(entries,proposed_instrument=cfg.get('instrument'),proposed_name=name)
     entries[name]={'slug':slug,'path':str(source),'service':service}
     save_registry(entries)
     print(f'Бот «{name}» привязан: {source} ({service})')
@@ -339,6 +399,8 @@ def cmd_attach(name, path, service):
 
 
 def cmd_start(name):
+    # Account capacity is a CREATION/ATTACH invariant only. Existing bots
+    # must remain startable even if an unrelated archived registry path moved.
     name,entry=find_entry(name)
     path=bot_path(entry)
     unit=unit_name(entry)
