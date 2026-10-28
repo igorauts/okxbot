@@ -198,8 +198,10 @@ class ReleaseMetadata(unittest.TestCase):
         self.assertEqual(len(RELEASE_VERSION.split('.')),3)
         self.assertEqual(len(ENGINE_VERSION.split('.')),3)
         self.assertTrue(validate_version_ids())
-        self.assertNotEqual(RELEASE_VERSION,ENGINE_VERSION)
-        self.assertEqual(RELEASE_KIND,'maintenance')
+        if RELEASE_KIND == 'maintenance':
+            self.assertNotEqual(RELEASE_VERSION,ENGINE_VERSION)
+        else:
+            self.assertEqual(RELEASE_VERSION,ENGINE_VERSION)
         with self.assertRaises(RuntimeError):
             validate_version_ids(RELEASE_VERSION+'.1',ENGINE_VERSION)
     def test_reader_error_new_episode_after_long_quiet_period(self):

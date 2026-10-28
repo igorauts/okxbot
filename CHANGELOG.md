@@ -1,3 +1,37 @@
+## v0.7.38 — LIVE-verified (2026-10-28 UTC)
+
+- Контролируемый LIVE upgrade DOOD c engine 0.7.37 → 0.7.38, с бэкапом и финансовым GET-only аудитом. BEAT и INIT созданы и торгуют на engine 0.7.38; CAP также торговал и штатно завершён PANIC SELL (позиция 0). Ранее согласованный набор из шести работающих ботов продолжает наблюдение.
+- 5–5,8s тихий independent audit + приватные WS и grid wake. BUY fail-closed при новых WS-событиях во время reconciliation; перед BUY POST повторно проверяется очередь private events; PANIC не задерживается из-за REST error backoff.
+- LIVE DOOD: ~10,7 timer audits/min; BEAT/INIT реальные BUY/TP. INIT MARKET SELL Telegram сообщение действительно получено.
+- Менеджер создания: BEAT, CAP, INIT, BLUR, DOS (UI only; no engine whitelist).
+- Опубликованный исходник engine hash идентичен RC4. `mixed-fifo` активен, Priority FIFO OFF; финансовые POST/TP/PANIC и REST quota без иных изменений. См. `V0738_LIVE_RELEASE_NOTES_RU.md`.
+
+## v0.7.38 — OFFLINE RC4, integration chaos and private-event snapshot gate (NOT LIVE)
+
+- Minimum-change RC3 baseline retained: 5–5.8s quiet audit, prompt event wakes,
+  200ms local control poll, full REST reconciliation before strategic orders.
+- Fail-closed: if a new private orders WS event arrives during the REST snapshot,
+  restart reconciliation before allowing trading decisions; recheck the private
+  event queue at the BUY POST boundary after grid/candidate computation.
+- PANIC/HARD request arriving during failed REST no longer waits through the
+  existing 3-second recovery backoff before the next emergency loop: compare
+  control mode to the mode captured at the beginning of that REST pass.
+- Added 13 offline integration-fault tests executing the actual live_loop AST
+  against synthetic objects and zero OKX or VPS access. Tested event bursts,
+  stale snapshot, WS epoch changes, unhealthy WS, unknown POST, REST outage,
+  and emergency transitions.
+- Reader regression modules run in isolated subprocesses in run_checks.sh;
+  all original test modules remain enabled. RC4 remains strictly NOT LIVE.
+
+## v0.7.38 — Minimal 5s reconcile, OFFLINE RC3 (NOT LIVE)
+
+- 5..5.8s quiet REST reconciliation with stable per-bot jitter; immediate private WS/order + public grid/virtual TP wakes preserved.
+- Manager control local poll <=200ms, event and protective deadlines independent of background audit. No automatic high-frequency REST mode on unhealthy WS.
+- Strict WS health (private login+subscribe, public subscribe, first ping/pong, subsequent pong deadline); block new BUY on degraded connection and across reconnect generations; emergency/TP safety paths unchanged.
+- Preserve fresh complete REST reconciliation before any trading decision; keep REST order submission and Shared Reader/FIFO unchanged.
+- Replace previously disabled heavy EventPlanner bridge with a small explicit idle wait; offline-only tests and source SHA guard.
+- See `V0738_RC3_MINIMAL_5S_AUDIT_RU.md`. **No LIVE rollout or GitHub publication.**
+
 ## 0.7.36 — Account Reader diagnostics and new-bot registration (LIVE-verified 2026-10-28 UTC)
 
 - Package 0.7.36 with unchanged trading engine 0.7.35; no four-component patch tags.

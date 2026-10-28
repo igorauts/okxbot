@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "current_version": "0.7.35",
+  "current_version": "0.7.38",
   "engines": {
     "0.7.28": {
       "file": "okx_bot.py",
@@ -138,6 +138,51 @@
         "okx_positions_priority.py"
       ],
       "sha256": "c0774039572335eba1db2ceec0cfee37055a4a7cc7670c81aa78aacafd81b14d"
+    },
+    "0.7.37": {
+      "file": "okx_bot.py",
+      "dependencies": [
+        "okx_terminal_accounting.py",
+        "okx_latency.py",
+        "okx_positions_fifo.py",
+        "okx_fill_singleflight.py",
+        "okx_emergency_gate.py",
+        "okx_version.py",
+        "okx_state.py",
+        "okx_contracts.py",
+        "okx_accounting.py",
+        "okx_api.py",
+        "okx_strategy.py",
+        "okx_latency_rollup.py",
+        "okx_tp_telemetry.py",
+        "okx_position_reader_client.py",
+        "okx_position_reader_core.py",
+        "okx_positions_priority.py"
+      ],
+      "sha256": "14921ed3d6d9636e797ca20b1a034c10716a11c6b722977d37bc51e327d285b9"
+    },
+    "0.7.38": {
+      "file": "okx_bot.py",
+      "dependencies": [
+        "okx_terminal_accounting.py",
+        "okx_latency.py",
+        "okx_positions_fifo.py",
+        "okx_fill_singleflight.py",
+        "okx_emergency_gate.py",
+        "okx_version.py",
+        "okx_state.py",
+        "okx_contracts.py",
+        "okx_accounting.py",
+        "okx_api.py",
+        "okx_strategy.py",
+        "okx_latency_rollup.py",
+        "okx_tp_telemetry.py",
+        "okx_position_reader_client.py",
+        "okx_position_reader_core.py",
+        "okx_positions_priority.py",
+        "okx_idle_reconcile.py"
+      ],
+      "sha256": "9e7f164e890b095a69d5b72a23155abd1c3dc524d44dcd0593c19276bf7c20dc"
     }
   }
 }

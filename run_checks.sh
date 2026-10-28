@@ -28,7 +28,15 @@ python3 -B tests/test_stats_worker_optimization.py
 python3 -B tests/test_telegram_terminal_health.py
 
 # New offline-only reader/manager regressions, no OKX API access.
-python3 -B -m unittest tests.test_position_reader tests.test_position_reader_integration tests.test_reader_manager_cap tests.test_position_priority_rc4 tests.test_reader_service_archive_rc4 tests.test_priority_multiprocess_rc4 tests.test_stats_fills_stages_rc5 -q
+# Reader tests run as isolated processes to prevent async/multiprocess test
+# cleanup from leaking between unrelated modules. No checks are skipped.
+python3 -B -m unittest tests.test_position_reader -q
+python3 -B -m unittest tests.test_position_reader_integration -q
+python3 -B -m unittest tests.test_reader_manager_cap -q
+python3 -B -m unittest tests.test_position_priority_rc4 -q
+python3 -B -m unittest tests.test_reader_service_archive_rc4 -q
+python3 -B -m unittest tests.test_priority_multiprocess_rc4 -q
+python3 -B -m unittest tests.test_stats_fills_stages_rc5 -q
 python3 -B -m unittest tests.test_reader_resilience_rc6 -q
 python3 -B -m unittest tests.test_reader_deadlines_stress -q
 
@@ -51,3 +59,12 @@ python3 -B -m unittest tests.test_v0735_reliability -q
 
 # Account-wide Reader diagnostics + new/clone auto-registration (GET-free).
 python3 -B -m unittest tests.test_newbot_reader_autoreg tests.test_reader_diagnostics_vnext -q
+
+# Wake attribution: diagnostic-only, no REST/POST scheduling changes.
+python3 -B -m unittest tests.test_reconcile_wake_attribution -q
+
+# Minimal 5-second audit, independent deadlines, control/WS gate (offline).
+python3 -B -m unittest tests.test_idle_reconcile_minimal -q
+
+# Offline integration-level fault injection on actual live_loop AST: no exchange access.
+python3 -B -m unittest tests.test_live_loop_chaos_rc4 -q

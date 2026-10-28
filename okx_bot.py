@@ -41,7 +41,10 @@ STEP, TP, QTY = (Decimal(str(CFG.get(k,0))) for k in
                  ('grid_step','take_profit','order_size'))
 TARGET, CAP, EX_CAP = (int(CFG.get(k,0)) for k in
                        ('active_buy_orders','max_grids','max_exchange_orders'))
-INTERVAL = 1.0  # main safety loop; BID updates independently via public WS
+# Minimal five-second background REST audit. WS events bypass this wait.
+# This is an OFFLINE candidate, not permission to install on LIVE.
+INDEPENDENT_AUDIT_SEC = 5.0
+LOCAL_CONTROL_POLL_SEC = 0.2
 # REST orders-pending is paginated. Exchange-attached SELLs may temporarily
 # exceed the baseline real TP count during multiple simultaneous BUY fills.
 # Exchange-attached TP can grow during a burst. Surplus is trimmed only
@@ -2474,12 +2477,20 @@ def cancel_lowest_specific(st,lowest):
 
 class WSWatcher(threading.Thread):
     """Private order event stream; REST remains the authority for reconciliation."""
+    PONG_DEADLINE_SEC=10.0
     def __init__(self):
         super().__init__(daemon=True)
         self.events=queue.Queue(maxsize=1000)
         self.wake=threading.Event()
         self.private_wake=threading.Event()
         self.connected=False
+        self.connection_epoch=0
+        self._ping_outstanding_at=None
+        self._pong_verified=False
+    def healthy(self):
+        return bool(self.connected and self._pong_verified and
+                    (self._ping_outstanding_at is None or
+                     time.monotonic()-self._ping_outstanding_at<=self.PONG_DEADLINE_SEC))
     def run(self):
         while True:
             ws=None
@@ -2497,16 +2508,32 @@ class WSWatcher(threading.Thread):
                 ws.send(json.dumps({'op':'subscribe','args':[{'channel':'orders',
                     'instType':'SWAP','instId':INST}]}))
                 ans=json.loads(ws.recv())
-                if ans.get('event')!='subscribe': die('WS subscribe '+str(ans))
+                if ans.get('event')!='subscribe' or ans.get('code') not in (None,'0'):
+                    die('WS subscribe '+str(ans))
                 self.connected=True
+                self.connection_epoch+=1
+                self._pong_verified=False
+                self.wake.set()  # subscribe acknowledged; HOLD new BUY until pong
                 ws.settimeout(5); last_ping=time.monotonic()
+                ws.send('ping')
+                self._ping_outstanding_at=last_ping
                 while True:
-                    if time.monotonic()-last_ping>=15:
+                    if (self._ping_outstanding_at is not None and
+                            time.monotonic()-self._ping_outstanding_at>self.PONG_DEADLINE_SEC):
+                        raise ConnectionError('Private WS pong deadline exceeded')
+                    if time.monotonic()-last_ping>=15 and self._ping_outstanding_at is None:
                         ws.send('ping');last_ping=time.monotonic()
+                        self._ping_outstanding_at=last_ping
                     try: raw=ws.recv()
                     except websocket.WebSocketTimeoutException: continue
                     if raw=='ping': ws.send('pong');continue
-                    if raw=='pong':continue
+                    if raw=='pong':
+                        self._ping_outstanding_at=None
+                        if not self._pong_verified:
+                            self._pong_verified=True
+                            self.connection_epoch+=1  # revalidate snapshot after first pong
+                            self.wake.set()
+                        continue
                     parsed=json.loads(raw)
                     if parsed.get('event')=='error': die('WS event error '+str(parsed))
                     if parsed.get('arg',{}).get('channel')=='orders':
@@ -2519,11 +2546,16 @@ class WSWatcher(threading.Thread):
                                 self.wake.set()
             except Exception as e:
                 self.connected=False
+                self.wake.set()
                 # Never log authentication messages containing credentials.
                 print('[WS] reconnect in 5s:',type(e).__name__,flush=True)
                 time.sleep(5)
             finally:
                 self.connected=False
+                self._pong_verified=False
+                self._ping_outstanding_at=None
+                self.connection_epoch+=1
+                self.wake.set()  # fail closed; management and recon stay runnable
                 if ws:
                     try: ws.close()
                     except Exception: pass
@@ -2537,11 +2569,16 @@ class PublicBidWatcher(threading.Thread):
     has not received an update for a while. A stale cached quote is NEVER used
     for placing/canceling live orders.
     """
+    PONG_DEADLINE_SEC=10.0
     def __init__(self, shared_wake=None):
         super().__init__(daemon=True)
         self._shared_wake=shared_wake
         self._grid_ref=None
         self._last_price_wake=0.0
+        # Diagnostic counters only: wake attribution never authorizes a trade.
+        # Protected by _lock, like the BID / virtual-crossing observation.
+        self._grid_wake_count=0
+        self._virtual_wake_count=0
         # WS remembers every crossed virtual TP even if BID retraces before
         # the main REST loop becomes runnable. Only the main thread persists it.
         self._virtual_targets={}
@@ -2557,8 +2594,16 @@ class PublicBidWatcher(threading.Thread):
         self._bid=None
         self._updated=0.0
         self.connected=False
+        self.connection_epoch=0
+        self._ping_outstanding_at=None
+        self._pong_verified=False
         self.wake=threading.Event()
         self.fallback_logged=False
+
+    def healthy(self):
+        return bool(self.connected and self._pong_verified and
+                    (self._ping_outstanding_at is None or
+                     time.monotonic()-self._ping_outstanding_at<=self.PONG_DEADLINE_SEC))
 
     def run(self):
         while True:
@@ -2569,22 +2614,39 @@ class PublicBidWatcher(threading.Thread):
                 ws.send(json.dumps({'op':'subscribe','args':[
                     {'channel':'tickers','instId':INST}]}))
                 reply=json.loads(ws.recv())
-                if reply.get('event') != 'subscribe':
+                if reply.get('event') != 'subscribe' or reply.get('code') not in (None,'0'):
                     die('Public BID subscription failed: '+str(reply))
                 self.connected=True
+                self.connection_epoch+=1
+                self._pong_verified=False
+                if self._shared_wake is not None:
+                    self._shared_wake.set()  # subscription acknowledged; HOLD until pong
                 print('✅ Public BID WebSocket connected',flush=True)
                 ws.settimeout(3)
                 last_ping=time.monotonic()
+                ws.send('ping')
+                self._ping_outstanding_at=last_ping
                 while True:
-                    if time.monotonic()-last_ping >= 15:
+                    if (self._ping_outstanding_at is not None and
+                            time.monotonic()-self._ping_outstanding_at>self.PONG_DEADLINE_SEC):
+                        raise ConnectionError('Public WS pong deadline exceeded')
+                    if time.monotonic()-last_ping >= 15 and self._ping_outstanding_at is None:
                         ws.send('ping')
                         last_ping=time.monotonic()
+                        self._ping_outstanding_at=last_ping
                     try:
                         raw=ws.recv()
                     except websocket.WebSocketTimeoutException:
                         continue
                     if raw=='ping': ws.send('pong'); continue
-                    if raw=='pong': continue
+                    if raw=='pong':
+                        self._ping_outstanding_at=None
+                        if not self._pong_verified:
+                            self._pong_verified=True
+                            self.connection_epoch+=1
+                            if self._shared_wake is not None:
+                                self._shared_wake.set()
+                        continue
                     msg=json.loads(raw)
                     if msg.get('event')=='error': die('Public BID WS error '+str(msg))
                     if msg.get('arg',{}).get('channel')!='tickers':
@@ -2602,6 +2664,7 @@ class PublicBidWatcher(threading.Thread):
                                 and new_top>self._grid_ref
                                 and time.monotonic()-self._last_price_wake>=PRICE_WAKE_COOLDOWN)
                             if trigger:self._last_price_wake=time.monotonic()
+                            self._note_public_wake(trigger,new_crossing)
                         self.wake.set()
                         # Signal trading thread FIRST; optional diagnostics must
                         # never delay the wake on a fresh TP crossing.
@@ -2613,10 +2676,18 @@ class PublicBidWatcher(threading.Thread):
                                 trace_id=crossing_trace_id(self._virtual_crossed)
                             LATENCY.record('tp_ws_cross',0,trace_id=trace_id)
             except Exception as e:
+                self.connected=False
+                if self._shared_wake is not None:
+                    self._shared_wake.set()
                 print('[BID WS] reconnect in 5s:',type(e).__name__,flush=True)
                 time.sleep(5)
             finally:
                 self.connected=False
+                self.connection_epoch+=1
+                self._pong_verified=False
+                self._ping_outstanding_at=None
+                if self._shared_wake is not None:
+                    self._shared_wake.set()
                 with self._lock:
                     self._updated=0.0
                 if ws:
@@ -2668,10 +2739,24 @@ class PublicBidWatcher(threading.Thread):
             if (self.connected and self._bid is not None
                 and time.monotonic()-self._updated<=3):
                 new_crossing=self._capture_crossings(self._bid)
+                self._note_public_wake(False,new_crossing)
         # Target publication after REST may reveal a crossing already present
         # in the current fresh quote. Wake promptly without placing orders.
         if new_crossing and self._shared_wake is not None:
             self._shared_wake.set()
+
+    def _note_public_wake(self,grid,virtual):
+        """Caller holds _lock. Diagnostic-only; never sets a wake itself."""
+        if grid:self._grid_wake_count+=1
+        if virtual:self._virtual_wake_count+=1
+
+    def take_wake_causes(self):
+        """Atomically consume counters. No trading decision uses this result."""
+        with self._lock:
+            result=(self._grid_wake_count,self._virtual_wake_count)
+            self._grid_wake_count=0
+            self._virtual_wake_count=0
+            return result
 
     def take_crossed_virtual_stamps(self):
         with self._lock:
@@ -2944,6 +3029,18 @@ def wait_coverage_hold(watcher,delay):
         watcher.private_wake.wait(min(0.2,remaining))
 
 
+def classify_reconcile_trigger(previous,private_events,grid_wakes,virtual_wakes):
+    """Diagnostic classification ONLY; every path still reconciles fully."""
+    sources=[]
+    if private_events:sources.append('private')
+    if virtual_wakes:sources.append('virtual')
+    if grid_wakes:sources.append('grid')
+    if not sources:
+        sources.append(previous if previous in ('timer','overrun','internal','wake','recovery')
+                       else 'internal')
+    return sources[0],'+'.join(sources)
+
+
 def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
     last_status_key=None
     last_print=0
@@ -2959,11 +3056,20 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
     tp_buffer=TPBufferScheduler()
     coverage_hold_reason=None
     coverage_hold_attempts=0
+    previous_trigger='internal'
+    # Stable per-bot offset keeps different bots' background audits staggered.
+    from okx_idle_reconcile import audit_jitter_seconds, wait_for_idle_reconcile, idle_deadline, wait_error_backoff
+    audit_period=INDEPENDENT_AUDIT_SEC+audit_jitter_seconds(ROOT.name, INST)
+    last_ws_warning=None
     while True:
         try:
+            trigger_from_previous_pass=previous_trigger
+            # An immediate control/TP/BUY continuation is never a timer wake.
+            previous_trigger='internal'
             started=time.monotonic()
             loop_start_ns=time.perf_counter_ns()
             mode=control_mode()
+            ws_epoch_at_start=(watcher.connection_epoch,market.connection_epoch)
             if st.get('terminal_mode'):
                 control_ack(mode,st['terminal_mode'])
                 return
@@ -2981,16 +3087,38 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                 latency_ms('ws_drain',ws_start,count=ws_n)
             watcher.wake.clear()
             watcher.private_wake.clear()
-
+            # An orders callback may enqueue between drain and clear. Do not
+            # lose it when the next independent audit is five seconds away.
+            if not watcher.events.empty():
+                watcher.private_wake.set()
+                watcher.wake.set()
+            grid_wakes,virtual_wakes=market.take_wake_causes()
+            source,reason=classify_reconcile_trigger(
+                trigger_from_previous_pass,ws_n,grid_wakes,virtual_wakes)
             if mode in ('HARD','PANIC') and emergency_precancel_own_buys(st,mode):
                 # Resume with a FRESH snapshot next pass. Never let an unknown
                 # TP, foreign order or saturated /positions delay safe BUY cancel.
                 continue
+            # One sample per actual full REST reconcile; not per loop iteration.
+            LATENCY.record('reconcile_trigger',0,source=source,reason=reason,
+                           count=ws_n)
             pending,all_resolved,actual=reconcile_position(
                 st,timeout=30,allow_mismatch=(mode in ('SOFT','HARD','PANIC')))
             # A manager command may change during a 30-second REST pass.
             # Never continue to BUY placement under a stale RUN/PAUSE mode.
             if control_mode()!=mode:
+                continue
+            # A WS connection may have restarted DURING the REST round.
+            # Discard trading decisions from a snapshot that spans epochs.
+            if (watcher.connection_epoch,market.connection_epoch)!=ws_epoch_at_start:
+                previous_trigger='ws_health'
+                continue
+            # A private fill/cancel may have arrived AFTER the REST snapshot
+            # started. Never authorize a strategic write against a snapshot
+            # that has not yet accounted for that new orders notification.
+            # Keep emergency HARD/PANIC independent of a busy WS queue.
+            if mode not in ('HARD','PANIC') and not watcher.events.empty():
+                previous_trigger='private'
                 continue
             # Publish reconciled virtual targets to the ticker listener and
             # durably latch crossings observed during the previous REST pass.
@@ -3169,6 +3297,21 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                     log('FEE_CHECK_PAUSED_BUYS',error=f'{type(exc).__name__}: {str(exc)[:100]}')
             if maker_cost is None:
                 waiting=True
+            # Fail closed ONLY for NEW strategic BUYs when either authenticated
+            # and subscribed WS is disconnected or has missed a pong deadline.
+            # PANIC/HARD and independently verified protective TP work above
+            # remain available. No 1-second fallback polling is introduced.
+            ws_ok=watcher.healthy() and market.healthy()
+            if not ws_ok or (watcher.connection_epoch,market.connection_epoch)!=ws_epoch_at_start:
+                waiting=True
+                reason=('private' if not watcher.healthy() else 'public'
+                        if not market.healthy() else 'connection_epoch_changed')
+                if last_ws_warning!=reason:
+                    log('BUY_HOLD_WS_HEALTH',reason=reason)
+                    last_ws_warning=reason
+            elif last_ws_warning is not None:
+                log('BUY_RESUME_WS_HEALTH')
+                last_ws_warning=None
             # When a partially canceled BUY left sub-lot exposure, preserving
             # it is safer than a synthetic round-up or another BUY. Continue
             # servicing every other TP, but block new BUY until resolved.
@@ -3229,7 +3372,15 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             placed=0
             buy_batch_start=time.perf_counter_ns()
             for price in candidates:
-                if control_mode()!='RUN':break
+                # Re-check for a newer private event at the actual BUY write
+                # boundary: it can arrive during candidate/grid calculations.
+                if not watcher.events.empty():
+                    previous_trigger='private'
+                    break
+                if control_mode()!='RUN' or not (watcher.healthy() and market.healthy()):
+                    break
+                if (watcher.connection_epoch,market.connection_epoch)!=ws_epoch_at_start:
+                    break
                 current_bid=market.get_bid()
                 if (UPPER and (current_bid>UPPER or price>UPPER)) or price>=current_bid:
                     log('BUY_BATCH_PAUSED',reason='Fresh BID no longer above LIMIT',level=fmt(price))
@@ -3239,6 +3390,9 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                     log('BUY_BATCH_PAUSED',reason='Maker fee safety minimum')
                     break
                 if len(active_buy(st))>=allowed_buys or count(st)>=CAP:break
+                if (not watcher.healthy() or not market.healthy() or
+                        (watcher.connection_epoch,market.connection_epoch)!=ws_epoch_at_start):
+                    break
                 if place(st,price):placed+=1
                 else:break
                 time.sleep(0.05)  # BUY pacing; keep order rate limit
@@ -3370,12 +3524,39 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             if completed_pass_sec>=30:
                 log('TRADING_LOOP_LONG_PASS',seconds=round(completed_pass_sec,2),
                     mode=mode)
-            # Keep the safety loop at ~1s maximum idle delay. During REST work,
-            # processing can still be slower; never promise a fixed 1s reaction.
-            delay=max(0.0, INTERVAL-(time.monotonic()-started))
-            if delay:
-                watcher.wake.wait(delay)
-                watcher.wake.clear()
+            # Explicitly reconcile after positively ACKed BUY or BUY cancel;
+            # never delay financial state resolution to the background audit.
+            if placed or moved:
+                watcher.wake.wait(0.15)
+                previous_trigger='internal'
+                continue
+            # Existing protective branches above preserve their own short
+            # deadlines (PANIC/HARD, TP collection/restore, pending cancels).
+            # Only the quiet RUN/PAUSE path uses the rare independent audit.
+            earliest_due=idle_deadline(
+                now=time.monotonic(),
+                buy_over_target=len(active_buy(st))>TARGET,
+                buy_shift_at=live_loop._shift_at,
+                buy_cooldown=BUY_BUFFER_COOLDOWN,
+                tp_over_target=len(real_tp_active(st))>REAL_TP_TARGET,
+                tp_quiet_since=tp_buffer.quiet_since,
+                tp_cooldown=TP_BUFFER_COOLDOWN,
+                tp_last_cancel_at=tp_buffer.last_cancel_at,
+                tp_cancel_gap=TP_BUFFER_CANCEL_INTERVAL,
+                partial_expiries=[float(c['partial_since'])+PARTIAL_AGE
+                    for c in st['cycles'].values()
+                    if c.get('state')=='BUY_PARTIAL' and c.get('partial_since')],
+                wall_now=time.time())
+            previous_trigger=wait_for_idle_reconcile(
+                wake=watcher.wake,control_read=control_mode,
+                original_control=mode,
+                ws_health=lambda:(watcher.connection_epoch,market.connection_epoch,
+                                   watcher.healthy(),market.healthy()),
+                initial_ws_health=(watcher.connection_epoch,market.connection_epoch,
+                                   watcher.healthy(),market.healthy()),
+                extra_due=earliest_due,
+                max_wait_seconds=audit_period,
+                local_poll_seconds=LOCAL_CONTROL_POLL_SEC)
 
         except (ExchangeTemporary, ExchangeUnresolved) as exc:
             # Safe recovery: maintain exchange orders unchanged, retry READ reconciliation.
@@ -3394,7 +3575,13 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                 last_sync_kind=message
                 last_sync_notice=time.monotonic()
             # HARD/PANIC requests also wait for confirmed exchange state; they are not lost.
-            watcher.wake.wait(3)
+            # Compare to the mode observed when this REST pass began. If
+            # PANIC/HARD was requested while REST failed, retry emergency
+            # processing without waiting through another full 3-second sleep.
+            wait_error_backoff(control_read=control_mode,
+                               original_control=mode,seconds=3.0,
+                               local_poll_seconds=LOCAL_CONTROL_POLL_SEC)
+            previous_trigger='recovery'
             watcher.wake.clear()
             continue
 

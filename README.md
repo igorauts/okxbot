@@ -1,3 +1,5 @@
+> **v0.7.38 LIVE-verified, 28.10.2026 UTC.** Три действующих движка DOOD/BEAT/INIT на 0.7.38, новые BUY/TP и Telegram MARKET SELL подтверждены на LIVE. CAP завершён PANIC SELL с позицией 0 CAP; BTC/NEAR/WLD продолжают работать на 0.7.35. Редкая резервная сверка 5–5.8 сек, реакция на WS-события и fail-closed BUY gate, UI-пары BEAT/CAP/INIT/BLUR/DOS. См. [V0738_LIVE_RELEASE_NOTES_RU.md](V0738_LIVE_RELEASE_NOTES_RU.md). Публикация не меняет VPS.
+
 > **v0.7.36 LIVE-verified, 28.10.2026 UTC.** Четыре действующих бота (NEAR/WLD/BTC/DOOD) остались на торговом движке 0.7.35 и сохранили PID. Общий Reader Diagnostics, регистрация новых ботов, Telegram BYPASS и P2-исправления установлены с backup и проверены без остановки торговых движков. См. [V0736_LIVE_RELEASE_NOTES_RU.md](V0736_LIVE_RELEASE_NOTES_RU.md). Исходная офлайн-записка сохранена в V0736_OFFLINE_RELEASE_NOTES_RU.md.
 
 > **v0.7.35 LIVE-verified, 27.10.2026 UTC.** Три действующих торговых бота NEAR/WLD/BTC обновлены по одному с резервными копиями, GET-only аудитами, свежими heartbeat. Shared Reader использует существующий общий account env; watchdog timer и Telegram Reader FLAPPING/anti-spam LIVE-verified. ZEC и DOOD терминальны, не перезапускались. Исходная офлайн-заметка сохранена: [V0735_OFFLINE_RELEASE_NOTES_RU.md](V0735_OFFLINE_RELEASE_NOTES_RU.md); подтверждения: [V0735_LIVE_RELEASE_NOTES_RU.md](V0735_LIVE_RELEASE_NOTES_RU.md).**
@@ -10,7 +12,7 @@
 
 Алгоритмический LONG Grid Bot для бессрочных линейных USDT-SWAP OKX.
 
-**Последний LIVE-verified engine: 0.7.35 (срез 27 октября 2026).** На момент rollout v0.7.34 проверены 4/4 бота. После релиза архивный `zec0724` завершён PANIC SELL (позиция 0); `dood0721-2` тоже терминальный. На момент подготовки v0.7.36 также LIVE запущен новый `dood0735` (не путать с архивным `dood0721-2`); остальные: `near0721`, `wld0728`, `btc0721`. Их свежий статус перед LIVE проверяется отдельно, а не выводится из README.
+**Последний LIVE-verified engine: 0.7.38 (срез 28 октября 2026).** Исторически три бота продолжают работать на engine 0.7.35, а DOOD/BEAT/INIT на 0.7.38; CAP завершён. Подробности описаны в LIVE-заметках. Исторический контекст:  На момент rollout v0.7.34 проверены 4/4 бота. После релиза архивный `zec0724` завершён PANIC SELL (позиция 0); `dood0721-2` тоже терминальный. На момент подготовки v0.7.36 также LIVE запущен новый `dood0735` (не путать с архивным `dood0721-2`); остальные: `near0721`, `wld0728`, `btc0721`. Их свежий статус перед LIVE проверяется отдельно, а не выводится из README.
 
 **DOOD `dood0721-2` завершён PANIC SELL**, позиция 0 DOOD, финальный торговый PnL подтверждён исполнениями OKX. В архиве; не включать его в обычное обновление.
 

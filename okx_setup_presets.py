@@ -8,4 +8,9 @@ ASSETS = {
     'Sui': 'SUI',
     'Doodles': 'DOOD',
     'Rayls': 'RLS',
+    'Beat': 'BEAT',
+    'Cap': 'CAP',
+    'Init': 'INIT',
+    'Blur': 'BLUR',
+    'Dos': 'DOS',
 }
