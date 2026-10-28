@@ -48,3 +48,6 @@ python3 -B -m unittest tests.test_reader_telegram_alerts -q
 
 # Repeated TP crossings, terminal/missing service, Reader safety.
 python3 -B -m unittest tests.test_v0735_reliability -q
+
+# Account-wide Reader diagnostics + new/clone auto-registration (GET-free).
+python3 -B -m unittest tests.test_newbot_reader_autoreg tests.test_reader_diagnostics_vnext -q

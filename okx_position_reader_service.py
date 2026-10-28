@@ -289,7 +289,8 @@ async def main():
                           SharedOriginalQuota(args.shared_gate,
                                               scheduling=args.quota_scheduling),
                           account_uid=account_uid, get_timeout_sec=4.5)
-    service=ReaderIPCServer(core,Path(args.socket))
+    service=ReaderIPCServer(core,Path(args.socket),
+                            registry_loader=lambda: load_registry(args.registry))
     await service.start()
     try:
         await asyncio.Event().wait()

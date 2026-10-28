@@ -192,16 +192,22 @@ def position_reader_health_check(api, st):
             old=(int(rec.get('fetch_failed',0)),int(rec.get('quota_failed',0)))
             delta=sum(max(0,new-prev) for new,prev in zip(counters,old))
             if delta:
+                last_error=float(rec.get('last_error_at',0))
+                if not last_error or now-last_error >= 600:
+                    rec['error_episode']=int(rec.get('error_episode',0))+1
+                    rec['fresh_error_episode']=True
+                rec['last_error_at']=now
                 rec['pending_errors']=int(rec.get('pending_errors',0))+delta
             last=float(rec.get('error_notice_at',0))
             pending=int(rec.get('pending_errors',0))
             if pending and (not rec.get('error_notice_at') or not (0 <= now-last < 600)):
-                label=('новых ошибок' if not rec.get('error_notice_at')
-                       else 'дополнительных ошибок за окно')
+                label=('новый эпизод' if rec.get('fresh_error_episode') else
+                       'сводка с прошлого уведомления')
                 alert('reader/errors/'+str(int(now//600)),
-                      f'⚠️ Shared Position Reader: {pending} {label} GET/quota; '
+                      f'⚠️ Shared Position Reader: {label} — {pending} ошибок GET/quota; '
                       'следующая сводка не раньше чем через 10 минут.')
                 rec['pending_errors']=0
+                rec['fresh_error_episode']=False
                 rec['error_notice_at']=now
         rec['fetch_failed'],rec['quota_failed']=counters
         rec['counters_initialized']=True
@@ -558,3 +564,79 @@ def panic_ack_check(api, st, services, roots):
             f'Остаток позиции: {remaining}\n'
             'Автоматическое закрытие НЕ подтверждено. Нужен ручной разбор.')
         notified[name]={'phase':phase,'stamp':stamp}
+
+
+def reader_bypass_check(api, st, services, roots, *, now=None):
+    """One incident per sustained misconfiguration/unknown instrument.
+
+    A temporarily unavailable Reader is already reported by the separate
+    DOWN/RECOVERED watcher. Do not call OKX or treat an empty-position
+    direct fallback as evidence of a broken Reader; its IPC looks identical.
+    """
+    from okx_reader_diagnostics import collect
+    now = time.time() if now is None else now
+    # Bounded, infrequent local reads; no restart / exchange access.
+    records = st.setdefault('reader_route_episodes', {})
+    if not isinstance(records, dict):
+        records = {}
+        st['reader_route_episodes'] = records
+    if now - float(st.get('reader_route_scan_at') or 0) < 30:
+        return
+    st['reader_route_scan_at'] = now
+    def is_run(root):
+        p = Path(root) / 'state/control.json'
+        try:
+            if not p.exists():
+                return True  # engine default, no control request
+            obj = json.loads(p.read_text())
+            return isinstance(obj, dict) and obj.get('mode') == 'RUN'
+        except (OSError, ValueError, TypeError):
+            return False  # unknown mode: never invent a RUN bypass
+    run_roots = {n: root for n, root in roots.items() if is_run(root)}
+    run_services = {n: services[n] for n in run_roots if n in services}
+    if not run_services:
+        return
+    snap = collect(run_roots, run_services, now=now, tail_bytes=1024*1024)
+    if snap['health'] is None:
+        return  # Reader DOWN has its own incident, do not double-alert
+    active = set()
+    for row in snap['bots']:
+        name = row['name']
+        active.add(name)
+        state = row['state']
+        # Only provable configuration bypasses: no guessing on ReaderEmpty.
+        fault = state if state in ('CONFIG BYPASS', 'UNREGISTERED') else None
+        rec = records.setdefault(name, {})
+        if not isinstance(rec, dict):
+            rec = {}
+            records[name] = rec
+        if fault:
+            if rec.get('fault') != fault:
+                rec.update(fault=fault, since=now, good_since=None)
+            if now - float(rec.get('since') or now) >= 60 and not rec.get('alerted'):
+                episode = int(rec.get('episode', 0)) + 1
+                one(api, st, f'reader/bypass/{name}/{episode}',
+                    f'⚠️ Shared Reader BYPASS: {name} / {row.get("instrument", "?")} — '
+                    + ('нет корректной настройки Reader' if fault == 'CONFIG BYPASS'
+                       else 'пара не зарегистрирована Reader')
+                    + '. Бот использует резервный прямой GET через общую квоту.')
+                rec.update(alerted=True, episode=episode)
+        elif rec.get('alerted'):
+            # Recovery requires demonstrated Reader IPC, not just a socket env.
+            m = row.get('metrics', {})
+            good = state == 'READER OK' and m.get('last_ok') and now-m['last_ok'] < 90
+            if good:
+                if not rec.get('good_since'):
+                    rec['good_since'] = now
+                if now - float(rec['good_since']) >= 60:
+                    one(api, st, f'reader/bypass-recovered/{name}/{rec["episode"]}',
+                        f'✅ Shared Reader RECOVERED: {name} снова использует IPC Reader.')
+                    rec.update(fault=None, since=None, good_since=None, alerted=False)
+            else:
+                rec['good_since'] = None
+        else:
+            rec.update(fault=None, since=None, good_since=None)
+    # Drop inactive stale non-alerted state; preserve active alerts for later review.
+    for name in list(records):
+        if name not in active and not records[name].get('alerted'):
+            records.pop(name, None)

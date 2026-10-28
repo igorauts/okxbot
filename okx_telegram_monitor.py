@@ -27,7 +27,7 @@ from okx_telegram_views import status_one, latency_report, read_json, LINE
 from okx_telegram_events import (one, event_alert, market_event, market_process, zero_buy_scan, observer_fault_scan, gate_alert_scan)
 from okx_telegram_followups import partial_scan, panic_scan
 from okx_telegram_delivery import persist as durable_save, drain as alert_drain
-from okx_telegram_health import service_check, engine_heartbeat_check, observers_check, panic_ack_check, position_reader_health_check
+from okx_telegram_health import service_check, engine_heartbeat_check, observers_check, panic_ack_check, position_reader_health_check, reader_bypass_check
 
 BASE = Path(os.environ.get('OKXBOT_BASE_DIR','/root/okx')).resolve()
 REGISTRY = Path(os.environ.get('OKXBOT_REGISTRY',str(BASE/'.okxbot_registry.json')))
@@ -512,6 +512,7 @@ def safety_check(api,st):
     observers_check(api,st,SERVICES,BOT_DIRS,now)
     panic_ack_check(api,st,SERVICES,BOT_DIRS)
     position_reader_health_check(api,st)
+    reader_bypass_check(api, st, SERVICES, BOT_DIRS)
 
 
 def daily_check(api,st,now=None):

@@ -1,3 +1,13 @@
+## 0.7.36 — Account Reader diagnostics and new-bot registration (LIVE-verified 2026-10-28 UTC)
+
+- Package 0.7.36 with unchanged trading engine 0.7.35; no four-component patch tags.
+- Merge verified LIVE new/clone Reader auto-registration and pre-start fail-closed handshake.
+- One read-only, account-wide Reader Diagnostics menu and CLI report.
+- Telegram: durable one-incident bypass/recovered alerts for confirmed configuration/registration faults only; no false alarm for transient flat-position fallback.
+- Reader: GET-free health lists currently registered instruments; no increase to account quota.
+- Restore executable modes in Git ZIP; clarify Reader GET/quota error episodes.
+- Priority FIFO, Funding and TP wake cooldown are unchanged.
+
 ## v0.7.35 — LIVE-verified reliability update (2026-10-27)
 
 - Controlled LIVE rollouts: `near0721`, `wld0728`, `btc0721` upgraded separately from 0.7.34 to engine 0.7.35, with backups, GET-only financial audits and fresh heartbeats; ZEC/DOOD terminal instances not restarted.

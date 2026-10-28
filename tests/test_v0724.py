@@ -20,15 +20,18 @@ from okx_positions_fifo import AccountPositionsFIFO
 D=lambda n:Decimal(str(n if n is not None and n!='' else '0'))
 assert __import__("okx_release_contract").check()
 assert okxbot.latest_engine()==('okx_bot.py',ENGINE_VERSION)
-assert validate_version_ids(ENGINE_VERSION+'.1',ENGINE_VERSION)
-for invalid in [('0.7.28.1','0.7.28.1'),('0.7.28.1','0.7.28.1'),('0.7.28','0.7.24')]:
+assert validate_version_ids(RELEASE_VERSION,ENGINE_VERSION)
+for invalid in [(ENGINE_VERSION+'.1',ENGINE_VERSION),
+                (ENGINE_VERSION+'.1',ENGINE_VERSION+'.1'),
+                ('invalid',ENGINE_VERSION),
+                (ENGINE_VERSION,ENGINE_VERSION+'.1')]:
     try:validate_version_ids(*invalid)
     except RuntimeError:pass
     else:raise AssertionError('Version mismatch allowed: '+str(invalid))
 # Maintenance tag simulation, with a REAL provisional instance package.
 with tempfile.TemporaryDirectory() as d:
     folder=Path(d);(folder/'config.json').write_text(json.dumps({'version':ENGINE_VERSION+'.1','instrument':'BTC-USDT-SWAP'}))
-    with patch.object(okxbot,'RELEASE_VERSION',ENGINE_VERSION+'.1'):
+    with patch.object(okxbot,'RELEASE_VERSION',RELEASE_VERSION):
         engine,version=okxbot.provision_latest_engine(folder)
         assert engine=='okx_bot.py' and version==ENGINE_VERSION
         assert json.loads((folder/'config.json').read_text())['version']==ENGINE_VERSION
@@ -48,7 +51,7 @@ with tempfile.TemporaryDirectory() as d:
     try:okxbot.latest_dependencies('okx_bot.py',ENGINE_VERSION,forged)
     except RuntimeError:pass
     else:raise AssertionError('Missing engine dependency allowed')
-print('PASS P0: new bot engine v0.7.28 despite release v0.7.28.1, malformed sources fail closed')
+print('PASS P0: new bot uses manifest ENGINE_VERSION independently of RELEASE_VERSION; malformed sources fail closed')
 
 # Extract a pure stats function without importing the LIVE engine module.
 tree=ast.parse((ROOT/'okx_bot.py').read_text())

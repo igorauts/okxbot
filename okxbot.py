@@ -325,6 +325,88 @@ def require_account_capacity(entries, *, proposed_instrument=None, proposed_name
     return len(active)
 
 
+
+# Single-account Reader settings for newly CREATED (not already running) bots.
+# Avoid copying stale clone .env or silently defaulting a fresh bot to direct GET.
+READER_SOCKET = '/run/okx-position-reader/positions.sock'
+READER_ENV_KEYS = ('OKX_POSITION_READER_SOCKET',
+                   'OKX_POSITION_READER_QUOTA_SCHEDULING',
+                   'OKX_POSITION_READER_PRIORITY_ACK')
+
+
+def validated_newbot_env(env_file):
+    chosen, raw = wizard.read_env(env_file)
+    master, _ = wizard.read_env(BASE / '.okxbot_account.env')
+    for secret in ('OKX_API_KEY', 'OKX_API_SECRET', 'OKX_API_PASSPHRASE'):
+        if chosen[secret] != master[secret]:
+            raise RuntimeError('New bot credentials differ from single OKX account')
+    if (master.get('OKX_POSITION_READER_SOCKET') != READER_SOCKET or
+            master.get('OKX_POSITION_READER_QUOTA_SCHEDULING') != 'mixed-fifo' or
+            master.get('OKX_POSITION_READER_PRIORITY_ACK')):
+        raise RuntimeError('Shared Reader account template invalid; no new bot')
+    # Retain chosen non-Reader options and credentials, never duplicate keys.
+    lines = [line for line in raw.splitlines()
+             if not ('=' in line and line.split('=', 1)[0].strip() in READER_ENV_KEYS)]
+    lines.extend(('OKX_POSITION_READER_SOCKET=' + READER_SOCKET,
+                  'OKX_POSITION_READER_QUOTA_SCHEDULING=mixed-fifo'))
+    merged = '\n'.join(lines) + '\n'
+    chosen = dict(chosen)
+    chosen['OKX_POSITION_READER_SOCKET'] = READER_SOCKET
+    chosen['OKX_POSITION_READER_QUOTA_SCHEDULING'] = 'mixed-fifo'
+    chosen.pop('OKX_POSITION_READER_PRIORITY_ACK', None)
+    return chosen, merged
+
+
+def reader_registration_ready(name, entry, cfg, *, timeout_sec=12):
+    """Root-only, GET-free Reader registry refresh BEFORE first LIVE START.
+
+    Does not restart Reader or any trading process. The Reader revalidates its
+    authoritative registry; never accept a client-supplied registration list.
+    """
+    import socket
+    instrument = cfg.get('instrument')
+    if not isinstance(instrument, str) or not re.fullmatch(r'[A-Z0-9]+-USDT-SWAP', instrument):
+        raise RuntimeError('Invalid instrument for Reader registration')
+    # An existing running engine is not touched. For stopped old instances,
+    # preserve the durable direct-GET fallback if Reader is genuinely down.
+    bot_env, _ = wizard.read_env(bot_path(entry) / '.env')
+    if bot_env.get('OKX_POSITION_READER_SOCKET') != READER_SOCKET:
+        if cfg.get('live_trading') is not True:
+            raise RuntimeError('New bot lacks Shared Reader configuration')
+        return False
+    deadline = time.monotonic() + timeout_sec
+    last = 'Reader not reachable'
+    while time.monotonic() < deadline:
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                sock.settimeout(min(3.0, max(.2, deadline-time.monotonic())))
+                sock.connect(READER_SOCKET)
+                payload = json.dumps({'schema': 1, 'op': 'refresh_registry',
+                                      'instrument': instrument, 'bot': name}, separators=(',', ':'))
+                sock.sendall(payload.encode() + b'\n')
+                data = b''
+                while b'\n' not in data and len(data) < 4096:
+                    chunk = sock.recv(4096)
+                    if not chunk:
+                        break
+                    data += chunk
+            reply = json.loads(data.split(b'\n', 1)[0])
+            if (isinstance(reply, dict) and reply.get('ok') is True and
+                    isinstance(reply.get('data'), dict) and
+                    reply['data'].get('registered') is True and
+                    reply['data'].get('instrument') == instrument and
+                    reply['data'].get('bot') == name):
+                print(f'Shared Reader READY: {name} | {instrument}')
+                return True
+            last = 'Reader did not confirm instrument'
+        except (OSError, ValueError, TypeError, KeyError) as exc:
+            last = type(exc).__name__
+        time.sleep(min(.15, max(0, deadline-time.monotonic())))
+    if cfg.get('live_trading') is not True:
+        raise RuntimeError('New bot NOT started: Shared Reader not ready (' + last + ')')
+    print('WARNING: Reader unavailable; existing bot may use gated direct GET')
+    return False
+
 @registration_guard
 def cmd_new(env_file):
     latest_engine()  # Fail closed BEFORE a wizard can write a new bot.
@@ -333,7 +415,7 @@ def cmd_new(env_file):
     if sum(not instance_terminal(e) or service_running(unit_name(e))
            for e in entries.values())>=10:
         raise RuntimeError('Account limit: maximum ten nonterminal bots')
-    env, raw = wizard.read_env(env_file)
+    env, raw = validated_newbot_env(env_file)
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         raise RuntimeError('Для опросника нужен интерактивный SSH-терминал')
     ctx = curses.wrapper(lambda scr: wizard.wizard(scr, env, entries.keys()))
@@ -420,11 +502,13 @@ def cmd_start(name):
         raise RuntimeError('Python venv не найден. Не запускаем.')
     # Every attempted start must pass a fresh read-only reconciliation.
     audit_entry(entry)
+    reader_registration_ready(name,entry,cfg)
     print(f'\nВНИМАНИЕ: запуск «{name}» означает РЕАЛЬНЫЕ ордера на OKX.')
     print(f'Пара: {cfg.get("instrument")}  |  GRID: {cfg.get("grid_step")}  |  TP: {cfg.get("take_profit")}')
     if input(f'Для запуска введи точно START {name}: ').strip()!=f'START {name}':
         print('Запуск отменён. Ничего не менялось.')
         return
+    reader_registration_ready(name,entry,cfg)
     if cfg.get('live_trading') is not True:
         cfg['live_trading'] = True
         fd,tmp=tempfile.mkstemp(dir=path,prefix='.config-')
@@ -1008,6 +1092,7 @@ def cmd_clone(source_name, new_name):
     if input(f'Введите точно CLONE {new_name}: ').strip()!=f'CLONE {new_name}':
         print('Отменено.')
         return
+    _, clone_env_raw = validated_newbot_env(BASE / '.okxbot_account.env')
     dest.mkdir(mode=0o700)
     (dest/'state').mkdir(mode=0o700)
     (dest/'logs').mkdir(mode=0o700)
@@ -1015,7 +1100,7 @@ def cmd_clone(source_name, new_name):
         shutil.copy2(SOURCE/f,dest/f)
     for dependency in latest_dependencies(selected_engine,selected_version):
         shutil.copy2(SOURCE/dependency,dest/dependency)
-    (dest/'.env').write_bytes((source/'.env').read_bytes())
+    (dest/'.env').write_text(clone_env_raw, encoding='utf-8')
     os.chmod(dest/'.env',0o600)
     fd=os.open(dest/'config.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
     with os.fdopen(fd,'w') as f:json.dump(cfg,f,indent=2,ensure_ascii=False)
@@ -1624,6 +1709,41 @@ def interactive_archive_menu(entries):
             except (OSError,RuntimeError,ValueError) as exc:
                 curses.wrapper(lambda s:_text_screen(s,'Архив — ошибка',str(exc)))
 
+def reader_diagnostics_snapshot():
+    """One READ-ONLY account screen, not individual-bot control submenus."""
+    from okx_reader_diagnostics import collect
+    entries, warnings = display_registry()
+    roots, units = {}, {}
+    for name, entry in entries.items():
+        try:
+            if instance_terminal(entry):
+                continue
+            roots[name] = bot_path(entry)
+            units[name] = unit_name(entry)
+        except (OSError, KeyError, ValueError, RuntimeError, TypeError):
+            continue
+    return collect(roots, units), warnings
+
+
+def reader_diagnostics_report():
+    from okx_reader_diagnostics import report
+    snapshot, warnings = reader_diagnostics_snapshot()
+    result = report(snapshot)
+    if warnings:
+        result += '\n\n⚠️ Реестр: ' + ', '.join(warnings[:5])
+    return result
+
+
+def interactive_reader_diagnostics():
+    """Single account-wide screen; no network or service actions."""
+    try:
+        text = reader_diagnostics_report()
+    except (OSError, RuntimeError, ValueError) as exc:
+        text = 'Reader Diagnostics: ошибка локального чтения (' + type(exc).__name__ + ')'
+    curses.wrapper(lambda scr: _text_screen(
+        scr, 'OKX GRID BOT — Shared Reader Diagnostics', text))
+
+
 def interactive_main(env_file):
     while True:
         entries,warnings=display_registry()
@@ -1647,6 +1767,7 @@ def interactive_main(env_file):
         titles=[f'{_live_label(n)} {n} — {_display_description(live[n])}' for n in names]
         titles.extend(['➕ Создать бота','📦 Архив',
                        '📱 Telegram-монитор: '+telegram_monitor_label(),
+                       '🔎 Reader Diagnostics (весь аккаунт)',
                        '⚙️   Управление аккаунтом','Выход'])
         i=curses.wrapper(lambda s:wizard.menu(s,'OKX Grid Bot v'+RELEASE_VERSION,titles))
         if i is None or i==len(titles)-1:return
@@ -1659,7 +1780,8 @@ def interactive_main(env_file):
             _pause_return()
         elif action==1: interactive_archive_menu(archive)
         elif action==2: interactive_telegram_menu()
-        elif action==3:interactive_account_menu()
+        elif action==3: interactive_reader_diagnostics()
+        elif action==4: interactive_account_menu()
 
 def main(argv=None):
     p=argparse.ArgumentParser(description='Управление именованными OKX Grid ботами')
@@ -1672,6 +1794,7 @@ def main(argv=None):
     sub.add_parser('list')
     sub.add_parser('account-reset', help='проверить и снять общую блокировку после ручной проверки маржи')
     sub.add_parser('account-status', help='GET-only баланс, маржа и позиции OKX')
+    sub.add_parser('reader-diagnostics', help='READ-only Shared Reader по всему аккаунту, без OKX GET')
     sub.add_parser('panic-all', help='одно подтверждение, аварийное завершение всех LIVE-ботов')
     clone=sub.add_parser('clone',help='новый экземпляр из завершённого бота')
     clone.add_argument('source_name');clone.add_argument('new_name')
@@ -1693,6 +1816,7 @@ def main(argv=None):
     elif cmd=='list':cmd_list()
     elif cmd=='account-reset':cmd_account_reset()
     elif cmd=='account-status':cmd_account_status()
+    elif cmd=='reader-diagnostics':print(reader_diagnostics_report())
     elif cmd=='panic-all':cmd_panic_all()
     elif cmd=='attach':cmd_attach(opts.name,opts.path,opts.service)
     elif cmd=='stats':cmd_stats(name)

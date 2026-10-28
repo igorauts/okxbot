@@ -45,6 +45,10 @@ def verify(zip_path):
                      'engine_manifest.json','okx_version.py',
                      'run_checks.sh','tests/test_final_release_guards.py'):
             if name not in names:raise ValueError('Missing: '+name)
+        # Git/ZIP must preserve CLI executable modes, not merely shebangs.
+        for executable in ('okxbot.py','okx_live_upgrade.py','rollout_preflight.py'):
+            if executable not in names or (z.getinfo(executable).external_attr>>16)&0o777!=0o755:
+                raise ValueError('CLI executable permission missing: '+executable)
         manifest=json.loads(z.read('engine_manifest.json'))
         version_ast=ast.parse(z.read('okx_version.py').decode())
         fields={}
@@ -53,8 +57,14 @@ def verify(zip_path):
                 for target in node.targets:
                     if isinstance(target,ast.Name): fields[target.id]=node.value.value
         engine=fields.get('ENGINE_VERSION')
+        release=fields.get('RELEASE_VERSION')
+        kind=fields.get('RELEASE_KIND')
+        import re
+        if not all(isinstance(v,str) and re.fullmatch(r'\d+\.\d+\.\d+',v) for v in (release,engine)):
+            raise ValueError('Only three-component release / engine versions allowed')
+        if release!=engine and (kind!='maintenance' or tuple(map(int,release.split('.'))) <= tuple(map(int,engine.split('.')))):
+            raise ValueError('Undeclared maintenance release / engine divergence')
         if (engine != manifest.get('current_version') or
-              fields.get('RELEASE_VERSION') != engine or
               fields.get('STATE_SCHEMA') != manifest.get('schema_version')):
             raise ValueError('Release / engine / schema contract mismatch')
         actual=hashlib.sha256(z.read('okx_bot.py')).hexdigest()
@@ -62,7 +72,7 @@ def verify(zip_path):
         if actual!=expected:raise ValueError('Engine checksum mismatch')
         if b'def audit_output_complete(' not in z.read('okx_live_upgrade.py'):
             raise ValueError('Missing financial audit completion guard')
-    return engine, actual
+    return release, engine, actual
 
 if __name__=='__main__':
     if len(sys.argv)!=2:raise SystemExit('Usage: python3 tests/verify_release_asset.py FILE.zip')
