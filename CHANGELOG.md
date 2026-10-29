@@ -1,3 +1,16 @@
+## v0.7.42 — 2026-10-29 — LIVE StatsWorker light optimisation
+
+- Семь LIVE-ботов на одном движке v0.7.42; шесть обновлены через штатные
+  бэкапы, GET-only аудит и `LIVE VERIFIED`, новый `zec0742` создан из общих файлов.
+- StatsWorker: свежий WS BID вместо обычного REST, безопасная ротация
+  простаивающего GET keep-alive, устранение повторного прохода по ордерам.
+- Отдельные `stats_detail` стадии для точной диагностики archive/SQLite/REST
+  missing recovery. Полный `run_checks.sh` PASS на офлайн-кандидате.
+- Ограничение: медленный `fills_missing_recovery` до 25,5 с при 21 missing
+  `ordId` **не исправлен**, инкрементальная бухгалтерия не реализована.
+- Reader Priority FIFO, финансовая модель, TP/PANIC, стратегия, Telegram
+  read-only и общий `/account/positions` GET limiter не менялись.
+
 ## v0.7.38 — LIVE-verified (2026-10-28 UTC)
 
 - Контролируемый LIVE upgrade DOOD c engine 0.7.37 → 0.7.38, с бэкапом и финансовым GET-only аудитом. BEAT и INIT созданы и торгуют на engine 0.7.38; CAP также торговал и штатно завершён PANIC SELL (позиция 0). Ранее согласованный набор из шести работающих ботов продолжает наблюдение.

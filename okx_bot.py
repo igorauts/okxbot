@@ -3798,11 +3798,13 @@ def expected_filled_orders(state, *, include_archive=True, snapshot_archive=None
     return expected
 
 
-def stats_exchange_fills(state, *, snapshot_archive=None):
-    # Missing exchange fills may arrive during REST pagination; callers must
-    # pin and verify quantities against the pre-REST state snapshot.
-    return FILL_STORE.ensure_expected(expected_filled_orders(
-        state,snapshot_archive=snapshot_archive))
+def stats_exchange_fills(state, *, snapshot_archive=None, expected=None):
+    # Existing pinned quantity/identity verification stays authoritative.
+    # Avoid rebuilding the entire historic expected-order map twice in
+    # the same StatsWorker job. Legacy callers may omit expected.
+    if expected is None:
+        expected=expected_filled_orders(state,snapshot_archive=snapshot_archive)
+    return FILL_STORE.ensure_expected(expected)
 
 
 # OKX performance report: fixed capital basis from initial upper bound or creation price.
@@ -4080,7 +4082,22 @@ def performance_snapshot(st, fills, stats, now, *, snapshot_archive=None, precom
     return payload
 
 
-def print_full_stats(pnl=None, *, require_complete=False):
+def stats_capture_bid(market=None):
+    """LIVE: fresh WS BID only; audit without watcher: REST as before.
+
+    PublicBidWatcher.cached_bid() enforces connected status + <=3s freshness.
+    A missing/stale quote is not treated as a valid price; REST fallback is
+    routed through the same existing REST governor and GET retry rules.
+    """
+    cached = market.cached_bid() if market is not None else None
+    if cached is not None:
+        value = D(cached)
+        if not value.is_finite() or value <= 0:
+            raise ExchangeUnresolved('Invalid statistics WS BID')
+        return value
+    return A.ticker()
+
+def print_full_stats(pnl=None, *, require_complete=False, market=None):
     """Complete verified account snapshot anchored to one pre-REST state.
 
     Never demand that trading stop while the history calls run. The report's
@@ -4100,12 +4117,15 @@ def print_full_stats(pnl=None, *, require_complete=False):
         raise ValueError('Statistics file is for another instrument')
     # Archive captured immediately after the state. The state view wins for
     # duplicate cycle IDs, so a later archive compaction cannot replace it.
+    archive_start=clock()
     archive=archived_rows()
-    bid=A.ticker()
+    archive_done=clock()
+    bid=stats_capture_bid(market) if market is not None else A.ticker()
+    bid_done=clock()
     captured_at=time.time()
     t_capture=clock()
     expected=expected_filled_orders(st,snapshot_archive=archive)
-    fetched=stats_exchange_fills(st,snapshot_archive=archive)
+    fetched=stats_exchange_fills(st,snapshot_archive=archive,expected=expected)
     t_fills=clock()
     fills_breakdown=getattr(getattr(globals().get('FILL_STORE'),'perf',None),'last',{})
     # A BUY/SELL can fill AGAIN on the same ordId while REST paginates. Its
@@ -4185,9 +4205,24 @@ def print_full_stats(pnl=None, *, require_complete=False):
                 journal.record('stats_stage',(end-begin)*1000,step=step,
                                start_unix_ms=round(t_start_unix_ms+(begin-t_start)*1000,3),
                                end_unix_ms=round(t_start_unix_ms+(end-t_start)*1000,3))
+            # Split capture and fill tails without changing finance control.
+            # These details remain best-effort, bounded async journal data.
+            for step,begin,end in (
+                    ('archive_read',archive_start,archive_done),
+                    ('bid_acquire',archive_done,bid_done)):
+                journal.record('stats_detail',(end-begin)*1000,step=step)
+            for step,key in (('fills_sqlite_first','sqlite_first'),
+                             ('fills_qty_index','qty_index'),
+                             ('fills_missing_recovery','missing_recovery'),
+                             ('fills_sqlite_second','sqlite_second')):
+                journal.record('stats_detail',1000*float(fills_breakdown.get(key,0)),
+                               step=step,expected=fills_breakdown.get('expected',0),
+                               missing=fills_breakdown.get('missing',0))
     except Exception:
         pass  # Diagnostics must never stop publishing verified financial data.
     print(f'⏱ StatsWorker: total={t_written-t_start:.3f}s '
+          f'archive_read={archive_done-archive_start:.3f}s '
+          f'bid_acquire={bid_done-archive_done:.3f}s '
           f'capture={t_capture-t_start:.3f}s '
           f'fills={t_fills-t_capture:.3f}s '
           f'calculation={t_calculated-t_fills:.3f}s '
@@ -4332,9 +4367,10 @@ class BotDrawdownSampler:
 
 class StatsWorker(threading.Thread):
     """Snapshot-based finance; bounded retries even when fills never go quiet."""
-    def __init__(self,pnl):
+    def __init__(self,pnl,market=None):
         super().__init__(daemon=True)
         self.pnl=pnl
+        self.market=market
 
     def run(self):
             last_attempt=0.0
@@ -4354,7 +4390,7 @@ class StatsWorker(threading.Thread):
                             due=financial_signature(current)!=anchor.get('signature')
                     if due:
                         last_attempt=now
-                        successful=bool(print_full_stats(self.pnl))
+                        successful=bool(print_full_stats(self.pnl,market=self.market))
                         unsuccessful=not successful
                         if successful:last_success=time.monotonic()
                 except RateLimitedError:
@@ -4447,7 +4483,7 @@ def main():
         A._reader_exit_hint=lambda: reader_exit_priority_hint(st,market)
         A._reader_trace_id=lambda: active_tp_trace_id(st,market)
         pnl_worker=PnLWorker(pnl);pnl_worker.start()
-        stats_worker=StatsWorker(pnl);stats_worker.start()
+        stats_worker=StatsWorker(pnl,market);stats_worker.start()
         dd_worker=BotDrawdownSampler(market,pnl)
         live_loop(st,watcher,market,pnl,pnl_worker,dd_worker)
         if st.get('terminal_mode') in ('PANIC_DONE','RETIRED'):

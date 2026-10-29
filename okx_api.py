@@ -78,6 +78,22 @@ def position_trace_id(api):
         return ''
 
 
+def _stats_rotate_idle_get(api, method):
+    # Idle read-only socket guard; mutating requests do not rotate sockets.
+    if method!='GET':
+        return
+    current=getattr(api._local,'conn',None)
+    used=getattr(api._local,'conn_last_used',None)
+    if current is not None and used is not None and time.monotonic()-used>20.0:
+        api._close()
+
+
+def _stats_note_http_use(api):
+    # Timestamp after a complete response is read.
+    if getattr(api._local,'conn',None) is not None:
+        api._local.conn_last_used=time.monotonic()
+
+
 def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
               CONTRACT_LOT, CONTRACT_MIN, CONTRACT_VALUE, PRICE_STEP,
               QTY, STEP, TP, ExchangeTemporary, ExchangeUnresolved,
@@ -192,10 +208,12 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
                         http_start=time.perf_counter_ns()
                         http_status=None
                         try:
+                            _stats_rotate_idle_get(self,method)
                             if p is not None:
                                 status,result=p.run('rest_http',self._http,method,path,payload,headers)
                             else:
                                 status,result=self._http(method,path,payload,headers)
+                            _stats_note_http_use(self)
                             http_status=status
                         finally:
                             latency_ms('http',http_start,method=method,route=route,

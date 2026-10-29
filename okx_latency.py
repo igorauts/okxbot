@@ -43,14 +43,14 @@ class LatencyJournal:
                 'tp_to_intent', 'tp_cross_to_collect',
                 'tp_collect_to_intent', 'tp_intent_to_submit',
                 'position_reader_ipc','position_reader_quota','position_reader_http',
-                'tp_recon_phase','stats_stage'):
+                'tp_recon_phase','stats_stage','stats_detail'):
                 return
             permitted = {'route', 'method', 'passes', 'mismatches', 'outcome',
                          'count', 'placed', 'attempted', 'status', 'partial',
                          'resolved', 'active_buys', 'target_buys', 'dropped',
                          'reason','attempt','source','cycles','added',
                          'priority','batch_size','trace_id','step',
-                         'start_unix_ms','end_unix_ms'}
+                         'start_unix_ms','end_unix_ms','expected','missing'}
             safe = {k: v for k,v in fields.items()
                     if k in permitted and (v is None or type(v) in (str, int, float, bool))}
             if 'trace_id' in safe and (len(str(safe['trace_id']))>32 or
@@ -60,7 +60,9 @@ class LatencyJournal:
             if 'step' in safe and safe['step'] not in (
                     'pending','register_attached','track','verify_existing',
                     'positions','rest_governor','rest_http','retry_sleep',
-                    'capture','fills','calculation','ledger','report','write'):
+                    'capture','fills','calculation','ledger','report','write',
+                    'archive_read','bid_acquire','fills_sqlite_first',
+                    'fills_qty_index','fills_missing_recovery','fills_sqlite_second'):
                 safe.pop('step')
             # A precise local-clock interval is only a diagnostic observation.
             # Reject nonsensical bounds; never use them as trade permission.
