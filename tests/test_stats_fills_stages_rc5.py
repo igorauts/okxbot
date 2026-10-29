@@ -40,7 +40,7 @@ class StatsStageInstrumentation(unittest.TestCase):
         db=[{'ordId':'a','fillSz':'1'}]
         def get_rows(orders):
             calls.append(('sqlite',tuple(orders)))
-            return list(db)
+            return [row for row in db if row["ordId"] in set(orders)]
         def fetch(oid):
             calls.append(('GET_missing_order',oid))
             db.append({'ordId':'b','fillSz':'3'})
@@ -48,9 +48,20 @@ class StatsStageInstrumentation(unittest.TestCase):
         ns['A']=SimpleNamespace(fills_by_order=fetch)
         result=store.ensure_expected({'a':Decimal(1),'b':Decimal(3)})
         self.assertEqual(result,db)
-        self.assertEqual(calls,[('sqlite',('a','b')),('GET_missing_order','b'),('sqlite',('a','b'))])
+        self.assertEqual(calls,[('sqlite',('a','b')),('GET_missing_order','b'),('sqlite',('b',))])
         self.assertEqual(store.perf.last['missing'],1)
         self.assertEqual(store.perf.last['expected'],2)
+
+    def test_unexpected_row_in_targeted_refresh_fails_closed(self):
+        typ,ns=make_store();store=typ()
+        def get_rows(orders):
+            if tuple(orders)==('b',):
+                return [{'ordId':'unrequested','fillSz':'3'}]
+            return [{'ordId':'a','fillSz':'1'}]
+        store.get_rows=get_rows
+        ns['A']=SimpleNamespace(fills_by_order=lambda oid: None)
+        with self.assertRaisesRegex(ValueError,'Unexpected fill in missing-order refresh'):
+            store.ensure_expected({'a':Decimal(1),'b':Decimal(3)})
 
     def test_empty_expected_no_fetch_and_no_stale_metric(self):
         typ,ns=make_store();store=typ();store.perf.last={'missing':42}

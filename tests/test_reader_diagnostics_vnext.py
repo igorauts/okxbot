@@ -212,19 +212,33 @@ class ReleaseMetadata(unittest.TestCase):
         now=time.time()
         with patch.object(h,'_reader_health_ipc',side_effect=lambda _:dict(values)), \
              patch.object(h,'_show',return_value=props), \
-             patch.object(h,'one',side_effect=lambda api,st,k,text:sent.append(text)), \
+             patch.object(h,'one',side_effect=lambda api,st,key,text:sent.append((key,text))), \
              patch.dict(__import__('os').environ,{'OKX_POSITION_READER_SOCKET':diag.SOCKET}):
             with patch.object(h.time,'time',return_value=now):
                 h.position_reader_health_check(None,state)
+            # The first individual GET failure must not page a user.
             values['fetch_failed']=1
             with patch.object(h.time,'time',return_value=now+1):
                 h.position_reader_health_check(None,state)
-            values['fetch_failed']=2
-            with patch.object(h.time,'time',return_value=now+1800):
+            self.assertFalse(any(k.startswith('reader/fetch_episode/') for k,_ in sent))
+            # Five failures within the rolling 10-minute window: one incident.
+            values['fetch_failed']=5
+            with patch.object(h.time,'time',return_value=now+2):
                 h.position_reader_health_check(None,state)
-        alerts=[x for x in sent if 'GET/quota' in x]
-        self.assertEqual(len(alerts),2)
-        self.assertTrue(all('новый эпизод' in x for x in alerts),alerts)
+                h.position_reader_health_check(None,state)
+            self.assertEqual(sum(k=='reader/fetch_episode/1' for k,_ in sent),1)
+            # Ten quiet minutes: one recovery, then another incident may open.
+            with patch.object(h.time,'time',return_value=now+603):
+                h.position_reader_health_check(None,state)
+                h.position_reader_health_check(None,state)
+            self.assertEqual(sum(k=='reader/fetch_recovery/1' for k,_ in sent),1)
+            values['fetch_failed']=10
+            with patch.object(h.time,'time',return_value=now+604):
+                h.position_reader_health_check(None,state)
+                h.position_reader_health_check(None,state)
+        keys=[k for k,_ in sent if k.startswith('reader/fetch_episode/')]
+        self.assertEqual(keys,['reader/fetch_episode/1','reader/fetch_episode/2'])
+        self.assertEqual(sum(k=='reader/fetch_recovery/1' for k,_ in sent),1)
 
     def test_manager_has_single_account_diagnostics_menu(self):
         source=Path(okxbot.__file__).read_text()

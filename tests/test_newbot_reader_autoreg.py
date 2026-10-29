@@ -119,9 +119,12 @@ class ManagerTemplate(unittest.TestCase):
         self.temp=tempfile.TemporaryDirectory()
         self.root=Path(self.temp.name)
         self.master=self.root/'.okxbot_account.env'
-        self.master.write_text('OKX_API_KEY=fake\nOKX_API_SECRET=fake\nOKX_API_PASSPHRASE=fake\nOKX_DEMO=0\nOKX_POSITION_READER_SOCKET=/run/okx-position-reader/positions.sock\nOKX_POSITION_READER_QUOTA_SCHEDULING=mixed-fifo\n')
+        self.master.write_text('OKX_API_KEY=fake\nOKX_API_SECRET=fake\nOKX_API_PASSPHRASE=fake\nOKX_DEMO=0\nOKX_POSITION_READER_SOCKET=/run/okx-position-reader/positions.sock\nOKX_POSITION_READER_QUOTA_SCHEDULING=priority\nOKX_POSITION_READER_PRIORITY_ACK=ALL_BOTS_PRIORITY_AWARE\n')
         self.patch=patch.object(okxbot,'BASE',self.root);self.patch.start()
-    def tearDown(self):self.patch.stop();self.temp.cleanup()
+        self.reader_patch=patch('okx_reader_diagnostics.reader_health',return_value={'scheduling':'priority'})
+        self.reader_patch.start()
+    def tearDown(self):
+        self.reader_patch.stop();self.patch.stop();self.temp.cleanup()
     def test_clone_uses_master_not_archived_source_env(self):
         tree=ast.parse(Path(okxbot.__file__).read_text())
         fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='cmd_clone')
@@ -130,20 +133,23 @@ class ManagerTemplate(unittest.TestCase):
         self.assertNotIn("(source / '.env').read_bytes()",literals)
     def test_one_account_master_settings_added_to_new_bot(self):
         custom=self.root/'custom.env'
-        custom.write_text('OKX_API_KEY=fake\nOKX_API_SECRET=fake\nOKX_API_PASSPHRASE=fake\nOKX_DEMO=0\nOKX_POSITION_READER_SOCKET=/old.sock\nOKX_POSITION_READER_QUOTA_SCHEDULING=priority\nOKX_POSITION_READER_PRIORITY_ACK=ALL_BOTS_PRIORITY_AWARE\n')
+        custom.write_text('OKX_API_KEY=fake\nOKX_API_SECRET=fake\nOKX_API_PASSPHRASE=fake\nOKX_DEMO=0\nOKX_POSITION_READER_SOCKET=/old.sock\nOKX_POSITION_READER_QUOTA_SCHEDULING=mixed-fifo\n')
         env,raw=okxbot.validated_newbot_env(custom)
         self.assertEqual(raw.count('OKX_POSITION_READER_SOCKET='),1)
         self.assertIn('OKX_POSITION_READER_SOCKET=/run/okx-position-reader/positions.sock',raw)
-        self.assertIn('OKX_POSITION_READER_QUOTA_SCHEDULING=mixed-fifo',raw)
-        self.assertNotIn('PRIORITY_ACK',raw)
-        self.assertEqual(env['OKX_POSITION_READER_QUOTA_SCHEDULING'],'mixed-fifo')
+        self.assertEqual(raw.count('OKX_POSITION_READER_QUOTA_SCHEDULING='),1)
+        self.assertIn('OKX_POSITION_READER_QUOTA_SCHEDULING=priority',raw)
+        self.assertEqual(raw.count('OKX_POSITION_READER_PRIORITY_ACK='),1)
+        self.assertIn('OKX_POSITION_READER_PRIORITY_ACK=ALL_BOTS_PRIORITY_AWARE',raw)
+        self.assertEqual(env['OKX_POSITION_READER_QUOTA_SCHEDULING'],'priority')
+        self.assertEqual(env['OKX_POSITION_READER_PRIORITY_ACK'],'ALL_BOTS_PRIORITY_AWARE')
     def test_mismatched_credentials_fail_closed(self):
         other=self.root/'another.env';other.write_text('OKX_API_KEY=other\nOKX_API_SECRET=fake\nOKX_API_PASSPHRASE=fake\n')
         with self.assertRaisesRegex(RuntimeError,'differ'):
             okxbot.validated_newbot_env(other)
     def test_missing_shared_reader_in_master_fails_closed(self):
         self.master.write_text('OKX_API_KEY=fake\nOKX_API_SECRET=fake\nOKX_API_PASSPHRASE=fake\n')
-        with self.assertRaisesRegex(RuntimeError,'template invalid'):
+        with self.assertRaisesRegex(RuntimeError,'Shared Reader account template differs from running Reader; no new bot'):
             okxbot.validated_newbot_env(self.master)
     def test_manager_start_has_pretrade_reader_sync(self):
         tree=ast.parse(Path(okxbot.__file__).read_text())

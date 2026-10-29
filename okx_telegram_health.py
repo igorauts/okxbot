@@ -19,22 +19,66 @@ def _run(cmd, timeout=5):
                           check=False)
 
 
-def _show(unit):
-    try:
-        p = _run(['systemctl', 'show', unit, '--no-pager',
-                  '-p', 'ActiveState', '-p', 'SubState', '-p', 'InvocationID',
-                  '-p', 'MainPID', '-p', 'ActiveEnterTimestampMonotonic',
-                  '-p', 'Result', '-p', 'NRestarts'], timeout=4)
-        if p.returncode:
-            return None
-        return dict(line.split('=', 1) for line in p.stdout.splitlines() if '=' in line)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
+_SHOW_CACHE = {}
+_SHOW_KEYS = ('Id', 'ActiveState', 'SubState', 'InvocationID', 'MainPID',
+              'ActiveEnterTimestampMonotonic', 'Result', 'NRestarts',
+              'UnitFileState', 'LoadState')
 
+def begin_systemd_snapshot(services):
+    """One systemctl show for engines, observers and Reader per poll.
+    Unknown/malformed units fall back to individual show (no false healthy).
+    """
+    _SHOW_CACHE.clear()
+    unit_names = list(dict.fromkeys(
+        [str(u).removesuffix('.service') + '.service' for u in services.values()] +
+        [f'observer-{str(u).removesuffix(".service")}-{kind}.service'
+         for u in services.values() for kind in ('burst', 'execution')] +
+        ['okx-position-reader.service']))
+    cmd = ['systemctl', 'show', '--no-pager']
+    for key in _SHOW_KEYS:
+        cmd += ['-p', key]
+    cmd += unit_names
+    try:
+        result = _run(cmd, timeout=7)
+        # A missing archived unit can make systemctl exit nonzero; preserve
+        # the valid records it did return instead of falling back for all.
+        allowed = set(unit_names)
+        for block in result.stdout.split('\n\n'):
+            props = dict(line.split('=', 1) for line in block.splitlines()
+                         if '=' in line)
+            unit = props.get('Id', '')
+            if unit in allowed:
+                value = (props if props.get('ActiveState') and
+                         props.get('LoadState') != 'not-found' else None)
+                _SHOW_CACHE[unit] = value
+                _SHOW_CACHE[unit.removesuffix('.service')] = value
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        pass
+
+def _show(unit):
+    if unit in _SHOW_CACHE:
+        return _SHOW_CACHE[unit]
+    try:
+        cmd = ['systemctl', 'show', unit, '--no-pager']
+        for key in _SHOW_KEYS:
+            cmd += ['-p', key]
+        result = _run(cmd, timeout=4)
+        props = (dict(line.split('=', 1) for line in result.stdout.splitlines()
+                      if '=' in line) if result.returncode == 0 else None)
+        if props and (not props.get('ActiveState') or props.get('LoadState') == 'not-found'):
+            props = None
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        props = None
+    _SHOW_CACHE[unit] = props
+    return props
+
+def systemd_active(unit):
+    props = _show(unit)
+    return props is not None and props.get('ActiveState') == 'active'
 
 def _journal(unit, cursor=None):
     # Journal is the source of truth for individual state transitions.
-    cmd = ['journalctl', '-u', unit, '-o', 'json', '--no-pager', '-n', '1000']
+    cmd = ['journalctl', '-u', unit, '-o', 'json', '--no-pager', '-n', '1000' if cursor else '1']
     if cursor:
         cmd += ['--after-cursor', cursor]
     try:
@@ -184,33 +228,49 @@ def position_reader_health_check(api, st):
                   '✅ Shared Position Reader RECOVERED: active + health IPC PASS.')
         if not rec.get('flapping'):
             rec['failed_alerted']=False
-    # A first new GET/quota failure is actionable; further increments are
-    # aggregated, never one Telegram message per 5-second poll.
+    # Aggregate actual Reader failures into one actionable incident, not a
+    # 10-minute stream of misleading GET/quota warnings. Reader DOWN and FAILED
+    # remain separate immediate critical notifications above.
     if info is not None:
-        counters=(info['fetch_failed'],info['quota_failed'])
+        counters = (info['fetch_failed'], info['quota_failed'])
         if rec.get('counters_initialized'):
-            old=(int(rec.get('fetch_failed',0)),int(rec.get('quota_failed',0)))
-            delta=sum(max(0,new-prev) for new,prev in zip(counters,old))
-            if delta:
-                last_error=float(rec.get('last_error_at',0))
-                if not last_error or now-last_error >= 600:
-                    rec['error_episode']=int(rec.get('error_episode',0))+1
-                    rec['fresh_error_episode']=True
-                rec['last_error_at']=now
-                rec['pending_errors']=int(rec.get('pending_errors',0))+delta
-            last=float(rec.get('error_notice_at',0))
-            pending=int(rec.get('pending_errors',0))
-            if pending and (not rec.get('error_notice_at') or not (0 <= now-last < 600)):
-                label=('новый эпизод' if rec.get('fresh_error_episode') else
-                       'сводка с прошлого уведомления')
-                alert('reader/errors/'+str(int(now//600)),
-                      f'⚠️ Shared Position Reader: {label} — {pending} ошибок GET/quota; '
-                      'следующая сводка не раньше чем через 10 минут.')
-                rec['pending_errors']=0
-                rec['fresh_error_episode']=False
-                rec['error_notice_at']=now
-        rec['fetch_failed'],rec['quota_failed']=counters
-        rec['counters_initialized']=True
+            previous = (int(rec.get('fetch_failed', 0)), int(rec.get('quota_failed', 0)))
+            fetch_delta = max(0, counters[0] - previous[0])
+            quota_delta = max(0, counters[1] - previous[1])
+            if fetch_delta or quota_delta:
+                rec['failure_last_at'] = now
+                window = rec.setdefault('failure_window', [])
+                window.append([now, fetch_delta, quota_delta])
+        window = rec.get('failure_window', [])
+        if not isinstance(window, list):
+            window = []
+        window = [item for item in window if
+                  isinstance(item, list) and len(item) == 3 and
+                  isinstance(item[0], (float, int)) and
+                  0 <= now - float(item[0]) <= 600]
+        rec['failure_window'] = window[-150:]
+        fetch_10m = sum(int(item[1]) for item in rec['failure_window'])
+        quota_10m = sum(int(item[2]) for item in rec['failure_window'])
+        if not rec.get('failure_incident_active') and (fetch_10m >= 5 or quota_10m >= 1):
+            number = int(rec.get('failure_incident_number', 0)) + 1
+            # Persist-before-send via one()/enqueue(); if enqueue fails, do
+            # not silently mark the episode alerted.
+            one(api, st, f'reader/fetch_episode/{number}',
+                f'⚠️ Shared Reader: повышенная частота ошибок за 10 мин. '
+                f'GET={fetch_10m}, quota={quota_10m}. '
+                'Reader DOWN/FAILED отслеживается отдельно.')
+            rec['failure_incident_number'] = number
+            rec['failure_incident_active'] = True
+        elif rec.get('failure_incident_active') and (
+                now - float(rec.get('failure_last_at') or now) >= 600):
+            number = int(rec.get('failure_incident_number', 0))
+            one(api, st, f'reader/fetch_recovery/{number}',
+                '✅ Shared Reader: 10 минут без новых ошибок GET/quota; '
+                'инцидент закрыт. Reader IPC/systemd подтверждены.')
+            rec['failure_incident_active'] = False
+            rec['failure_window'] = []
+        rec['fetch_failed'], rec['quota_failed'] = counters
+        rec['counters_initialized'] = True
     rec['down']=not online
 
 
@@ -226,12 +286,17 @@ def service_check(api, st, services, roots):
         if previous is None:
             history = _journal(unit)
             recs[name] = {'active': active, 'invocation': inv,
-                          'cursor': history[-1].get('__CURSOR') if history else None}
+                          'cursor': history[-1].get('__CURSOR') if history else None,
+                           'n_restarts': props.get('NRestarts')}
             continue  # Initial install: no historical startup/stop flood.
         old_active = bool(previous.get('active'))
         old_inv = str(previous.get('invocation') or '')
         cursor = previous.get('cursor')
-        history = _journal(unit, cursor) if cursor else _journal(unit)
+        old_restarts = previous.get('n_restarts')
+        changed = (active != old_active or inv != old_inv or
+                   (old_restarts is not None and
+                    props.get('NRestarts') != old_restarts))
+        history = (_journal(unit, cursor) if changed else []) if cursor else (_journal(unit) if changed else [])
         transitions = []
         if history is not None:
             if not cursor:
@@ -318,6 +383,7 @@ def service_check(api, st, services, roots):
                     f'⚠️ {name}: STARTED в systemd, но RUN не подтверждён за 60 с')
                 pending.remove(item)
         previous['active'], previous['invocation'] = active, inv
+        previous['n_restarts'] = props.get('NRestarts')
 
 
 # Debounced health alerts. A single late/missing telemetry sample is not a fault.
@@ -491,15 +557,17 @@ def observers_check(api, st, services, roots, now=None):
         for kind in ('burst', 'execution'):
             unit = f'observer-{trade_unit.removesuffix(".service")}-{kind}.service'
             token = f'{name}/{kind}'
-            try:
-                enabled = _run(['systemctl', 'is-enabled', unit], timeout=3).stdout.strip()
-            except (OSError, subprocess.TimeoutExpired):
-                continue
-            if enabled not in ('enabled', 'enabled-runtime'):
-                watches.pop(token, None)  # Intentionally disabled: no alarm.
-                continue
             info = _show(unit)
             if info is None:
+                continue
+            enabled = str(info.get('UnitFileState') or '')
+            if not enabled:
+                try:
+                    enabled = _run(['systemctl', 'is-enabled', unit], timeout=3).stdout.strip()
+                except (OSError, subprocess.TimeoutExpired):
+                    continue
+            if enabled not in ('enabled', 'enabled-runtime'):
+                watches.pop(token, None)  # Intentionally disabled: no alarm.
                 continue
             running = info.get('ActiveState') == 'active'
             summary = observer_dir(roots[name], kind) / 'summary.json'

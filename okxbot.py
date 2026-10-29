@@ -340,20 +340,41 @@ def validated_newbot_env(env_file):
     for secret in ('OKX_API_KEY', 'OKX_API_SECRET', 'OKX_API_PASSPHRASE'):
         if chosen[secret] != master[secret]:
             raise RuntimeError('New bot credentials differ from single OKX account')
+    # Source of truth: healthy running Reader, not a cached wizard default.
+    # IPC health is local-only and never requests OKX positions or trades.
+    from okx_reader_diagnostics import reader_health
+    health = reader_health(READER_SOCKET, timeout=2.0)
+    if not isinstance(health, dict) or health.get('scheduling') not in ('priority', 'mixed-fifo'):
+        raise RuntimeError('Shared Reader unavailable or unknown scheduling; no new bot')
+    mode = health['scheduling']
+    ack = 'ALL_BOTS_PRIORITY_AWARE' if mode == 'priority' else None
     if (master.get('OKX_POSITION_READER_SOCKET') != READER_SOCKET or
-            master.get('OKX_POSITION_READER_QUOTA_SCHEDULING') != 'mixed-fifo' or
-            master.get('OKX_POSITION_READER_PRIORITY_ACK')):
-        raise RuntimeError('Shared Reader account template invalid; no new bot')
+            master.get('OKX_POSITION_READER_QUOTA_SCHEDULING') != mode or
+            (master.get('OKX_POSITION_READER_PRIORITY_ACK') or None) != ack):
+        raise RuntimeError('Shared Reader account template differs from running Reader; no new bot')
+    # Read_env normally keeps the last duplicate: reject ambiguous master config.
+    master_raw = (BASE / '.okxbot_account.env').read_text(encoding='utf-8')
+    for key in READER_ENV_KEYS:
+        count = sum(1 for line in master_raw.splitlines()
+                    if '=' in line and not line.lstrip().startswith('#')
+                    and line.split('=', 1)[0].strip() == key)
+        if count != (0 if key == 'OKX_POSITION_READER_PRIORITY_ACK' and ack is None else 1):
+            raise RuntimeError('Shared Reader account template has missing/duplicate key: ' + key)
     # Retain chosen non-Reader options and credentials, never duplicate keys.
     lines = [line for line in raw.splitlines()
              if not ('=' in line and line.split('=', 1)[0].strip() in READER_ENV_KEYS)]
     lines.extend(('OKX_POSITION_READER_SOCKET=' + READER_SOCKET,
-                  'OKX_POSITION_READER_QUOTA_SCHEDULING=mixed-fifo'))
+                  'OKX_POSITION_READER_QUOTA_SCHEDULING=' + mode))
+    if ack:
+        lines.append('OKX_POSITION_READER_PRIORITY_ACK=' + ack)
     merged = '\n'.join(lines) + '\n'
     chosen = dict(chosen)
     chosen['OKX_POSITION_READER_SOCKET'] = READER_SOCKET
-    chosen['OKX_POSITION_READER_QUOTA_SCHEDULING'] = 'mixed-fifo'
-    chosen.pop('OKX_POSITION_READER_PRIORITY_ACK', None)
+    chosen['OKX_POSITION_READER_QUOTA_SCHEDULING'] = mode
+    if ack:
+        chosen['OKX_POSITION_READER_PRIORITY_ACK'] = ack
+    else:
+        chosen.pop('OKX_POSITION_READER_PRIORITY_ACK', None)
     return chosen, merged
 
 

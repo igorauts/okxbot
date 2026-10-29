@@ -317,40 +317,69 @@ def partial_scan(api,st,names):
             del active[key]
 
 
-def zero_buy_scan(api,st,names):
-    """Detect 0/N from FRESH engine journal, never delayed state.json.
-    Uses latest sample per bot in last 15s. Normal pauses/WAITING excluded.
-    """
-    now=time.time()
-    incidents=st.setdefault('buy_zero',{})
-    for name,root in names.items():
-        # Unlike latency diagnostics, only pull last 25 seconds.
-        last=None
-        for line in journal(name,25/3600):
-            match=COUNTS.search(line)
-            mode=MODE.search(line)
-            if match and mode:
-                timestamp=date_epoch(line.split(' ',1)[0])
-                if timestamp and timestamp>=now-15:
-                    buy,target,_,_=map(int,match.groups())
-                    eligible=(mode.group(1)=='RUN' and 'WAITING' not in line
-                              and 'VIP fee unavailable' not in line)
-                    last=(timestamp,buy,target,eligible)
-        if last is None or (root/'state/control.json').exists() and read_json(root/'state/control.json').get('mode') in ('PAUSE','SOFT','HARD','PANIC'):
+def zero_buy_scan(api, st, names):
+    """One bounded journalctl for all active units; preserve original 0/N policy."""
+    now = time.time()
+    incidents = st.setdefault('buy_zero', {})
+    if not names:
+        return
+    units = {'okx-grid-' + name + '.service': name for name in names}
+    cmd = ['journalctl', '--no-pager', '-o', 'json',
+           '--since', '25 seconds ago', '-g', 'РЕЖИМ=']
+    for unit in units:
+        cmd.extend(['-u', unit])
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True,
+                              timeout=8, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return
+    if proc.returncode:
+        return
+    latest = {}
+    for line in proc.stdout.splitlines():
+        try:
+            record = json.loads(line)
+            if not isinstance(record, dict):
+                continue
+            unit = str(record.get('_SYSTEMD_UNIT') or '')
+            name = units.get(unit)
+            if name is None:
+                continue
+            message = str(record.get('MESSAGE') or '')
+            match = COUNTS.search(message)
+            mode = MODE.search(message)
+            if not (match and mode):
+                continue
+            sample_ts = int(record['__REALTIME_TIMESTAMP']) / 1_000_000
+            if not now - 15 <= sample_ts <= now + 5:
+                continue
+            buy, target, _, _ = map(int, match.groups())
+            eligible = (mode.group(1) == 'RUN' and
+                        'WAITING' not in message and
+                        'VIP fee unavailable' not in message)
+            if name not in latest or sample_ts >= latest[name][0]:
+                latest[name] = (sample_ts, buy, target, eligible)
+        except (ValueError, TypeError, KeyError, OverflowError):
             continue
-        ts,buy,target,eligible=last
+    for name, root in names.items():
+        last = latest.get(name)
+        if last is None:
+            continue
+        control = root / 'state/control.json'
+        if control.exists() and read_json(control).get('mode') in ('PAUSE','SOFT','HARD','PANIC'):
+            continue
+        sample_ts, buy, target, eligible = last
         if not eligible or Path('/var/lib/okxbot/account_soft_stop.json').exists():
-            incidents.pop(name,None)  # expected mode, not an unresolved 0/N incident
+            incidents.pop(name, None)
             continue
-        prior=incidents.get(name)
-        if buy==0 and not prior:
-            inc={'since':ts,'target':target}
-            # Store incident identity, so restarts don't resend 0/N.
-            one(api,st,f'zero/{name}/{ts}',f'🔴 BUY 0/{target} | {name}\nСетка без BUY LIMIT!')
-            incidents[name]=inc
-        elif buy>=target and prior:
-            duration=max(0,ts-float(prior['since']))
-            one(api,st,f'zero_restored/{name}/{prior["since"]}',
+        prior = incidents.get(name)
+        if buy == 0 and not prior:
+            one(api, st, f'zero/{name}/{sample_ts}',
+                f'🔴 BUY 0/{target} | {name}\nСетка без BUY LIMIT!')
+            incidents[name] = {'since': sample_ts, 'target': target}
+        elif buy >= target and prior:
+            duration = max(0, sample_ts - float(prior['since']))
+            one(api, st, f'zero_restored/{name}/{prior["since"]}',
                 f'🟢 BUY {target}/{target} | {name}\nВосстановление ≈{duration:.2f} с')
             del incidents[name]
 

@@ -71,11 +71,53 @@ class ReaderAlertTests(unittest.TestCase):
         self.assertEqual(self.sent,[])
 
     def test_new_error_counters_and_no_repeat(self):
-        self.poll();self.sent.clear()
-        self.poll(info={'reader_running':True,'fetch_failed':3,'quota_failed':0})
-        self.poll(info={'reader_running':True,'fetch_failed':3,'quota_failed':0})
-        self.assertEqual(len(self.keys()),1)
-        self.assertTrue(self.keys()[0].startswith('reader/errors/'))
+        # Reader v4: one GET failure is recorded, not an immediate Telegram alarm.
+        with patch.object(h.time,'time',return_value=1000.0):
+            self.poll();self.sent.clear()
+            self.poll(info={'reader_running':True,'fetch_failed':3,'quota_failed':0})
+            self.poll(info={'reader_running':True,'fetch_failed':3,'quota_failed':0})
+            self.assertEqual(self.keys(),[])
+            # Five new GET failures within 10 minutes create one incident.
+            self.poll(info={'reader_running':True,'fetch_failed':7,'quota_failed':0})
+            self.assertEqual(self.keys(),['reader/fetch_episode/1'])
+            self.assertIn('GET=5, quota=0',self.sent[0][1])
+            self.poll(info={'reader_running':True,'fetch_failed':7,'quota_failed':0})
+            self.poll(info={'reader_running':True,'fetch_failed':10,'quota_failed':0})
+            self.assertEqual(self.keys(),['reader/fetch_episode/1'])
+
+    def test_quota_failure_immediate_without_fetch_failure(self):
+        with patch.object(h.time,'time',return_value=1000.0):
+            self.poll();self.sent.clear()
+            self.poll(info={'reader_running':True,'fetch_failed':2,'quota_failed':1})
+            self.assertEqual(self.keys(),['reader/fetch_episode/1'])
+            self.assertIn('GET=0, quota=1',self.sent[0][1])
+            self.poll(info={'reader_running':True,'fetch_failed':2,'quota_failed':1})
+            self.assertEqual(len(self.sent),1)
+
+    def test_error_incident_recovers_once_after_stability(self):
+        good={'reader_running':True,'fetch_failed':7,'quota_failed':0}
+        with patch.object(h.time,'time',return_value=1000.0):
+            self.poll();self.sent.clear()
+            self.poll(info=good)
+            self.assertEqual(self.keys(),['reader/fetch_episode/1'])
+        with patch.object(h.time,'time',return_value=1599.0):
+            self.poll(info=good)
+            self.assertEqual(self.keys(),['reader/fetch_episode/1'])
+        with patch.object(h.time,'time',return_value=1600.0):
+            self.poll(info=good)
+            self.poll(info=good)
+            self.assertEqual(self.keys(),['reader/fetch_episode/1',
+                                          'reader/fetch_recovery/1'])
+            self.assertIn('инцидент закрыт',self.sent[-1][1])
+        with patch.object(h.time,'time',return_value=1610.0):
+            self.poll(info={'reader_running':True,'fetch_failed':12,'quota_failed':0})
+            self.assertEqual(self.keys()[-1],'reader/fetch_episode/2')
+
+    def test_reader_error_counter_reset_not_reported(self):
+        with patch.object(h.time,'time',return_value=1000.0):
+            self.poll();self.sent.clear()
+            self.poll(info={'reader_running':True,'fetch_failed':0,'quota_failed':0})
+            self.assertEqual(self.keys(),[])
 
     def test_watcher_disabled_without_environment(self):
         with patch.dict(os.environ,{'OKX_POSITION_READER_SOCKET':''}),patch.object(h,'_show') as show:

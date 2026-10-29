@@ -27,7 +27,7 @@ from okx_telegram_views import status_one, latency_report, read_json, LINE
 from okx_telegram_events import (one, event_alert, market_event, market_process, zero_buy_scan, observer_fault_scan, gate_alert_scan)
 from okx_telegram_followups import partial_scan, panic_scan
 from okx_telegram_delivery import persist as durable_save, drain as alert_drain
-from okx_telegram_health import service_check, engine_heartbeat_check, observers_check, panic_ack_check, position_reader_health_check, reader_bypass_check
+from okx_telegram_health import begin_systemd_snapshot, systemd_active, service_check, engine_heartbeat_check, observers_check, panic_ack_check, position_reader_health_check, reader_bypass_check
 
 BASE = Path(os.environ.get('OKXBOT_BASE_DIR','/root/okx')).resolve()
 REGISTRY = Path(os.environ.get('OKXBOT_REGISTRY',str(BASE/'.okxbot_registry.json')))
@@ -84,11 +84,9 @@ def refresh_bots(*,force=False):
 
 def _active_service(name):
     try:
-        p=subprocess.run(['systemctl','is-active',SERVICES[name]],
-            capture_output=True,text=True,timeout=3)
-        return p.stdout.strip()=='active'
-    except (OSError,subprocess.TimeoutExpired,KeyError):return False
-
+        return systemd_active(SERVICES[name])
+    except KeyError:
+        return False
 
 def _terminal_report(name):
     root=Path(BOT_DIRS[name]);path=root/'state/final_stats.json'
@@ -459,7 +457,8 @@ def ingest_events(api,st):
                 else:
                     event_alert(api,st,name,obj)
                 st['offsets'][key]=f.tell()
-                save_state(st)
+                # One normal cursor commit per poll in main().
+                # Any alert was already durably committed by enqueue().
     market_process(api,st,{k:Path(v) for k,v in BOT_DIRS.items()})
     names={k:Path(v) for k,v in BOT_DIRS.items() if _active_service(k)}
     observer_fault_scan(api,st,names)
@@ -531,6 +530,7 @@ def main():
     while True:
         try:
             refresh_bots()
+            begin_systemd_snapshot(SERVICES)
             ingest_events(api,st)
             services_check(api,st)
             safety_check(api,st)

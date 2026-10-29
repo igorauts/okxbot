@@ -762,8 +762,8 @@ class FillStore:
             return rows
 
     def ensure_expected(self,expected):
-        # Diagnostics-only wall durations; exact fills and order ownership
-        # logic is intentionally unchanged. No additional API/SQLite queries.
+        # Verify the entire pinned set once, then refresh ONLY missing orders.
+        # Never publish incomplete fills or infer/extrapolate any execution.
         t0=time.perf_counter()
         if not expected:
             self.perf.last={'sqlite_first':0.0,'qty_index':0.0,
@@ -779,11 +779,17 @@ class FillStore:
         missing=[oid for oid,qty in expected.items() if volumes.get(oid,Decimal(0))<qty]
         t2=time.perf_counter()
         for oid in missing:
-            # After bootstrap ONLY exact missing order IDs are downloaded,
-            # never a full historic scan per report. Safe, bounded GET retries.
-            A.fills_by_order(oid)
+            A.fills_by_order(oid)  # existing durable, validated GET-only recovery
         t3=time.perf_counter()
-        if missing:rows=self.get_rows(expected.keys())
+        if missing:
+            # The refresh reads a NEW SQLite snapshot only for missing IDs.
+            # Never mix old and new rows for the same order (duplicate billId).
+            updated=self.get_rows(missing)
+            missing_set=set(missing)
+            if any(str(f.get('ordId') or '') not in missing_set for f in updated):
+                raise ValueError('Unexpected fill in missing-order refresh')
+            rows=[f for f in rows if str(f['ordId']) not in missing_set]
+            rows.extend(updated)
         t4=time.perf_counter()
         self.perf.last={'sqlite_first':t1-t0,'qty_index':t2-t1,
                         'missing_recovery':t3-t2,'sqlite_second':t4-t3,
@@ -863,8 +869,11 @@ def accumulate_expected_sell(expected, leg):
 
 def archived_rows():
     if not ARCHIVE_DB.exists():return []
-    with contextlib.closing(sqlite3.connect(str(ARCHIVE_DB),timeout=20)) as db:
-        db.execute('CREATE TABLE IF NOT EXISTS cycles (id TEXT PRIMARY KEY, data TEXT NOT NULL)')
+    # Read-only WAL snapshot: background statistics never perform DDL.
+    uri=ARCHIVE_DB.resolve().as_uri()+'?mode=ro'
+    with contextlib.closing(sqlite3.connect(uri,uri=True,timeout=20)) as db:
+        db.execute('PRAGMA query_only=ON')
+        db.execute('BEGIN')
         return [json.loads(row[0]) for row in db.execute('SELECT data FROM cycles')]
 
 
@@ -3588,6 +3597,7 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
 # OKX fill-based statistics run outside the trading thread.
 # All numbers are derived from OKX's actual fills (not LIMIT prices).
 STATS_INTERVAL = 600  # calculate at start, then every ten minutes
+STATS_FINANCIAL_CHANGE_MIN_SEC = 300  # success-only: defer full historical rebuild
 STATS_FILE = ROOT / 'state' / 'stats.json'  # same schema across all new OKX bots
 STATS_HISTORY_PAGES_LIMIT = 200  # cap REST work and disclose if coverage fails
 STATS_INTERVAL_BETWEEN_PAGES = 0.0  # Shared RestGovernor schedules fills-history calls
@@ -4327,34 +4337,34 @@ class StatsWorker(threading.Thread):
         self.pnl=pnl
 
     def run(self):
-        last_attempt=0.0
-        last_success=0.0
-        unsuccessful=False
-        while True:
-            delay=5
-            now=time.monotonic()
-            try:
-                if unsuccessful:
-                    due=now-last_attempt>=60
-                else:
-                    due=(not last_success or now-last_success>=STATS_INTERVAL)
-                    if not due and now-last_attempt>=60 and DATA.exists() and STATS_FINANCIAL_ANCHOR.exists():
-                        current=json.loads(DATA.read_text())
-                        anchor=json.loads(STATS_FINANCIAL_ANCHOR.read_text())
-                        due=financial_signature(current)!=anchor.get('signature')
-                if due:
-                    last_attempt=now
-                    successful=bool(print_full_stats(self.pnl))
-                    unsuccessful=not successful
-                    if successful:last_success=time.monotonic()
-            except RateLimitedError:
-                unsuccessful=True
-                delay=60
-                print('⏳ OKX ограничил историю сделок; статистика повторится через 60с',flush=True)
-            except Exception as e:
-                unsuccessful=True
-                print('⚠️ Статистика недоступна:',type(e).__name__,str(e)[:180],flush=True)
-            time.sleep(delay)
+            last_attempt=0.0
+            last_success=0.0
+            unsuccessful=False
+            while True:
+                delay=5
+                now=time.monotonic()
+                try:
+                    if unsuccessful:
+                        due=now-last_attempt>=60
+                    else:
+                        due=(not last_success or now-last_success>=STATS_INTERVAL)
+                        if not due and now-last_attempt>=STATS_FINANCIAL_CHANGE_MIN_SEC and DATA.exists() and STATS_FINANCIAL_ANCHOR.exists():
+                            current=json.loads(DATA.read_text())
+                            anchor=json.loads(STATS_FINANCIAL_ANCHOR.read_text())
+                            due=financial_signature(current)!=anchor.get('signature')
+                    if due:
+                        last_attempt=now
+                        successful=bool(print_full_stats(self.pnl))
+                        unsuccessful=not successful
+                        if successful:last_success=time.monotonic()
+                except RateLimitedError:
+                    unsuccessful=True
+                    delay=60
+                    print('⏳ OKX ограничил историю сделок; статистика повторится через 60с',flush=True)
+                except Exception as e:
+                    unsuccessful=True
+                    print('⚠️ Статистика недоступна:',type(e).__name__,str(e)[:180],flush=True)
+                time.sleep(delay)
 
 
 def active_tp_trace_id(st, market):
