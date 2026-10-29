@@ -68,3 +68,5 @@ python3 -B -m unittest tests.test_idle_reconcile_minimal -q
 
 # Offline integration-level fault injection on actual live_loop AST: no exchange access.
 python3 -B -m unittest tests.test_live_loop_chaos_rc4 -q
+# Exact-scope proof and real Unix IPC regression (mocked provider; no OKX).
+python3 -B -m unittest tests.test_reader_authoritative_zero_contract tests.test_reader_zero_ipc_end_to_end -q

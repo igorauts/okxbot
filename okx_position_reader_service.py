@@ -130,7 +130,12 @@ class ReadOnlyOKXProvider:
         # Request the SWAP scope explicitly; never include inverse/USDC.
         path='/api/v5/account/positions?'+urllib.parse.urlencode({
             'instType':'SWAP', 'instId':','.join(instruments)})
-        return self._sync_get_path(path)
+        response = self._sync_get_path(path)
+        # This marker is internal and only attached AFTER full successful GET.
+        response['_reader_transport_scope'] = {
+            'endpoint': '/api/v5/account/positions',
+            'instType': 'SWAP', 'instIds': list(instruments), 'complete': True}
+        return response
 
     async def fetch_account_uid(self):
         """One signed GET on service startup; fail if UID not proven."""

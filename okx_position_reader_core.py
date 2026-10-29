@@ -105,6 +105,8 @@ class Snapshot:
     fetch_ms: float | None = None
     batch_size: int = 0
 
+    # True only after an exact-scope, complete, validated signed GET.
+    absence_proven: bool = False
     def slice(self, instrument: str, *, not_before_ns: int, trace_id: str = '',
               request_received_ns: int | None = None) -> dict:
         if instrument not in self.instruments or self.started_ns < not_before_ns:
@@ -119,7 +121,7 @@ class Snapshot:
             'instrument': instrument,
             'rows': copy.deepcopy(list(self.by_instrument[instrument])),
             # Empty array is NOT an authenticated 'zero position' proof.
-            'absence_is_proven_zero': False,
+            'absence_is_proven_zero': bool(self.absence_proven and not self.by_instrument[instrument]),
             'trace_id': trace_id,
             'request_received_mono_ns': request_received_ns,
             'quota_wait_ms': self.quota_wait_ms,
@@ -169,8 +171,17 @@ def build_snapshot(*, response: dict, instruments: tuple[str, ...],
             grouped[instrument].clear()
             continue
         grouped[instrument].append(copy.deepcopy(row))
+    # Do not treat an absent row as zero without a complete, exact-scope transport.
+    scope = response.get('_reader_transport_scope')
+    transport_complete = (isinstance(scope, dict)
+        and scope.get('endpoint') == '/api/v5/account/positions'
+        and scope.get('instType') == 'SWAP'
+        and scope.get('complete') is True
+        and type(scope.get('instIds')) is list
+        and scope['instIds'] == list(instruments)
+        and all(row['instId'] in grouped for row in response['data']))
     return Snapshot(secrets.token_hex(12), started_ns, completed_ns, instruments,
-                    {k: tuple(v) for k, v in grouped.items()}, errors)
+                    {k: tuple(v) for k, v in grouped.items()}, errors, absence_proven=transport_complete)
 
 
 @dataclass
@@ -343,7 +354,7 @@ class SharedReaderCore:
                                     snapshot.by_instrument, snapshot.instrument_errors,
                                     quota_wait_ms=quota_wait_ms,
                                     fetch_ms=round((completed-started)/1_000_000, 3),
-                                    batch_size=len(claimed))
+                                    batch_size=len(claimed), absence_proven=snapshot.absence_proven)
                 for waiter in claimed:
                     if waiter.future.done():
                         continue

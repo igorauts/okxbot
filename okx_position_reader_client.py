@@ -83,8 +83,11 @@ def read_positions(socket_path, instrument, *, account_uid, emergency=False, exi
         # in depth: zero/negative and duplicate handling is validated below.
         # Batched OKX GET may omit instruments without positions. An empty
         # slice is not an authenticated zero; require narrow GET independently.
-        if not response['rows']:
-            raise PositionReaderEmpty('Batch position absence requires exact GET')
+        # Empty rows require a positive proof; old Reader stays fail-closed.
+        if not response['rows'] and response.get('absence_is_proven_zero') is not True:
+            raise PositionReaderEmpty('Missing authenticated zero proof')
+        if response['rows'] and response.get('absence_is_proven_zero') is True:
+            raise PositionReaderUnavailable('Contradictory zero proof')
         if len(response['rows'])>1:
             raise PositionReaderUnavailable('Ambiguous NET position rows')
         for r in response['rows']:
