@@ -1,86 +1,137 @@
-## v0.7.39 LIVE status (29.10.2026 UTC)
-7/7 торговых ботов LIVE на новом engine; Priority FIFO ON, Reader IPC 7/7 подтверждён. P0 виртуального MARKET и аварийного пути исправлен. Подробности — V0739_RELEASE_NOTES_RU.md.
-
-> **v0.7.38 LIVE-verified, 28.10.2026 UTC.** Три действующих движка DOOD/BEAT/INIT на 0.7.38, новые BUY/TP и Telegram MARKET SELL подтверждены на LIVE. CAP завершён PANIC SELL с позицией 0 CAP; BTC/NEAR/WLD продолжают работать на 0.7.35. Редкая резервная сверка 5–5.8 сек, реакция на WS-события и fail-closed BUY gate, UI-пары BEAT/CAP/INIT/BLUR/DOS. См. [V0738_LIVE_RELEASE_NOTES_RU.md](V0738_LIVE_RELEASE_NOTES_RU.md). Публикация не меняет VPS.
-
-> **v0.7.36 LIVE-verified, 28.10.2026 UTC.** Четыре действующих бота (NEAR/WLD/BTC/DOOD) остались на торговом движке 0.7.35 и сохранили PID. Общий Reader Diagnostics, регистрация новых ботов, Telegram BYPASS и P2-исправления установлены с backup и проверены без остановки торговых движков. См. [V0736_LIVE_RELEASE_NOTES_RU.md](V0736_LIVE_RELEASE_NOTES_RU.md). Исходная офлайн-записка сохранена в V0736_OFFLINE_RELEASE_NOTES_RU.md.
-
-> **v0.7.35 LIVE-verified, 27.10.2026 UTC.** Три действующих торговых бота NEAR/WLD/BTC обновлены по одному с резервными копиями, GET-only аудитами, свежими heartbeat. Shared Reader использует существующий общий account env; watchdog timer и Telegram Reader FLAPPING/anti-spam LIVE-verified. ZEC и DOOD терминальны, не перезапускались. Исходная офлайн-заметка сохранена: [V0735_OFFLINE_RELEASE_NOTES_RU.md](V0735_OFFLINE_RELEASE_NOTES_RU.md); подтверждения: [V0735_LIVE_RELEASE_NOTES_RU.md](V0735_LIVE_RELEASE_NOTES_RU.md).**
-
-> **v0.7.34 LIVE-verified, 27.10.2026.** При релизном LIVE-аудите все четыре бота работали через Shared Position Reader,
-> Telegram Reader watchdog включён. Priority FIFO **не включён**, используется mixed-fifo.
-> Исходники и проверки: `V0734_LIVE_RELEASE_NOTES_RU.md`. Публикация GitHub не меняет LIVE.
-
 # OKX Grid Bot
 
-Алгоритмический LONG Grid Bot для бессрочных линейных USDT-SWAP OKX.
+**Последний опубликованный релиз: [v0.7.41](https://github.com/igorauts/okxbot/releases/tag/v0.7.41).**
 
-**Последний LIVE-verified engine: 0.7.38 (срез 28 октября 2026).** Исторически три бота продолжают работать на engine 0.7.35, а DOOD/BEAT/INIT на 0.7.38; CAP завершён. Подробности описаны в LIVE-заметках. Исторический контекст:  На момент rollout v0.7.34 проверены 4/4 бота. После релиза архивный `zec0724` завершён PANIC SELL (позиция 0); `dood0721-2` тоже терминальный. На момент подготовки v0.7.36 также LIVE запущен новый `dood0735` (не путать с архивным `dood0721-2`); остальные: `near0721`, `wld0728`, `btc0721`. Их свежий статус перед LIVE проверяется отдельно, а не выводится из README.
+Алгоритмический LONG Grid Bot для реального OKX-аккаунта: линейные бессрочные
+USDT-margined SWAP, режим NET/CROSS. Позиции, ордера и результаты учитываются
+по собственным торговым циклам с финансовой сверкой и fail-closed защитами.
 
-**DOOD `dood0721-2` завершён PANIC SELL**, позиция 0 DOOD, финальный торговый PnL подтверждён исполнениями OKX. В архиве; не включать его в обычное обновление.
+> **Статус — исторический срез на 29 октября 2026 года, не онлайн-мониторинг.**
+> При проверенном развёртывании v0.7.41 шесть LIVE-движков и Shared Position Reader
+> работали успешно. Текущую доступность, позиции и PnL необходимо проверять отдельно.
 
-Изменения после опубликованной `0.7.30`: TP-телеметрия, финансовые снимки, attached TP `51006`, ускоренный StatsWorker, исправление Telegram STARTED после PANIC, немедленный WS wake для виртуальных TP и общий Reader для GET позиций. См. [CHANGELOG](CHANGELOG.md), [StatsWorker](STATS_WORKER_OPTIMIZATION_RU.md), [TP Recovery](V0732_TP_RECOVERY_RU.md).
+## LIVE-срез и архитектура
 
-**GitHub-публикация не устанавливает код на VPS, не останавливает торговые службы и не отправляет ордера.**
+- Проверенные активные экземпляры: `near0721`, `dood0735`, `wld0728`, `init0738`, `blur0738`, `btc0721`.
+  Обновление проводилось по одному, **BTC последним**.
+- Завершённые архивные экземпляры: `beat0738`, `zec0724`, `cap0738`, `dood0721-2`; их SQLite и state не
+  перезапускают и не мигрируют ради обновления.
+- Один OKX-аккаунт, не более одного активного бота на инструмент. Работа
+  нескольких ботов или ручных позиций в одной NET-паре без отдельного
+  координатора ownership не поддерживается.
+- Telegram используется **только для чтения** (`/status`, `/latency`,
+  диагностика и уведомления); никаких торговых команд через Telegram.
+- Исходники текущего релиза соответствуют проверенному LIVE-коду на момент
+  выпуска. Публикация в GitHub сама по себе **не обновляет VPS**.
 
-## v0.7.30 — release highlights
+## Торговый контур и защита
 
-- Устранены привязки к номерам релизов в рабочих функциях и правилах совместимости; сохранены только исторические протокольные имена в persistent файлах.
-- `okx_live_upgrade.py`: динамический SHA256-проверяемый обновлятор, backup, stop guards, GET-only audit и обязательное полное подтверждение финансового отчёта до START.
-- Telegram сохраняет старый state/outbox/дедупликацию; статистика читает `performance` и legacy `performance_v0724`.
-- Реестр движков и observers/PANIC используют проверку идентичности исходного файла и state schema.
-- ZIP mode / financial audit completion включены в постоянную регрессию сборки.
+- Лимитные BUY, реальные attached LIMIT SELL TP и виртуальные TP; для
+  виртуального выхода — проверка NET-позиции, SELL coverage и durable intent
+  перед `reduceOnly MARKET SELL`.
+- Неизвестный исход торгового POST не допускает слепой повторной отправки:
+  сначала reconciliation, ownership и идемпотентное восстановление.
+- Reader и резервные прямые GET используют **один общий квотный gate**
+  `/account/positions`: максимум **8 GET за 2,1 секунды** на аккаунт.
+  Shared Reader агрегирует запросы до 10 инструментов и использует
+  **Priority FIFO ON** (аварийные/выходные запросы приоритетнее обычных).
+- Максимальный лимит реальных TP `REAL_TP_MAX=150` сохраняется; без
+  отдельного решения нельзя менять стратегию, TP/BUY protection,
+  MARKET coalescing, комиссии или правила ownership.
+- При создании и старте проверяются спецификация OKX, доступность контракта,
+  шаг цены и количества, минимумы и параметры исполнения.
 
-**v0.7.28 — Monitoring Reliability Fix.** Продолжение v0.7.27: безопасная группировка heartbeat-инцидентов, append-only 24-часовая latency-телеметрия и однозначные поля TP-диагностики. Контролируемый LIVE rollout и проверка всех 13 служб завершены 23 октября 2026 года. Это результат проверки на момент обновления, не гарантия непрерывной будущей доступности.
+## Shared Position Reader: подтверждённый ноль (v0.7.41)
 
-## v0.7.28 — Monitoring Reliability Fix (LIVE-verified, 2026-10-23)
+Исправлен случай, когда успешный ответ OKX `/account/positions` не содержит
+строку инструмента без открытой позиции. Reader может передать клиенту
+**явный authoritative zero**, но только если доказаны полный успешный снимок,
+верный UID, точная область `instId`, свежесть и целостность ответа.
 
-- Heartbeat alerts retain each bot's unresolved fault during multi-bot incidents; join and partial recovery are reported without false `ALL RECOVERED`.
-- 24-hour latency rolls up in append-only UTC-hour files under `logs/latency_24h_rollups.segments/`; the previous JSONL is read only during a one-day transition. No per-minute rewriting of the full 24h file. Histograms remain approximate; no seven-day archive.
-- TP diagnostics include `buyPx`, `tpPx`, `cycleId`, while retaining old `price` for backwards-compatible log readers. Trading choices, FIFO caps, timeouts, TP policy and accounting are unchanged.
-- Контролируемое LIVE-обновление четырёх ботов (`near0721`, `btc0721`, `dood0721-2`, `zec0724`) завершено 23 октября 2026 года: отдельные backup, GET-only audit, свежий heartbeat для каждого; 13 служб активны, ошибок в предоставленной проверке журналов нет. Append-only сегменты всех четырёх ботов содержат свежие минутные записи. Групповые аварии на LIVE намеренно не провоцировались; их сценарии пройдены в офлайн-тестах. Публикация GitHub не трогает LIVE.
+При таймауте, ошибке, неполном/неоднозначном ответе, неверном UID/scope или
+устаревших данных результат остаётся **UNKNOWN**, а не нулём. Fallback
+сохраняет прежний общий квотный gate, а IPC и клиент продолжают fail-closed.
 
-## Возможности
+Офлайн пройдены контрактные и сквозные Unix IPC тесты, полный `run_checks.sh`;
+LIVE-раскатка на шесть ботов завершена с резервными копиями и GET-only аудитами.
+В пассивном postflight Reader подтвердил 1 414 успешных IPC и один краткий
+`unavailable` у INIT при перезапуске, вызвавший 15 прямых GET за ~56 секунд;
+видимых HTTP 429 в этом ограниченном окне не было.
+**Реальная authoritative-zero ситуация на нулевом инструменте ещё не
+наблюдалась:** нельзя считать все причины fallback/429 устранёнными.
 
-- Несколько независимых торговых экземпляров на разных инструментах одного OKX-аккаунта.
-- Сеточные BUY LIMIT, SELL Take Profit и виртуальные TP.
-- Управление через терминальный менеджер `okxbot`.
-- Режимы RUN, PAUSE, SOFT STOP, HARD STOP и PANIC SELL.
-- Учёт исполнений, торговых циклов, комиссий и PnL.
-- Мониторинг максимальной просадки отдельного бота.
-- Telegram-монитор: `/status`, `/latency`, `/latency8h`, `/help`.
-- Диагностика задержек, аварийных ситуаций и состояния ордеров.
+## Производительность и наблюдаемость
 
-## Основные компоненты
+- Начиная с v0.7.40 оптимизирован финансовый StatsWorker: выборочное
+  повторное чтение недостающих `ordId` вместо второго полного перечитывания
+  fills; интервал тяжёлого перерасчёта после изменения финансового состояния
+  увеличен до 300 секунд (базовый — 600 секунд). Полноценный incremental
+  ledger пока не реализован; потерянные fills/fees не оцениваются на глаз.
+- WS-события пробуждают торговый контур, а независимая спокойная REST-сверка
+  выполняется с jitter примерно 5–5,8 секунды; аварийные проверки независимы.
+- Reader watchdog, read-only Telegram monitor, execution/burst observers и
+  latency telemetry помогают выявлять задержки и инциденты.
+- Команда `okxbot reader-diagnostics` показывает локальную статистику Reader
+  без биржевых запросов и без торговых действий.
 
-- `okx_bot.py` — торговый движок.
-- `okxbot.py` — терминальный менеджер.
-- `okx_monitor.py` — мониторинг.
-- `okx_execution_observer.py` — наблюдение за исполнением.
-- `engine_manifest.json` — версия торгового движка и зависимости.
-- `okx_panic_all.py` — независимая проверка доступных экземпляров для частичного PANIC ALL.
-- `okx_live_upgrade.py` — контролируемое обновление по одному боту (GET-only audit, backup, fail-closed).
-- `okx_*.py` — дополнительные компоненты системы.
+## Известные ограничения и следующие задачи
 
-## Безопасность
+- Реальная проверка authoritative-zero при естественном нулевом балансе и
+  атрибуция оставшихся direct GET/HTTP 429 (не устраивать искусственный PANIC).
+- Избыточные `TP_BUFFER_CLEANUP`/`BUY_BUFFER_CLEANUP`; их сокращение требует
+  отдельного анализа рисков и не должно создавать независимого trade writer.
+- Редкие задержки virtual TP crossing → MARKET intent (в том числе из-за
+  pending real SELL guard): нельзя ослаблять защиту от двойной продажи ради скорости.
+- Дальнейшая инкрементальная бухгалтерия и исследование влияния CPU steal,
+  памяти и I/O на latency.
+- Funding collector отложен; нет поддержки субаккаунтов, дополнительных
+  API-ключей или нескольких владельцев одной NET-позиции.
 
-Бот работает с реальными ордерами и позициями. HARD STOP может оставить позицию без защитных TP. PANIC SELL может привести к проскальзыванию и taker-комиссии.
+## Установка, обновления и безопасность
 
-Не размещайте в GitHub API-ключи, `.env`, торговые состояния, SQLite или журналы с чувствительной информацией.
+Проект торгует **реальными средствами**; это не безопасный учебный пример.
+Перед любым LIVE-изменением обязательны бэкап, проверка исходников и SHA256,
+финансовый GET-only аудит, контролируемое обновление **одного бота за раз**
+через `okx_live_upgrade.py` и последующая сверка. Архивы только для чтения.
+HARD STOP может оставить позицию с открытыми биржевыми ордерами;
+PANIC SELL может привести к проскальзыванию и taker-комиссиям.
 
-Обновление работающего торгового экземпляра требует отдельной согласованной процедуры с резервным копированием и проверкой состояния. Прямая замена Python-файлов недопустима. Перед использованием `okx_live_upgrade.py` обязательны отдельное разрешение LIVE, явный SHA256 архива, бэкап и понимание риска работающих на OKX ордеров во время технического STOP. Установщик разделяет действия `preflight`, `shared` (менеджер), `telegram` (только Telegram-модули и сервис) и `bot` (по одному торговому боту, требует `--confirm-live-stop`).
+Не публикуйте `.env`, OKX API ключи/секреты, Telegram токены, приватные
+SQLite/state, реальные журналы и финансовые данные. Источник credentials
+Shared Reader — уже существующий account key, не отдельный ключ.
 
-## Документация и история
+## Компоненты
 
-- [Последний релиз](https://github.com/igorauts/okxbot/releases/latest)
-- [Все релизы](https://github.com/igorauts/okxbot/releases)
-- [История изменений](CHANGELOG.md)
+- `okx_bot.py` — торговый движок, `okxbot.py` — терминальный менеджер.
+- `okx_position_reader_core.py`, `okx_position_reader_service.py`,
+  `okx_position_reader_client.py` — валидация snapshot, общий Reader и IPC клиент.
+- `okx_positions_priority.py` — приоритетная общая GET-очередь.
+- `okx_accounting.py`, `okx_fill_singleflight.py`, `okx_terminal_accounting.py`
+  — финансовые расчёты, fills и итоговые операции.
+- `okx_telegram_monitor.py`, `okx_telegram_health.py` — read-only мониторинг.
+- `okx_execution_observer.py`, `okx_latency.py` — наблюдатели и метрики.
+- `okx_live_upgrade.py`, `engine_manifest.json`, `okx_version.py` —
+  контролируемое обновление, версия и контракт зависимостей.
 
-Исходники и документация прежних версий доступны в соответствующих Git-тегах.
+## Документация
 
-## Разработка
+- [CHANGELOG.md](CHANGELOG.md)
+- [SAFETY_REVIEW.md](SAFETY_REVIEW.md)
+- [V0739_RELEASE_NOTES_RU.md](V0739_RELEASE_NOTES_RU.md)
+- [STATS_WORKER_OPTIMIZATION_RU.md](STATS_WORKER_OPTIMIZATION_RU.md)
+- [V0738_LIVE_RELEASE_NOTES_RU.md](V0738_LIVE_RELEASE_NOTES_RU.md)
+- [READER_TELEGRAM_ALERTS_RU.md](READER_TELEGRAM_ALERTS_RU.md)
+- [READER_ZERO_0741_OFFLINE_NOTES.md](READER_ZERO_0741_OFFLINE_NOTES.md)
 
-Проект развивается на основе действующей LIVE-системы. Перед публикацией новой версии проверяются зависимости, безопасность торговых операций и соответствие исходников установленному коду.
+Релизные ZIP и исторические README доступны в соответствующих Git-тегах.
+
+---
+
+## Архивные технические заметки (не текущий LIVE-статус)
+
+Ниже оставлены заметки из прежнего README. Даты, версии, списки активных ботов
+и указания к их обновлению относятся **исключительно к соответствующим
+историческим выпускам** и не заменяют текущие инструкции.
 
 ## Изменения v0.7.27 (LIVE проверено 2026-10-23)
 
