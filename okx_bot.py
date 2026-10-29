@@ -3108,18 +3108,6 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             # Never continue to BUY placement under a stale RUN/PAUSE mode.
             if control_mode()!=mode:
                 continue
-            # A WS connection may have restarted DURING the REST round.
-            # Discard trading decisions from a snapshot that spans epochs.
-            if (watcher.connection_epoch,market.connection_epoch)!=ws_epoch_at_start:
-                previous_trigger='ws_health'
-                continue
-            # A private fill/cancel may have arrived AFTER the REST snapshot
-            # started. Never authorize a strategic write against a snapshot
-            # that has not yet accounted for that new orders notification.
-            # Keep emergency HARD/PANIC independent of a busy WS queue.
-            if mode not in ('HARD','PANIC') and not watcher.events.empty():
-                previous_trigger='private'
-                continue
             # Publish reconciled virtual targets to the ticker listener and
             # durably latch crossings observed during the previous REST pass.
             # Never send orders here; exchange position/order gates remain.
@@ -3286,6 +3274,16 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             if not waiting and last_sync_kind=='UPPER':
                 log('UPPER_RESUMED',bid=str(bid),upper=str(UPPER))
                 last_sync_kind=None
+            # Prevent starvation of independently REST-verified TP exits and
+            # PANIC/HARD when private WS traffic or reconnects are continuous.
+            # The stale-snapshot guard still blocks NEW strategic BUY decisions,
+            # after servicing virtual MARKET and protective SELL recovery.
+            if mode=='RUN' and (watcher.connection_epoch,market.connection_epoch)!=ws_epoch_at_start:
+                previous_trigger='ws_health'
+                continue
+            if mode=='RUN' and not watcher.events.empty():
+                previous_trigger='private'
+                continue
             # Fee-tier changes should never cause fresh BUYs with unprofitable TP.
             # When API is unavailable, pause new BUYs but keep TP maintenance alive.
             if time.monotonic()-last_fee_check>(30 if maker_cost is None else 600):

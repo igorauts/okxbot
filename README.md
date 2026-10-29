@@ -1,3 +1,6 @@
+## v0.7.39 LIVE status (29.10.2026 UTC)
+7/7 торговых ботов LIVE на новом engine; Priority FIFO ON, Reader IPC 7/7 подтверждён. P0 виртуального MARKET и аварийного пути исправлен. Подробности — V0739_RELEASE_NOTES_RU.md.
+
 > **v0.7.38 LIVE-verified, 28.10.2026 UTC.** Три действующих движка DOOD/BEAT/INIT на 0.7.38, новые BUY/TP и Telegram MARKET SELL подтверждены на LIVE. CAP завершён PANIC SELL с позицией 0 CAP; BTC/NEAR/WLD продолжают работать на 0.7.35. Редкая резервная сверка 5–5.8 сек, реакция на WS-события и fail-closed BUY gate, UI-пары BEAT/CAP/INIT/BLUR/DOS. См. [V0738_LIVE_RELEASE_NOTES_RU.md](V0738_LIVE_RELEASE_NOTES_RU.md). Публикация не меняет VPS.
 
 > **v0.7.36 LIVE-verified, 28.10.2026 UTC.** Четыре действующих бота (NEAR/WLD/BTC/DOOD) остались на торговом движке 0.7.35 и сохранили PID. Общий Reader Diagnostics, регистрация новых ботов, Telegram BYPASS и P2-исправления установлены с backup и проверены без остановки торговых движков. См. [V0736_LIVE_RELEASE_NOTES_RU.md](V0736_LIVE_RELEASE_NOTES_RU.md). Исходная офлайн-записка сохранена в V0736_OFFLINE_RELEASE_NOTES_RU.md.

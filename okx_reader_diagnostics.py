@@ -66,7 +66,8 @@ def _reader_env(path):
     p = Path(path)
     if not p.is_file() or p.is_symlink():
         return {}
-    keys = {'OKX_POSITION_READER_SOCKET', 'OKX_POSITION_READER_QUOTA_SCHEDULING'}
+    keys = {'OKX_POSITION_READER_SOCKET', 'OKX_POSITION_READER_QUOTA_SCHEDULING',
+            'OKX_POSITION_READER_PRIORITY_ACK'}
     result = {}
     try:
         # Bound malformed accidental files; secrets never leave this scope.
@@ -168,7 +169,19 @@ def collect(roots, services, *, now=None, health=None, active=None, tail_bytes=T
             continue
         env = _reader_env(root/'.env')
         socket_ok = env.get('OKX_POSITION_READER_SOCKET') == SOCKET
-        fifo_ok = env.get('OKX_POSITION_READER_QUOTA_SCHEDULING') == 'mixed-fifo'
+        # Match the mode confirmed by Reader health and each bot's opt-in.
+        # A valid configuration is NOT evidence of IPC success: READER OK
+        # additionally requires a recent successful position_reader_ipc.
+        reader_mode = info.get('scheduling') if info else None
+        configured_mode = env.get('OKX_POSITION_READER_QUOTA_SCHEDULING', 'mixed-fifo')
+        acknowledgment = env.get('OKX_POSITION_READER_PRIORITY_ACK')
+        fifo_ok = (
+            (configured_mode == 'mixed-fifo' and acknowledgment in (None, '')
+             and reader_mode in (None, 'mixed-fifo'))
+            or (configured_mode == 'priority'
+                and acknowledgment == 'ALL_BOTS_PRIORITY_AWARE'
+                and reader_mode in (None, 'priority'))
+        )
         registered_ok = instrument in registered if info else None
         metrics = _latency_summary(root/'logs/latency.jsonl', now=now, limit=tail_bytes)
         if not socket_ok or not fifo_ok:
