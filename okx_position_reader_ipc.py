@@ -27,6 +27,7 @@ class ReaderIPCServer:
         # refresh. Never mutate the registry and never call the exchange here.
         self.registry_loader = registry_loader
         self.server = None
+        self._diagnostic_task = None
 
     async def start(self):
         if not isinstance(self.core.account_uid, str) or not self.core.account_uid:
@@ -41,17 +42,58 @@ class ReaderIPCServer:
             self.server = await asyncio.start_unix_server(
                 self._handle, path=str(self.socket_path), limit=MAX_LINE + 1)
             os.chmod(self.socket_path, 0o600)
+            # One bounded summary per minute, journal only; no REST/IPC.
+            self._diagnostic_task = asyncio.create_task(
+                self._diagnostic_journal(),name='reader-diagnostics')
         except Exception:
             await self.core.close()
             raise
 
     async def close(self):
+        if self._diagnostic_task is not None:
+            self._diagnostic_task.cancel()
+            try:
+                await self._diagnostic_task
+            except asyncio.CancelledError:
+                pass
+            self._diagnostic_task=None
         if self.server:
             self.server.close()
             await self.server.wait_closed()
         await self.core.close()
         if self.socket_path.is_socket():
             self.socket_path.unlink()
+
+    async def _diagnostic_journal(self):
+        seq=0
+        last_core={}
+        last_provider={}
+        while True:
+            await asyncio.sleep(60)
+            try:
+                core_counters=dict(self.core.counters)
+                provider=getattr(self.core.provider,'positions_stats_snapshot',None)
+                physical=provider() if callable(provider) else {}
+                interval=self.core.interval_diagnostics(seq)
+                seq=interval['seq']
+                delta_core={k:max(0,v-last_core.get(k,0))
+                            for k,v in core_counters.items() if type(v) is int}
+                delta_http={k:max(0,v-last_provider.get(k,0))
+                            for k,v in physical.items() if type(v) is int}
+                last_core=core_counters
+                last_provider=physical
+                summary={'schema':'reader_observability',
+                         'interval_sec':60,'mono_ns':time.monotonic_ns(),
+                         'utc':__import__('datetime').datetime.now(
+                             __import__('datetime').timezone.utc).isoformat(),
+                         'core_delta':delta_core,'positions_http_delta':delta_http,
+                         'interval':interval}
+                # Aggregate and bounded; no instrument list, IDs, keys or URL.
+                print('READER_OBSERVABILITY '+json.dumps(
+                    summary,separators=(',',':'),sort_keys=True),flush=True)
+            except Exception:
+                # Telemetry cannot interrupt trading or reader.
+                pass
 
     async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
@@ -76,6 +118,12 @@ class ReaderIPCServer:
                 reply={"ok":alive,"data":{
                     "reader_running":alive,
                     "fetch_failed":self.core.counters['fetch_failed'],
+                    "get_batches":self.core.counters['get_batches'],
+                    "coalesced_clients":self.core.counters['coalesced_clients'],
+                    "quota_granted":self.core.counters['quota_granted'],
+                    "provider_fetch_calls":self.core.counters['provider_fetch_calls'],
+                    "positions_http":(self.core.provider.positions_stats_snapshot()
+                        if hasattr(self.core.provider,'positions_stats_snapshot') else {}),
                     "quota_failed":self.core.counters['quota_failed'],
                     "quota_abandoned":self.core.counters.get('quota_abandoned',0),
                     "unused_quota_grants":self.core.counters.get('unused_quota_grants',0),

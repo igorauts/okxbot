@@ -226,7 +226,33 @@ class SharedReaderCore:
         self.metrics = deque(maxlen=1024)
         self.counters = {'get_batches': 0, 'coalesced_clients': 0, 'quota_failed': 0,
                          'fetch_failed': 0, 'canceled_clients': 0,
-                         'quota_abandoned': 0, 'unused_quota_grants': 0}
+                         'quota_abandoned': 0, 'unused_quota_grants': 0,
+                         'quota_granted': 0, 'provider_fetch_calls': 0}
+        # Bounded diagnostic history; never enters scheduling/approval decisions.
+        self._metric_seq = 0
+
+    def interval_diagnostics(self, after_seq: int = 0) -> dict:
+        """GET-free, side-effect-free metrics since previous journal sample.
+
+        This is NOT a physical HTTP counter. Only the provider can report
+        actual wire attempts. The 1024-entry ring preserves bounded memory.
+        """
+        if type(after_seq) is not int or after_seq < 0:
+            raise ValueError('Invalid diagnostic cursor')
+        samples = [m for m in self.metrics if m.get('seq', 0) > after_seq]
+        missing = max(0, self._metric_seq - after_seq - len(samples))
+        def lat(field):
+            xs = sorted(float(m[field]) for m in samples if type(m.get(field)) in (int,float))
+            return {'n':len(xs), 'p50_ms':round(xs[(len(xs)-1)//2],2),
+                    'p95_ms':round(xs[__import__('math').ceil(.95*len(xs))-1],2),
+                    'max_ms':round(xs[-1],2)} if xs else {'n':0}
+        return {'seq':self._metric_seq, 'batches':len(samples),
+                'ring_samples_missing':missing,
+                'served_clients':sum(m['batch_size'] for m in samples),
+                'batch_size_max':max((m['batch_size'] for m in samples),default=0),
+                'priority_batches':{str(i):sum(m['highest_priority']==i for m in samples)
+                                    for i in range(4)},
+                'quota_wait':lat('quota_wait_ms'), 'fetch':lat('fetch_ms')}
 
     def replace_registrations(self, entries: list[Registration]) -> None:
         '''Atomic offline model of registry reload, ONLY while idle.'''
@@ -333,6 +359,7 @@ class SharedReaderCore:
                 # mixed fleet this MUST be original shared FIFO, not new quota.
                 quota_begin = time.monotonic_ns()
                 await asyncio.wait_for(self.quota.take(self.highest_waiting_priority), self.quota_timeout_sec)
+                self.counters['quota_granted'] += 1
                 started = time.monotonic_ns()
                 quota_wait_ms = round((started - quota_begin) / 1_000_000, 3)
                 claimed = [w for w in self._pending()
@@ -343,6 +370,7 @@ class SharedReaderCore:
                     self.counters['unused_quota_grants'] += 1
                     continue
                 highest_priority = min(w.priority for w in claimed)
+                self.counters['provider_fetch_calls'] += 1
                 response = await asyncio.wait_for(
                     self.provider.fetch(self.instruments), self.get_timeout_sec)
                 completed = time.monotonic_ns()
@@ -370,7 +398,9 @@ class SharedReaderCore:
                         waiter.future.set_result(value)
                 self.counters['get_batches'] += 1
                 self.counters['coalesced_clients'] += len(claimed)
+                self._metric_seq += 1
                 self.metrics.append({
+                    'seq':self._metric_seq,
                     'batch_size': len(claimed),
                     'get_started_mono_ns': started,
                     'get_completed_mono_ns': completed,

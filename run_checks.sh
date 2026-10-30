@@ -74,3 +74,15 @@ python3 -B -m unittest tests.test_reader_authoritative_zero_contract tests.test_
 python3 -B tests/test_stats_light_contract.py
 # Batch recovery quantity/identity regressions
 python3 -B tests/test_batch_fills_recovery_contract.py
+
+# P0 Reader observability: exact physical HTTP attempts; never exchange IO.
+python3 -B -m unittest tests.test_reader_physical_http_telemetry_contract -q
+
+# opt-in quiet audit phase alignment contract; strictly offline
+python3 -B -m unittest tests.test_aligned_idle_audit_contract -q
+
+# B1 shadow eligibility + Telegram full-grid BUY-zero regression (offline)
+python3 -B -m unittest tests.test_b1_shadow_full_grid_contract -q
+
+# B1 shadow-only live-loop classification offline contract
+python3 -B -m unittest tests.test_b1_wired_shadow_contract -q

@@ -317,6 +317,8 @@ def partial_scan(api,st,names):
             del active[key]
 
 
+GRID_LEVELS = re.compile(r'\|\s*гриды\s+(\d+)/(\d+)\b')
+
 def zero_buy_scan(api, st, names):
     """One bounded journalctl for all active units; preserve original 0/N policy."""
     now = time.time()
@@ -354,11 +356,16 @@ def zero_buy_scan(api, st, names):
             if not now - 15 <= sample_ts <= now + 5:
                 continue
             buy, target, _, _ = map(int, match.groups())
+            levels = GRID_LEVELS.search(message)
+            full_grid = False
+            if levels:
+                occupied, capacity = map(int,levels.groups())
+                full_grid = capacity>0 and occupied>=capacity
             eligible = (mode.group(1) == 'RUN' and
                         'WAITING' not in message and
                         'VIP fee unavailable' not in message)
             if name not in latest or sample_ts >= latest[name][0]:
-                latest[name] = (sample_ts, buy, target, eligible)
+                latest[name] = (sample_ts, buy, target, eligible, full_grid)
         except (ValueError, TypeError, KeyError, OverflowError):
             continue
     for name, root in names.items():
@@ -368,7 +375,12 @@ def zero_buy_scan(api, st, names):
         control = root / 'state/control.json'
         if control.exists() and read_json(control).get('mode') in ('PAUSE','SOFT','HARD','PANIC'):
             continue
-        sample_ts, buy, target, eligible = last
+        sample_ts, buy, target, eligible, full_grid = last
+        if full_grid:
+            # N/N: there are no unoccupied grid levels that need BUYs.
+            # Clear obsolete false incidents without fabricated recovery.
+            incidents.pop(name,None)
+            continue
         if not eligible or Path('/var/lib/okxbot/account_soft_stop.json').exists():
             incidents.pop(name, None)
             continue

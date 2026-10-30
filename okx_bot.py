@@ -999,6 +999,9 @@ def _durable_save(state):
 def _flush_confirmed_facts():
     state=getattr(_PERF_LOCAL,'deferred_state',None)
     if state is not None and getattr(_PERF_LOCAL,'deferred_dirty',False):
+        # Shadow-only observation; cannot affect persistence, fills or trade decisions.
+        if getattr(_PERF_LOCAL,'b1_shadow_capture',False):
+            _PERF_LOCAL.b1_shadow_changed=True
         # On I/O failure, do not silently mark dirty state as persisted.
         _durable_save(state)
         _PERF_LOCAL.deferred_dirty=False
@@ -3115,6 +3118,10 @@ def classify_reconcile_trigger(previous,private_events,grid_wakes,virtual_wakes)
     return sources[0],'+'.join(sources)
 
 
+# B2: enable existing quiet-only wall-clock audit alignment.
+# It never changes Reader priority, position freshness or urgent wake behavior.
+SYNC_IDLE_AUDITS_EXPERIMENT = True
+
 def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
     last_status_key=None
     last_print=0
@@ -3131,9 +3138,15 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
     coverage_hold_reason=None
     coverage_hold_attempts=0
     previous_trigger='internal'
+    last_b1_shadow=0.0  # Diagnostics sampled at most once/30s per bot.
     # Stable per-bot offset keeps different bots' background audits staggered.
-    from okx_idle_reconcile import audit_jitter_seconds, wait_for_idle_reconcile, idle_deadline, wait_error_backoff
-    audit_period=INDEPENDENT_AUDIT_SEC+audit_jitter_seconds(ROOT.name, INST)
+    from okx_idle_reconcile import (audit_jitter_seconds, aligned_idle_audit_wait,
+                                    wait_for_idle_reconcile, idle_deadline, wait_error_backoff,
+                                    b1_shadow_probe)
+    # OFFLINE candidate: do not change LIVE cadence without separate rollout.
+    # Explicit opt-in only, no new REST call or trading decision.
+    sync_idle_audits = bool(globals().get('SYNC_IDLE_AUDITS_EXPERIMENT', False))
+    audit_period=INDEPENDENT_AUDIT_SEC+(0.0 if sync_idle_audits else audit_jitter_seconds(ROOT.name, INST))
     last_ws_warning=None
     while True:
         try:
@@ -3176,8 +3189,16 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             # One sample per actual full REST reconcile; not per loop iteration.
             LATENCY.record('reconcile_trigger',0,source=source,reason=reason,
                            count=ws_n)
+            # Shadow observes existing fact flush; optional for AST test harnesses.
+            _b1_local=globals().get('_PERF_LOCAL')
+            if _b1_local is not None:
+                _b1_local.b1_shadow_capture=(source=='timer')
+                _b1_local.b1_shadow_changed=False
             pending,all_resolved,actual=reconcile_position(
                 st,timeout=30,allow_mismatch=(mode in ('SOFT','HARD','PANIC')))
+            b1_shadow_changed=bool(getattr(_b1_local,'b1_shadow_changed',False))
+            if _b1_local is not None:
+                _b1_local.b1_shadow_capture=False
             # A manager command may change during a 30-second REST pass.
             # Never continue to BUY placement under a stale RUN/PAUSE mode.
             if control_mode()!=mode:
@@ -3619,6 +3640,13 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                     for c in st['cycles'].values()
                     if c.get('state')=='BUY_PARTIAL' and c.get('partial_since')],
                 wall_now=time.time())
+            # Pure shadow-only observer: return is a diagnostic timestamp,
+            # never a trading permission or Reader scheduling decision.
+            last_b1_shadow=b1_shadow_probe(
+                source=source,last_at=last_b1_shadow,state=st,mode=mode,
+                changed=b1_shadow_changed,resolved=all_resolved,deadline=earliest_due,
+                watcher=watcher,market=market,ws_epoch=ws_epoch_at_start,
+                control_read=control_mode,reporter=LATENCY.record)
             previous_trigger=wait_for_idle_reconcile(
                 wake=watcher.wake,control_read=control_mode,
                 original_control=mode,
@@ -3627,7 +3655,8 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                 initial_ws_health=(watcher.connection_epoch,market.connection_epoch,
                                    watcher.healthy(),market.healthy()),
                 extra_due=earliest_due,
-                max_wait_seconds=audit_period,
+                max_wait_seconds=(aligned_idle_audit_wait(time.time(),audit_period)
+                                  if sync_idle_audits else audit_period),
                 local_poll_seconds=LOCAL_CONTROL_POLL_SEC)
 
         except (ExchangeTemporary, ExchangeUnresolved) as exc:

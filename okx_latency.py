@@ -36,7 +36,7 @@ class LatencyJournal:
                 'positions_gate_fifo_wait', 'positions_gate_error',
                 'positions_gate_recovery',
                 'buy_post', 'buy_batch', 'ws_drain', 'loop_pass',
-                'reconcile_trigger',
+                'reconcile_trigger', 'b1_shadow',
                 'fills_history_shared_wait', 'pnl_submit',
                 'drawdown_submit',
                 'tp_ws_cross','tp_collect_started',

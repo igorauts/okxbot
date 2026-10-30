@@ -5,8 +5,8 @@ package explicitly declares its type instead of adding a hard-coded pair to
 an ever-growing compatibility table. Engine identity remains authoritative
 in the engine manifest, not the release number.
 """
-RELEASE_VERSION = '0.7.43'
-ENGINE_VERSION = '0.7.43'
+RELEASE_VERSION = '0.7.45'
+ENGINE_VERSION = '0.7.45'
 STATE_SCHEMA = 1
 RELEASE_KIND = 'engine'
 

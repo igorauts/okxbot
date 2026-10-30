@@ -1,3 +1,13 @@
+## v0.7.45 — 2026-10-30 — B2 synchronized quiet audits (7/7 LIVE)
+- Введена синхронизация тихих периодических сверок B2 для улучшения коалесцирования Reader GET при нескольких ботах; B1 SHADOW остаётся, BACKGROUND OFF. Срочные event-driven сверки и торговые проверки не должны задерживаться фоновой синхронизацией.
+- 19 focused B2 tests PASS. 7/7 LIVE rollout PASS: NEAR → WLD → DOOD → INIT → BLUR → ZEC → BTC последним. Каждый экземпляр: backup, GET-only финансовый аудит, двигатель 0.7.45 и свежий heartbeat. Reader/Telegram без перезапуска.
+- Физические GET/час, clients/GET, EXIT quota wait P99, ошибки 429 и задержки событий ещё предстоит измерить в LIVE. Цель 40% GET экономии не выдаётся за достигнутый результат.
+- Без изменений стратегии, риск-защит, NET ownership, durable intents, PnL/fees, quota gate, Priority FIFO и Telegram read-only.
+
+## v0.7.44 — 2026-10-30 — B1 reconciliation classification shadow (LIVE, not separately published)
+- Развёрнута теневая классификация сверок после анализа `orders-pending`; shadow-наблюдения не изменяют торговых решений. Семь LIVE-ботов переведены на v0.7.44 с финансовыми аудитами.
+- v0.7.44 не публиковалась отдельным GitHub Release; её изменения включены в v0.7.45.
+
 ## v0.7.43 — 2026-10-30 — Batched missing fills recovery (7/7 LIVE)
 
 - 7/7 LIVE engines v0.7.43, у каждого обновления отдельный backup,

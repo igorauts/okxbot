@@ -79,6 +79,20 @@ class ReadOnlyOKXProvider:
             raise ValueError('Missing account credentials')
         self._key,self._secret,self._passphrase=key,secret,passphrase
         self._thread = threading.local()
+        # Includes only /account/positions. The one-time /account/config UID
+        # check is deliberately excluded. No credentials/IDs are retained.
+        self._positions_stats_lock = threading.Lock()
+        self._positions_stats = dict(http_attempts=0, http_ok=0, http_non200=0,
+                                     http_429=0, okx_50011=0,
+                                     okx_rejected=0, transport_errors=0)
+
+    def positions_stats_snapshot(self):
+        with self._positions_stats_lock:
+            return dict(self._positions_stats)
+
+    def _positions_inc(self,key):
+        with self._positions_stats_lock:
+            self._positions_stats[key] += 1
 
     def _connection(self):
         conn = getattr(self._thread, 'connection', None)
@@ -103,21 +117,34 @@ class ReadOnlyOKXProvider:
         headers={'User-Agent':'okxbot-reader/offline-candidate','Content-Type':'application/json',
                  'OK-ACCESS-KEY':self._key,'OK-ACCESS-SIGN':sign,
                  'OK-ACCESS-TIMESTAMP':ts,'OK-ACCESS-PASSPHRASE':self._passphrase}
+        positions=path.startswith('/api/v5/account/positions?')
         conn=self._connection()
         try:
+            if positions:
+                self._positions_inc('http_attempts')
             conn.request('GET',path,headers=headers)
             res=conn.getresponse()
             raw=res.read(self.MAX_RESPONSE_BYTES+1)
+            if positions:
+                if res.status==429:
+                    self._positions_inc('http_429')
+                if res.status!=200:
+                    self._positions_inc('http_non200')
             if res.will_close: self._close()
             if len(raw)>self.MAX_RESPONSE_BYTES or res.status!=200:
                 self._close()
                 raise RuntimeError('Reader GET failed or oversized')
             obj=json.loads(raw)
+            if positions and isinstance(obj,dict) and str(obj.get('code'))=='50011':
+                self._positions_inc('okx_50011')
             if not isinstance(obj,dict) or obj.get('code')!='0' or not isinstance(obj.get('data'),list):
+                if positions:self._positions_inc('okx_rejected')
                 raise RuntimeError('Reader GET rejected by exchange')
+            if positions:self._positions_inc('http_ok')
             return obj
         except (OSError, TimeoutError, ConnectionError,
                 http.client.HTTPException, ssl.SSLError):
+            if positions:self._positions_inc('transport_errors')
             self._close()
             raise
 
