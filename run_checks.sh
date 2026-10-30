@@ -72,3 +72,5 @@ python3 -B -m unittest tests.test_live_loop_chaos_rc4 -q
 python3 -B -m unittest tests.test_reader_authoritative_zero_contract tests.test_reader_zero_ipc_end_to_end -q
 # Candidate-only finance/transport regression tests.
 python3 -B tests/test_stats_light_contract.py
+# Batch recovery quantity/identity regressions
+python3 -B tests/test_batch_fills_recovery_contract.py

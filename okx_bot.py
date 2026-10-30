@@ -778,8 +778,71 @@ class FillStore:
             volumes[oid]=volumes.get(oid,Decimal(0))+D(f['fillSz'])
         missing=[oid for oid,qty in expected.items() if volumes.get(oid,Decimal(0))<qty]
         t2=time.perf_counter()
-        for oid in missing:
-            A.fills_by_order(oid)  # existing durable, validated GET-only recovery
+        # Concurrent trade processing may have persisted the pinned fills
+        # after our first read-only WAL snapshot. Recheck ONLY missing IDs.
+        # The snapshot quantities remain authoritative (not the newer state).
+        # Preserve the original missing-only fetch path for 1-3 IDs.  In
+        # particular, its SQLite read sequence and mocked API signatures are
+        # part of the existing financial instrumentation contract.  Rechecking
+        # the local store is useful only before the new bulk recovery path.
+        if len(missing)>=4:
+            refreshed=self.get_rows(missing)
+            fresh_qty={}
+            for f in refreshed:
+                oid=str(f['ordId'])
+                fresh_qty[oid]=fresh_qty.get(oid,Decimal(0))+D(f['fillSz'])
+            unresolved=[oid for oid in missing
+                        if fresh_qty.get(oid,Decimal(0))!=expected[oid]]
+        else:
+            unresolved=list(missing)
+        bulk_pages=0
+        bulk_resolved=0
+        targeted=0
+        # When several fills are absent, a single instrument-scoped page can
+        # recover many ordIds at once. Every row is validated by FillStore.insert
+        # and only EXACT target IDs are persisted; no inferred trades, no zero
+        # assumptions, no use of response completeness as a financial fact.
+        if len(unresolved)>=4:
+            targets=set(unresolved)
+            after=None
+            cursors=set()
+            for _ in range(2):  # hard cap: other bots share this account quota
+                params={'instType':'SWAP','instId':INST,'limit':'100'}
+                if after is not None:params['after']=after
+                page=A.req('GET','/api/v5/trade/fills-history',params,background=True)
+                bulk_pages+=1
+                if not isinstance(page,list) or any(not isinstance(f,dict) for f in page):
+                    raise ExchangeUnresolved('Invalid bulk fills-history response')
+                if any(str(f.get('instId') or '')!=INST for f in page):
+                    raise ExchangeUnresolved('Foreign instrument in bulk fills-history')
+                matched=[f for f in page if str(f.get('ordId') or '') in targets]
+                # Store insert refuses malformed identities or conflicting
+                # immutable prices, sizes, fees, sides and execution types.
+                if matched:self.insert(matched)
+                current=self.get_rows(unresolved)
+                have={}
+                for f in current:
+                    oid=str(f['ordId'])
+                    have[oid]=have.get(oid,Decimal(0))+D(f['fillSz'])
+                still=[oid for oid in unresolved
+                       if have.get(oid,Decimal(0))!=expected[oid]]
+                bulk_resolved+=len(unresolved)-len(still)
+                unresolved=still
+                if not unresolved or len(page)<100:
+                    break
+                # OKX fills-history uses billId to page older records, not
+                # ordId. Never assume 100 rows means full history coverage.
+                cursor=str(page[-1].get('billId') or '')
+                if not cursor or cursor in cursors:
+                    raise ExchangeUnresolved('Untrustworthy bulk fills pagination cursor')
+                cursors.add(cursor)
+                after=cursor
+        for oid in unresolved:
+            # Preserve the existing exact-order API call signature. Snapshot
+            # financial completeness is verified later by the unchanged trim
+            # and reconciliation checks; never imply a successful missing fill.
+            A.fills_by_order(oid)
+            targeted+=1
         t3=time.perf_counter()
         if missing:
             # The refresh reads a NEW SQLite snapshot only for missing IDs.
@@ -793,7 +856,9 @@ class FillStore:
         t4=time.perf_counter()
         self.perf.last={'sqlite_first':t1-t0,'qty_index':t2-t1,
                         'missing_recovery':t3-t2,'sqlite_second':t4-t3,
-                        'expected':len(expected),'missing':len(missing)}
+                        'expected':len(expected),'missing':len(missing),
+                        'bulk_pages':bulk_pages,'bulk_resolved':bulk_resolved,
+                        'targeted_requests':targeted}
         return rows
 
 FILL_STORE=FillStore()
@@ -4236,7 +4301,10 @@ def print_full_stats(pnl=None, *, require_complete=False, market=None):
           f'fills_missing_recovery={fills_breakdown.get("missing_recovery",0):.3f}s '
           f'fills_sqlite_second={fills_breakdown.get("sqlite_second",0):.3f}s '
           f'fills_expected_orders={fills_breakdown.get("expected",0)} '
-          f'fills_missing_orders={fills_breakdown.get("missing",0)}',flush=True)
+          f'fills_missing_orders={fills_breakdown.get("missing",0)} '
+          f'fills_bulk_pages={fills_breakdown.get("bulk_pages",0)} '
+          f'fills_bulk_resolved={fills_breakdown.get("bulk_resolved",0)} '
+          f'fills_targeted_requests={fills_breakdown.get("targeted_requests",0)}',flush=True)
     print('\n'+report+'\n',flush=True)
     return True
 
