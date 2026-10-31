@@ -55,7 +55,7 @@ class QuietAlignedAuditTests(unittest.TestCase):
         fn=next(x for x in tree.body if isinstance(x,ast.FunctionDef) and x.name=='live_loop')
         src=ast.unparse(fn)
         self.assertIn("globals().get('SYNC_IDLE_AUDITS_EXPERIMENT', False)",src)
-        self.assertIn('aligned_idle_audit_wait(time.time(), audit_period)',src)
+        self.assertIn('b2_aligned_deduplicated_wait(',src)
         self.assertEqual(src.count('reconcile_position('),1)
         self.assertLess(src.index('reconcile_position('),src.index('coverage_audit('))
         self.assertLess(src.index('coverage_audit('),src.index('virtual_escape('))

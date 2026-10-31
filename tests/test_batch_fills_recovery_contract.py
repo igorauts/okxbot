@@ -87,10 +87,22 @@ class Contract(unittest.TestCase):
         got=f.obj.ensure_expected({i:D('1') for i in ids})
         self.assertEqual((len(got),len(f.batch_calls),len(f.target_calls)),(20,1,0))
         self.assertEqual(f.obj.perf.last['bulk_resolved'],20)
-    def test_small_missing_keeps_exact_order_behavior(self):
-        f=Fixture();f.remote_exact={s:[fill(s)] for s in ('a','b','c')}
-        self.assertEqual(len(f.obj.ensure_expected({s:D(1) for s in f.remote_exact})),3)
-        self.assertEqual((len(f.batch_calls),len(f.target_calls)),(0,3))
+    def test_one_missing_keeps_exact_order_behavior(self):
+        f=Fixture();f.remote_exact={'a':[fill('a')]}
+        self.assertEqual(len(f.obj.ensure_expected({'a':D(1)})),1)
+        self.assertEqual((len(f.batch_calls),len(f.target_calls)),(0,1))
+    def test_two_missing_prefer_one_bulk_page(self):
+        f=Fixture();f.pages=[[fill('a'),fill('b')]]
+        self.assertEqual(len(f.obj.ensure_expected({'a':D(1),'b':D(1)})),2)
+        self.assertEqual((len(f.batch_calls),len(f.target_calls)),(1,0))
+    def test_three_missing_bulk_not_targeted(self):
+        f=Fixture();f.pages=[[fill(x) for x in ('a','b','c')]]
+        self.assertEqual(len(f.obj.ensure_expected({x:D(1) for x in ('a','b','c')})),3)
+        self.assertEqual((len(f.batch_calls),len(f.target_calls)),(1,0))
+    def test_two_missing_bulk_fallback_for_unresolved(self):
+        f=Fixture();f.pages=[[fill('a')]];f.remote_exact={'b':[fill('b')]}
+        self.assertEqual(len(f.obj.ensure_expected({'a':D(1),'b':D(1)})),2)
+        self.assertEqual((len(f.batch_calls),len(f.target_calls)),(1,1))
     def test_small_missing_original_sqlite_read_sequence(self):
         f=Fixture()
         f.insert([fill('a')])
@@ -104,6 +116,7 @@ class Contract(unittest.TestCase):
         rows=f.obj.ensure_expected({'a':D(1),'b':D(1)})
         self.assertEqual(len(rows),2)
         self.assertEqual(calls,[('a','b'),('b',)])
+        self.assertEqual(len(f.batch_calls),0)
         self.assertEqual(f.target_calls,[('b',None)])
 
     def test_original_exact_order_api_signature_without_expected_qty(self):
@@ -117,7 +130,7 @@ class Contract(unittest.TestCase):
         result=f.obj.ensure_expected({oid:D(1) for oid in ids})
         self.assertEqual(len(result),3)
         self.assertEqual(calls,ids)
-        self.assertEqual(f.batch_calls,[])
+        self.assertEqual(len(f.batch_calls),1)
 
     def test_empty_bulk_falls_back_on_all_missing(self):
         f=Fixture();ids=['x'+str(i) for i in range(5)]

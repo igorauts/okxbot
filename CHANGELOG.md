@@ -1,3 +1,18 @@
+## v0.7.47 — 2026-10-31 — B1 classification + 2+ missing fills (7/7 LIVE)
+- 7/7 LIVE engine v0.7.47: NEAR → WLD → DOOD → INIT → BLUR → ZEC → BTC последним; каждый прошёл backup, GET-only финансовый аудит и fresh heartbeat.
+- StatsWorker: bulk recovery `/trade/fills-history` теперь при >=2 отсутствующих `ordId` (раньше >=4), для одного — targeted; все unresolved после bulk по-прежнему проверяются точечно. Финансовые инварианты сохранены.
+- B1: больше не считается protective факт превышения активными BUY целевого количества. Неподтверждённая позиция, частичные исполнения, незавершённые intents и реальные защитные условия остаются fail-closed.
+- Reader и Telegram Monitor при этом не перезапускались; Priority FIFO и общая квота 8 GET / 2.1s без изменений.
+- NORMAL grace 20–50 мс остаётся отдельным экспериментом, не активирован в v0.7.47.
+
+## v0.7.46 — 2026-10-31 — Active B1, B2 dedup, B3 Reader background (7/7 LIVE)
+- B1 ACTIVE после подтверждённой спокойной `orders-pending` сверки с защитными отказами.
+- B2 dedup: пропуск лишней 5-секундной границы после недавней сверки (1s).
+- B3: 50ms background grace с прерыванием NORMAL/EXIT/EMERGENCY; IPC cancel и новая полная reconciliation после события. Нет изменения 8 GET / 2.1s shared quota.
+- Исправлена запись latency phases `b1_active`, `b2_timer_boundary_skip`, `b3_event_to_reconcile` (telemetry-only, неизменный engine SHA v0.7.46).
+- 7/7 LIVE rollout + per-bot GET-only financial audits PASS. Reader был обновлён/перезапущен при внедрении B3; монитор не перезапускался.
+- Первые краткие LIVE-измерения не доказывают целевые >=40% GET или EXIT P99 <300ms.
+
 ## v0.7.45 — 2026-10-30 — B2 synchronized quiet audits (7/7 LIVE)
 - Введена синхронизация тихих периодических сверок B2 для улучшения коалесцирования Reader GET при нескольких ботах; B1 SHADOW остаётся, BACKGROUND OFF. Срочные event-driven сверки и торговые проверки не должны задерживаться фоновой синхронизацией.
 - 19 focused B2 tests PASS. 7/7 LIVE rollout PASS: NEAR → WLD → DOOD → INIT → BLUR → ZEC → BTC последним. Каждый экземпляр: backup, GET-only финансовый аудит, двигатель 0.7.45 и свежий heartbeat. Reader/Telegram без перезапуска.

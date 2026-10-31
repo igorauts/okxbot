@@ -175,12 +175,33 @@ class ReaderIPCServer:
                 requested = obj.get('priority')
                 if type(requested) is not int:
                     raise ReaderError("Priority must be an integer")
-                result = await self.core.request(
+                # Disconnect cancels the unused core waiter before quota.
+                # Existing batch clients remain; provider GET once issued
+                # remains non-cancellable by a stale client.
+                request_task=asyncio.create_task(self.core.request(
                     obj.get('instrument'), Priority(requested),
                     not_before_ns=obj.get('not_before_mono_ns'),
                     timeout_sec=4.8, trace_id=obj.get('trace_id', ''),
-                    account_uid=obj.get('account_uid'))
-                reply = {"ok": True, "data": result}
+                    account_uid=obj.get('account_uid')))
+                peer_task=asyncio.create_task(reader.read(1))
+                try:
+                    completed,_=await asyncio.wait((request_task,peer_task),
+                                              return_when=asyncio.FIRST_COMPLETED)
+                    if peer_task in completed:
+                        request_task.cancel()
+                        try: await request_task
+                        except asyncio.CancelledError: pass
+                        raise ReaderError('IPC peer disconnected or extra data')
+                    result=await request_task
+                    reply={"ok":True,"data":result}
+                finally:
+                    peer_task.cancel()
+                    try: await peer_task
+                    except asyncio.CancelledError: pass
+                    if not request_task.done():
+                        request_task.cancel()
+                        try: await request_task
+                        except asyncio.CancelledError: pass
             else:
                 raise ReaderError("Unknown IPC operation")
         except Exception as exc:
@@ -188,9 +209,14 @@ class ReaderIPCServer:
         try:
             writer.write((json.dumps(reply, separators=(',', ':')) + '\n').encode('utf-8'))
             await writer.drain()
+        except OSError:
+            pass  # cancelled/disconnected peer cannot accept an IPC reply
         finally:
             writer.close()
-            await writer.wait_closed()
+            try:
+                await writer.wait_closed()
+            except OSError:
+                pass
 
 
 async def ipc_request(socket_path: Path, instrument: str, priority: Priority,

@@ -86,3 +86,21 @@ python3 -B -m unittest tests.test_b1_shadow_full_grid_contract -q
 
 # B1 shadow-only live-loop classification offline contract
 python3 -B -m unittest tests.test_b1_wired_shadow_contract -q
+
+# Candidate full regression: finance_snapshot_regression
+python3 -B -m unittest tests.test_finance_snapshot_regression -q
+
+# Candidate full regression: p0_trade_exit_liveness
+python3 -B -m unittest tests.test_p0_trade_exit_liveness -q
+
+# Candidate full regression: reader_priority_diagnostics
+python3 -B -m unittest tests.test_reader_priority_diagnostics -q
+
+# Candidate full regression: b1_b3_active_contract
+python3 -B -m unittest tests.test_b1_b3_active_contract -q
+
+# Candidate full regression: b2_b3_integrated_contract
+python3 -B -m unittest tests.test_b2_b3_integrated_contract -q
+
+# vnext scoped threshold/B1 contract (offline)
+python3 -B -m unittest tests.test_v0747_threshold_and_b1_contract -q

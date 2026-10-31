@@ -36,7 +36,8 @@ class LatencyJournal:
                 'positions_gate_fifo_wait', 'positions_gate_error',
                 'positions_gate_recovery',
                 'buy_post', 'buy_batch', 'ws_drain', 'loop_pass',
-                'reconcile_trigger', 'b1_shadow',
+                'reconcile_trigger', 'b1_shadow', 'b1_active',
+                'b2_timer_boundary_skip', 'b3_event_to_reconcile',
                 'fills_history_shared_wait', 'pnl_submit',
                 'drawdown_submit',
                 'tp_ws_cross','tp_collect_started',
@@ -50,13 +51,16 @@ class LatencyJournal:
                          'resolved', 'active_buys', 'target_buys', 'dropped',
                          'reason','attempt','source','cycles','added',
                          'priority','batch_size','trace_id','step',
-                         'start_unix_ms','end_unix_ms','expected','missing'}
+                         'start_unix_ms','end_unix_ms','expected','missing',
+                         'event_clock'}
             safe = {k: v for k,v in fields.items()
                     if k in permitted and (v is None or type(v) in (str, int, float, bool))}
             if 'trace_id' in safe and (len(str(safe['trace_id']))>32 or
                                        not str(safe['trace_id']).isascii() or
                                        not str(safe['trace_id']).isalnum()):
                 safe.pop('trace_id')
+            if safe.get('event_clock') != 'perf_counter_ns':
+                safe.pop('event_clock', None)
             if 'step' in safe and safe['step'] not in (
                     'pending','register_attached','track','verify_existing',
                     'positions','rest_governor','rest_http','retry_sleep',

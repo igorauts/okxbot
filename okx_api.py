@@ -328,7 +328,16 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
                         try:exit_priority=bool(hint())
                         except Exception:exit_priority=False
                     started=time.perf_counter_ns()
-                    priority_name=('emergency' if emergency else ('exit' if exit_priority else 'normal'))
+                    background_hint=getattr(self,'_reader_background_hint',None)
+                    background=False
+                    if not emergency and not exit_priority and callable(background_hint):
+                        try: background=(background_hint() is True)
+                        except Exception: background=False
+                    cancel_if=(getattr(self,'_reader_background_interrupt',None)
+                               if background else None)
+                    if background and not callable(cancel_if): background=False
+                    priority_name=('emergency' if emergency else ('exit' if exit_priority else
+                                   ('background' if background else 'normal')))
                     result='unavailable'
                     def record_snapshot_timing(diag):
                         # Only the already-validated Reader result can supply
@@ -347,6 +356,7 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
                         data=read_positions(socket_path,INST,
                                             account_uid=verify_reader_uid(self),
                                             emergency=emergency,exit_priority=exit_priority,
+                                            background=background,cancel_if=cancel_if,
                                             trace_id=trace_id,on_trace=record_snapshot_timing)
                         result='ok'
                         self._reader_bypass_until=0.0

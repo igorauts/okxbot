@@ -343,14 +343,20 @@ class SharedReaderCore:
                 continue
             # Delay *only background requests*. Urgent requests interrupt grace.
             if all(w.priority == Priority.BACKGROUND for w in pending) and self.background_grace_sec:
-                try:
-                    await asyncio.wait_for(self._wake.wait(), self.background_grace_sec)
-                except asyncio.TimeoutError:
-                    pass
-                self._wake.clear()
-                pending = self._pending()
-                if not pending:
-                    continue
+                # Deadline does NOT reset or end on another background client.
+                # Any urgent client bypasses remaining grace immediately.
+                grace_deadline=asyncio.get_running_loop().time()+self.background_grace_sec
+                while not self._closed:
+                    pending=self._pending()
+                    if not pending: break
+                    if any(w.priority!=Priority.BACKGROUND for w in pending): break
+                    left=grace_deadline-asyncio.get_running_loop().time()
+                    if left<=0: break
+                    self._wake.clear()
+                    try: await asyncio.wait_for(self._wake.wait(),left)
+                    except asyncio.TimeoutError: break
+                pending=self._pending()
+                if not pending or self._closed: continue
             claimed: list[_Waiter] = []
             self._inflight = True
             self._inflight_since_ns = time.monotonic_ns()

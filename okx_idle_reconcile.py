@@ -186,3 +186,138 @@ def b1_shadow_probe(*, source, last_at, state, mode, changed, resolved,
         except Exception:pass
     return now
 
+
+
+# Active B1/B3 policy is evaluated ONLY after /orders-pending was fully
+# paginated, tracked and durably saved. Never removes an exchange GET.
+def b1_active_after_orders(*, source, mode, resolved, changed, state, watcher,
+                           market, ws_epoch, control_mode, urgent_hint,
+                           protective):
+    # Fail closed on unverified facts; no cached trading authorization.
+    try:
+        if not isinstance(resolved,bool) or not isinstance(changed,bool):
+            return False,'unverified_reconcile_flags'
+        if type(protective) is not bool: return False,'unverified_protection'
+        pending=b1_runtime_pending_intents(state)
+        event=(watcher.wake.is_set() or watcher.private_wake.is_set()
+               or not watcher.events.empty() or bool(urgent_hint()))
+        with market._lock:
+            event=(event or market._grid_wake_count>0 or
+                   market._virtual_wake_count>0 or bool(market._virtual_crossed))
+        ws=(watcher.healthy() and market.healthy() and
+            (watcher.connection_epoch,market.connection_epoch)==ws_epoch)
+        control=control_mode()
+        return classify_background_candidate_after_orders(
+            trigger_source=source,mode=mode,orders_complete=True,
+            facts_changed=changed,unresolved=not resolved,pending_intents=pending,
+            protective_deadline_due=protective,
+            private_or_virtual_or_grid_wake=bool(event),
+            ws_healthy=bool(ws),control_changed=(control!=mode),
+            external_uncertainty=not resolved)
+    except Exception:
+        return False,'b1_active_unverified'
+
+
+def b3_background_interrupted(*, watcher,market,ws_epoch,
+                              control_mode,original_mode,urgent_hint):
+    # No state mutation, no exchange IO; needed while a BACKGROUND socket waits.
+    # Any unknown/failed probe is treated as an interrupt (NORMAL/EXIT retry).
+    try:
+        if control_mode()!=original_mode or not watcher.healthy() or not market.healthy():
+            return True
+        if (watcher.connection_epoch,market.connection_epoch)!=ws_epoch:
+            return True
+        if (watcher.wake.is_set() or watcher.private_wake.is_set() or
+                not watcher.events.empty() or bool(urgent_hint())):
+            return True
+        with market._lock:
+            return bool(market._grid_wake_count or market._virtual_wake_count
+                        or market._virtual_crossed)
+    except Exception:
+        return True
+
+
+# B1 proof cache: the full intent scan is rate-limited to once/30s.
+# Every save invalidates proof; any uncertainty retains NORMAL priority.
+_B1_PROOF={'epoch':0,'checked_at':0.0,'checked_epoch':None,
+           'state_id':None,'pending':True}
+
+def b1_runtime_invalidate():
+    _B1_PROOF['epoch']+=1
+    _B1_PROOF['pending']=True
+
+def b1_runtime_pending_intents(state,monotonic=time.monotonic):
+    try:
+        now=monotonic()
+        if state.get('panic_orders'):
+            return True  # volatile protective request: never use cached proof
+        groups=state.get('aggregate_exits',[])
+        if not isinstance(groups,list) or len(groups)>256:
+            return True
+        # Terminal aggregate records do not block B1, but any active or
+        # malformed group must override the cache immediately.
+        if any(not isinstance(g,dict) or g.get('phase') not in
+               ('TERMINAL','DONE','REJECTED','FILLED','COMPLETED') for g in groups):
+            return True
+        cycles=state.get('cycles')
+        if not isinstance(cycles,dict) or len(cycles)>256:
+            return True
+        p=_B1_PROOF
+        valid=(p['checked_epoch']==p['epoch'] and
+               p['state_id']==id(state) and
+               0<=now-p['checked_at']<=30.0)
+        if valid:return p['pending']
+        if p['state_id']==id(state) and 0<=now-p['checked_at']<30.0:
+            return True  # invalidated proof; don't rescan on every cycle
+        p['checked_at']=now
+        p['checked_epoch']=None
+        p['state_id']=id(state)
+        result=b1_shadow_pending_intents(state)
+        p['checked_epoch']=p['epoch']
+        p['pending']=bool(result)
+        return p['pending']
+    except Exception:
+        return True
+
+
+def b2_aligned_deduplicated_wait(*,wall_now,mono_now,last_complete_mono,
+                                  period=5.0,min_gap=1.0):
+    """Defer ONLY timer boundary less than 1s after a FULL recent pass.
+    Pending protective deadlines are still passed to wait_for_idle_reconcile.
+    """
+    import math
+    delay=aligned_idle_audit_wait(wall_now,period)
+    if type(last_complete_mono) not in (float,int) or not math.isfinite(last_complete_mono):
+        return delay,False
+    if type(mono_now) not in (float,int) or not math.isfinite(mono_now):
+        return delay,False
+    age=mono_now-float(last_complete_mono)
+    if age<0 or age>min_gap:return delay,False
+    if age+delay<min_gap:
+        return delay+float(period),True
+    return delay,False
+
+
+def b3_earliest_observed_event_ns(watcher,market,now_ns=None):
+    """Only real, still-pending WS wake timestamps; no invented event times.
+    Returns None for control changes, uninstrumented events or uncertainty.
+    """
+    try:
+        if now_ns is None:now_ns=time.perf_counter_ns()
+        candidates=[]
+        if watcher.private_wake.is_set() or not watcher.events.empty():
+            t=getattr(watcher,'_first_private_event_ns',None)
+            if type(t) is int and 0<t<=now_ns and now_ns-t<=5_000_000_000:
+                candidates.append(t)
+        with market._lock:
+            if market._grid_wake_count>0:
+                t=getattr(market,'_first_grid_event_ns',None)
+                if type(t) is int and 0<t<=now_ns and now_ns-t<=5_000_000_000:
+                    candidates.append(t)
+            if market._virtual_wake_count>0 or market._virtual_crossed:
+                t=getattr(market,'_first_virtual_event_ns',None)
+                if type(t) is int and 0<t<=now_ns and now_ns-t<=5_000_000_000:
+                    candidates.append(t)
+        return min(candidates) if candidates else None
+    except Exception:
+        return None

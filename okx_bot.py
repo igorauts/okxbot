@@ -27,6 +27,7 @@ from pathlib import Path
 
 import websocket
 from okx_latency import LatencyJournal
+from okx_position_reader_client import PositionReaderPreempted
 from okx_version import ENGINE_VERSION as VER, STATE_SCHEMA
 from okx_state import validate as validate_state, empty as empty_state
 from okx_contracts import base_coin, validate_spec
@@ -781,11 +782,11 @@ class FillStore:
         # Concurrent trade processing may have persisted the pinned fills
         # after our first read-only WAL snapshot. Recheck ONLY missing IDs.
         # The snapshot quantities remain authoritative (not the newer state).
-        # Preserve the original missing-only fetch path for 1-3 IDs.  In
-        # particular, its SQLite read sequence and mocked API signatures are
-        # part of the existing financial instrumentation contract.  Rechecking
-        # the local store is useful only before the new bulk recovery path.
-        if len(missing)>=4:
+        # Preserve exact-order recovery for a single missing ID, including the
+        # original API signature. For >=2, reread only missing IDs from the
+        # WAL snapshot before one bounded instrument-scoped bulk recovery.
+        # Keep all finance/identity checks and targeted fallback unchanged.
+        if len(missing)>=2:
             refreshed=self.get_rows(missing)
             fresh_qty={}
             for f in refreshed:
@@ -802,7 +803,7 @@ class FillStore:
         # recover many ordIds at once. Every row is validated by FillStore.insert
         # and only EXACT target IDs are persisted; no inferred trades, no zero
         # assumptions, no use of response completeness as a financial fact.
-        if len(unresolved)>=4:
+        if len(unresolved)>=2:
             targets=set(unresolved)
             after=None
             cursors=set()
@@ -990,6 +991,8 @@ def newid(prefix):
     return 'OX4'+prefix+str(int(time.time()*1000))+secrets.token_hex(4)
 
 def _durable_save(state):
+    from okx_idle_reconcile import b1_runtime_invalidate
+    b1_runtime_invalidate()
     # Keep fsync(file), atomic os.replace and fsync(directory) unchanged.
     p=getattr(_PERF_LOCAL,'current',None) if globals().get('_PERF_RECON_ENABLED',False) else None
     if p is not None:
@@ -1007,6 +1010,8 @@ def _flush_confirmed_facts():
         _PERF_LOCAL.deferred_dirty=False
 
 def save(state):
+    from okx_idle_reconcile import b1_runtime_invalidate
+    b1_runtime_invalidate()
     # Only this thread, only while reconciling known exchange facts.
     if state is getattr(_PERF_LOCAL,'deferred_state',None):
         _PERF_LOCAL.deferred_dirty=True
@@ -2560,6 +2565,7 @@ class WSWatcher(threading.Thread):
         self.events=queue.Queue(maxsize=1000)
         self.wake=threading.Event()
         self.private_wake=threading.Event()
+        self._first_private_event_ns=0  # diagnostics; perf clock
         self.connected=False
         self.connection_epoch=0
         self._ping_outstanding_at=None
@@ -2619,6 +2625,8 @@ class WSWatcher(threading.Thread):
                                 safe={k:item.get(k) for k in ('ordId','clOrdId','algoClOrdId',
                                     'side','state','accFillSz','fillSz','tradeId')}
                                 self.events.put_nowait(safe)
+                                if not self.private_wake.is_set():
+                                    self._first_private_event_ns=time.perf_counter_ns()
                                 self.private_wake.set()
                                 self.wake.set()
             except Exception as e:
@@ -2656,6 +2664,8 @@ class PublicBidWatcher(threading.Thread):
         # Protected by _lock, like the BID / virtual-crossing observation.
         self._grid_wake_count=0
         self._virtual_wake_count=0
+        self._first_grid_event_ns=0
+        self._first_virtual_event_ns=0
         # WS remembers every crossed virtual TP even if BID retraces before
         # the main REST loop becomes runnable. Only the main thread persists it.
         self._virtual_targets={}
@@ -2824,8 +2834,14 @@ class PublicBidWatcher(threading.Thread):
 
     def _note_public_wake(self,grid,virtual):
         """Caller holds _lock. Diagnostic-only; never sets a wake itself."""
-        if grid:self._grid_wake_count+=1
-        if virtual:self._virtual_wake_count+=1
+        if grid:
+            if self._grid_wake_count==0:
+                self._first_grid_event_ns=time.perf_counter_ns()
+            self._grid_wake_count+=1
+        if virtual:
+            if self._virtual_wake_count==0:
+                self._first_virtual_event_ns=time.perf_counter_ns()
+            self._virtual_wake_count+=1
 
     def take_wake_causes(self):
         """Atomically consume counters. No trading decision uses this result."""
@@ -2972,7 +2988,27 @@ def reconcile_position(st, timeout=30, pause=0.5, *, allow_mismatch=False):
             # reconciled/durable; NEVER fetch positions before inspecting fills.
             if st.get('panic_orders'):
                 resolved=reconcile_panic_orders(st,pending) and resolved
-            positions=(p.run('positions',A.positions) if p is not None else A.positions())
+            # B1 requires a complete and durable orders-pending/fills pass.
+            # First pass only; mismatches/retries always use NORMAL/EXIT.
+            _b1_ctx=getattr(_PERF_LOCAL,'b1_active_context',None)
+            A._reader_background_hint=None
+            A._reader_background_interrupt=None
+            if previous is None and _b1_ctx is not None:
+                try:
+                    permitted,why=_b1_ctx['policy'](resolved)
+                    if permitted:
+                        A._reader_background_hint=lambda: not _b1_ctx['interrupt']()
+                        A._reader_background_interrupt=_b1_ctx['interrupt']
+                    LATENCY.record('b1_active',0,outcome='eligible' if permitted else 'denied',
+                                   reason=why,source='timer')
+                except Exception:
+                    A._reader_background_hint=None
+                    A._reader_background_interrupt=None
+            try:
+                positions=(p.run('positions',A.positions) if p is not None else A.positions())
+            finally:
+                A._reader_background_hint=None
+                A._reader_background_interrupt=None
             expected=sum((D(x.get('filledBuy'))-D(x.get('filledTP'))
                           for x in st['cycles'].values()),Decimal('0')) - panic_executions(st)
             actual=sum((D(p.get('pos')) for p in positions),Decimal('0'))
@@ -3121,6 +3157,9 @@ def classify_reconcile_trigger(previous,private_events,grid_wakes,virtual_wakes)
 # B2: enable existing quiet-only wall-clock audit alignment.
 # It never changes Reader priority, position freshness or urgent wake behavior.
 SYNC_IDLE_AUDITS_EXPERIMENT = True
+# Candidate is active only if engine is separately installed after preflight.
+# This flag never changes financial authorization or GET freshness.
+B1_ACTIVE_BACKGROUND_EXPERIMENT = True
 
 def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
     last_status_key=None
@@ -3138,6 +3177,9 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
     coverage_hold_reason=None
     coverage_hold_attempts=0
     previous_trigger='internal'
+    last_b3_preempt_at=None
+    last_b3_event_at_ns=None
+    last_full_reconcile_mono=None
     last_b1_shadow=0.0  # Diagnostics sampled at most once/30s per bot.
     # Stable per-bot offset keeps different bots' background audits staggered.
     from okx_idle_reconcile import (audit_jitter_seconds, aligned_idle_audit_wait,
@@ -3189,13 +3231,61 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             # One sample per actual full REST reconcile; not per loop iteration.
             LATENCY.record('reconcile_trigger',0,source=source,reason=reason,
                            count=ws_n)
+            if last_b3_preempt_at is not None:
+                latency_ms('b3_preempt_to_reconcile',last_b3_preempt_at,source=source)
+                LATENCY.record('b3_preempt_observed_to_reconcile',
+                    (time.perf_counter_ns()-last_b3_preempt_at)/1e6,
+                    source=source)
+                last_b3_preempt_at=None
             # Shadow observes existing fact flush; optional for AST test harnesses.
             _b1_local=globals().get('_PERF_LOCAL')
             if _b1_local is not None:
                 _b1_local.b1_shadow_capture=(source=='timer')
                 _b1_local.b1_shadow_changed=False
-            pending,all_resolved,actual=reconcile_position(
-                st,timeout=30,allow_mismatch=(mode in ('SOFT','HARD','PANIC')))
+            # Active B1 proof is freshly re-evaluated after orders-pending
+            # and all durable exchange-fact processing, never at timer start.
+            from okx_idle_reconcile import (b1_active_after_orders,
+                                             b3_background_interrupted)
+            from okx_position_reader_client import PositionReaderPreempted
+            def b3_interrupt():
+                return b3_background_interrupted(
+                    watcher=watcher,market=market,ws_epoch=ws_epoch_at_start,
+                    control_mode=control_mode,original_mode=mode,
+                    urgent_hint=lambda:reader_exit_priority_hint(st,market))
+            def b1_policy(resolved):
+                # A pending protective action, incomplete fill or uncertain intent
+                # must retain NORMAL even if the last timer sample looked quiet.
+                # Count of active BUY orders is not a safety deadline.
+                # An excess SELL TP remains protective until independently
+                # validated; partial BUY retains NORMAL priority.
+                protective=(len(real_tp_active(st))>REAL_TP_TARGET or
+                    any(c.get('state')=='BUY_PARTIAL' for c in st['cycles'].values()))
+                return b1_active_after_orders(
+                    source=source,mode=mode,resolved=resolved,
+                    changed=bool(getattr(_b1_local,'b1_shadow_changed',True)),
+                    state=st,watcher=watcher,market=market,
+                    ws_epoch=ws_epoch_at_start,control_mode=control_mode,
+                    urgent_hint=lambda:reader_exit_priority_hint(st,market),
+                    protective=bool(protective))
+            if _b1_local is not None:
+                _b1_local.b1_active_context=(
+                {'policy':b1_policy,'interrupt':b3_interrupt}
+                if globals().get('B1_ACTIVE_BACKGROUND_EXPERIMENT',False)
+                and source=='timer' and mode=='RUN' else None)
+            try:
+                if last_b3_event_at_ns is not None:
+                    # WS-observed event -> start of full REST reconciliation.
+                    measured_ms=(time.perf_counter_ns()-last_b3_event_at_ns)/1e6
+                    if 0<=measured_ms<=120000:
+                        LATENCY.record('b3_event_to_reconcile',measured_ms,
+                            source=source,event_clock='perf_counter_ns')
+                    last_b3_event_at_ns=None
+                pending,all_resolved,actual=reconcile_position(
+                    st,timeout=30,allow_mismatch=(mode in ('SOFT','HARD','PANIC')))
+            finally:
+                if _b1_local is not None:
+                    _b1_local.b1_active_context=None
+            last_full_reconcile_mono=time.monotonic()
             b1_shadow_changed=bool(getattr(_b1_local,'b1_shadow_changed',False))
             if _b1_local is not None:
                 _b1_local.b1_shadow_capture=False
@@ -3647,6 +3737,16 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                 changed=b1_shadow_changed,resolved=all_resolved,deadline=earliest_due,
                 watcher=watcher,market=market,ws_epoch=ws_epoch_at_start,
                 control_read=control_mode,reporter=LATENCY.record)
+            from okx_idle_reconcile import b2_aligned_deduplicated_wait
+            if sync_idle_audits:
+                b2_wait,b2_skipped=b2_aligned_deduplicated_wait(
+                    wall_now=time.time(),mono_now=time.monotonic(),
+                    last_complete_mono=last_full_reconcile_mono,
+                    period=audit_period,min_gap=1.0)
+                if b2_skipped:
+                    LATENCY.record('b2_timer_boundary_skip',0,source=source)
+            else:
+                b2_wait=audit_period
             previous_trigger=wait_for_idle_reconcile(
                 wake=watcher.wake,control_read=control_mode,
                 original_control=mode,
@@ -3655,10 +3755,18 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                 initial_ws_health=(watcher.connection_epoch,market.connection_epoch,
                                    watcher.healthy(),market.healthy()),
                 extra_due=earliest_due,
-                max_wait_seconds=(aligned_idle_audit_wait(time.time(),audit_period)
-                                  if sync_idle_audits else audit_period),
+                max_wait_seconds=b2_wait,
                 local_poll_seconds=LOCAL_CONTROL_POLL_SEC)
 
+        except PositionReaderPreempted:
+            # B3: throw away this partial snapshot. Next full pass MUST restart
+            # at /orders-pending, and existing write gates remain untouched.
+            previous_trigger='wake'
+            last_b3_preempt_at=time.perf_counter_ns()
+            from okx_idle_reconcile import b3_earliest_observed_event_ns
+            last_b3_event_at_ns=b3_earliest_observed_event_ns(watcher,market)
+            LATENCY.record('b3_event_preempt',0,outcome='restart_full_reconcile')
+            continue
         except (ExchangeTemporary, ExchangeUnresolved) as exc:
             # Safe recovery: maintain exchange orders unchanged, retry READ reconciliation.
             # No duplicate POST and NO systemd restart storm during connectivity failures.

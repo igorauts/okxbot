@@ -80,7 +80,9 @@ class PureWakeReasonTests(unittest.TestCase):
                 self.assertNotIn('grid_wakes',test)
                 self.assertNotIn('virtual_wakes',test)
                 self.assertNotIn('trigger_from_previous_pass',test)
-                self.assertNotIn('source',test)
+                if 'source' in test:
+                    self.assertIn("source == 'timer'",test)
+                    self.assertIn('B1_ACTIVE_BACKGROUND_EXPERIMENT',test)
                 self.assertNotIn('reason',test) if test == 'reason' else None
 
 if __name__=='__main__':
