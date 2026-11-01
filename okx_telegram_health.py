@@ -22,7 +22,7 @@ def _run(cmd, timeout=5):
 _SHOW_CACHE = {}
 _SHOW_KEYS = ('Id', 'ActiveState', 'SubState', 'InvocationID', 'MainPID',
               'ActiveEnterTimestampMonotonic', 'Result', 'NRestarts',
-              'UnitFileState', 'LoadState')
+              'LoadState')
 
 def begin_systemd_snapshot(services):
     """One systemctl show for engines, observers and Reader per poll.
@@ -547,6 +547,23 @@ def engine_heartbeat_check(api, st, services, roots, now=None):
                 f'✅ BACK TO NORMAL | {name}\nHeartbeat торгового движка восстановлен')
 
 
+_ENABLED_CACHE = {}
+
+def _observer_enabled(unit, now):
+    cached = _ENABLED_CACHE.get(unit)
+    if cached and 0 <= now - cached[0] < 30:
+        return cached[1]
+    try:
+        p = _run(['systemctl', 'is-enabled', unit], timeout=3)
+        enabled = p.stdout.strip()
+        if enabled not in ('enabled','enabled-runtime','disabled','static','masked'):
+            return None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    _ENABLED_CACHE[unit] = (now, enabled)
+    return enabled
+
+
 def observers_check(api, st, services, roots, now=None):
     now = time.time() if now is None else now
     watches = st.setdefault(state_key('observers_health'), {})
@@ -560,12 +577,9 @@ def observers_check(api, st, services, roots, now=None):
             info = _show(unit)
             if info is None:
                 continue
-            enabled = str(info.get('UnitFileState') or '')
-            if not enabled:
-                try:
-                    enabled = _run(['systemctl', 'is-enabled', unit], timeout=3).stdout.strip()
-                except (OSError, subprocess.TimeoutExpired):
-                    continue
+            enabled = _observer_enabled(unit, now)
+            if enabled is None:
+                continue  # unknown is not healthy; do not synthesize false alarm
             if enabled not in ('enabled', 'enabled-runtime'):
                 watches.pop(token, None)  # Intentionally disabled: no alarm.
                 continue

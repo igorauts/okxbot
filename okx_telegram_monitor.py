@@ -71,6 +71,26 @@ def discover_bots():
     return dict(sorted(found.items()))
 
 
+def _confirmed_archived(name, root):
+    # Only exclude verified completed terminal accounting; never a stopped LIVE bot.
+
+    # Malformed/incomplete archival data => keep monitoring.
+    # Do not use systemd inactive to decide lifecycle.
+    try:
+        p = Path(root) / 'state/final_stats.json'
+        if not p.is_file() or time.time() - p.stat().st_mtime < 3600:
+            return False
+        f = json.loads(p.read_text())
+        cfg = json.loads((Path(root) / 'config.json').read_text())
+        return (isinstance(f, dict) and f.get('schema_version') == 1 and
+                f.get('complete') is True and
+                f.get('mode') in ('PANIC_DONE', 'RETIRED') and
+                f.get('instrument') == cfg.get('instrument') and
+                (Path(root) / 'state/control_ack.json').is_file())
+    except (OSError, ValueError, TypeError):
+        return False
+
+
 def refresh_bots(*,force=False):
     global _DISCOVERY_LAST
     now=time.monotonic()
@@ -79,6 +99,8 @@ def refresh_bots(*,force=False):
     discovered=discover_bots()
     BOT_DIRS.clear();SERVICES.clear()
     for key,(root,unit) in discovered.items():
+        if _confirmed_archived(key, root):
+            continue
         BOT_DIRS[key]=root;SERVICES[key]=unit
 
 
@@ -496,6 +518,11 @@ def services_check(api,st):
     service_check(api,st,SERVICES,BOT_DIRS)
 
 
+def _mon_phase(name, fn, *args, **kwargs):
+    from okx_telegram_phases_v4 import measure
+    return measure(name, fn, *args, **kwargs)
+
+
 def safety_check(api,st):
     now=time.time()
     is_soft=SHARED_SOFT.exists()
@@ -507,11 +534,11 @@ def safety_check(api,st):
         one(api,st,'shared_soft/clear/'+str(int(now)),
             '✅ OKX ACCOUNT: общая SOFT-блокировка снята. Состояние каждого бота проверяйте отдельно.')
     st['shared_soft']=is_soft
-    engine_heartbeat_check(api,st,SERVICES,BOT_DIRS,now)
-    observers_check(api,st,SERVICES,BOT_DIRS,now)
-    panic_ack_check(api,st,SERVICES,BOT_DIRS)
-    position_reader_health_check(api,st)
-    reader_bypass_check(api, st, SERVICES, BOT_DIRS)
+    _mon_phase("safety.heartbeat",engine_heartbeat_check,api,st,SERVICES,BOT_DIRS,now)
+    _mon_phase("safety.observers",observers_check,api,st,SERVICES,BOT_DIRS,now)
+    _mon_phase("safety.panic_ack",panic_ack_check,api,st,SERVICES,BOT_DIRS)
+    _mon_phase("safety.reader_health",position_reader_health_check,api,st)
+    _mon_phase("safety.reader_bypass",reader_bypass_check,api, st, SERVICES, BOT_DIRS)
 
 
 def daily_check(api,st,now=None):
@@ -523,26 +550,37 @@ def daily_check(api,st,now=None):
 
 
 def main():
+    from okx_telegram_io_probe import install as _mon_io_install, tick as _mon_io_tick
+    _mon_io_install()
     token,chat=read_env(Path(os.environ.get('OKX_TELEGRAM_CONFIG','/etc/okxbot/telegram.env')))
     api=Telegram(token,chat)
+    original_call = api.call
+    def measured_telegram_call(method, params):
+        label = 'telegram.http.' + (method if method in ('getUpdates','sendMessage') else 'other')
+        return _mon_phase(label, original_call, method, params)
+    api.call = measured_telegram_call
     st=load_state()
     print('OKX Telegram monitor running',flush=True)
+    from okx_telegram_phases_v4 import loop_end
     while True:
+        cycle_started = time.monotonic()
         try:
-            refresh_bots()
-            begin_systemd_snapshot(SERVICES)
-            ingest_events(api,st)
-            services_check(api,st)
-            safety_check(api,st)
-            poll_commands(api,st)
-            daily_check(api,st)
-            save_state(st)
-            alert_drain(api,st)
+            _mon_phase('refresh', refresh_bots)
+            _mon_phase('snapshot', begin_systemd_snapshot, SERVICES)
+            _mon_phase('ingest_events', ingest_events, api, st)
+            _mon_phase('services_check', services_check, api, st)
+            _mon_phase('safety_check', safety_check, api, st)
+            _mon_phase('poll_commands', poll_commands, api, st)
+            # Scheduled 09:00 report disabled; manual /status unchanged.
+            _mon_phase('save_state', save_state, st)
+            _mon_phase('alert_drain', alert_drain, api, st)
         except Exception as exc:
             # No credentials or outbound URL in diagnostics, ever.
             print('Telegram monitor retry:',type(exc).__name__,flush=True)
             try: alert_drain(api,st)
             except Exception: pass
+        loop_end(time.monotonic() - cycle_started)
+        _mon_io_tick()
         time.sleep(POLL_SECONDS)
 
 

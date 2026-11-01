@@ -318,7 +318,6 @@ def partial_scan(api,st,names):
 
 
 GRID_LEVELS = re.compile(r'\|\s*гриды\s+(\d+)/(\d+)\b')
-
 def zero_buy_scan(api, st, names):
     """One bounded journalctl for all active units; preserve original 0/N policy."""
     now = time.time()
@@ -326,23 +325,26 @@ def zero_buy_scan(api, st, names):
     if not names:
         return
     units = {'okx-grid-' + name + '.service': name for name in names}
-    cmd = ['journalctl', '--no-pager', '-o', 'json',
-           '--since', '25 seconds ago', '-g', 'РЕЖИМ=']
-    for unit in units:
-        cmd.extend(['-u', unit])
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True,
-                              timeout=8, check=False)
-    except (OSError, subprocess.TimeoutExpired):
+    # One async, persistent journalctl --follow; no scan/spawn per cycle.
+    from okx_telegram_journal_stream_v4 import drain, ack
+    records = drain(st, names)
+    if records is None:
+        # Stream unavailable or overflow. Unknown != healthy. Retain BUY incident.
+        since = st.setdefault('buy_zero_stream_fault_since_v4', now)
+        if now - since >= 60:
+            one(api, st, 'buy_zero_stream_degraded/' + str(int(now // 3600)),
+                '⚠️ Telegram BUY 0/N watcher: journal stream degraded; check monitor telemetry.')
         return
-    if proc.returncode:
-        return
+    st.pop('buy_zero_stream_fault_since_v4', None)
     latest = {}
-    for line in proc.stdout.splitlines():
+    last_cursor = None
+    for record in records:
         try:
-            record = json.loads(line)
             if not isinstance(record, dict):
                 continue
+            marker = record.get('__CURSOR')
+            if isinstance(marker, str) and 0 < len(marker) <= 1024:
+                last_cursor = marker
             unit = str(record.get('_SYSTEMD_UNIT') or '')
             name = units.get(unit)
             if name is None:
@@ -359,8 +361,8 @@ def zero_buy_scan(api, st, names):
             levels = GRID_LEVELS.search(message)
             full_grid = False
             if levels:
-                occupied, capacity = map(int,levels.groups())
-                full_grid = capacity>0 and occupied>=capacity
+                occupied, capacity = map(int, levels.groups())
+                full_grid = capacity > 0 and occupied >= capacity
             eligible = (mode.group(1) == 'RUN' and
                         'WAITING' not in message and
                         'VIP fee unavailable' not in message)
@@ -377,9 +379,8 @@ def zero_buy_scan(api, st, names):
             continue
         sample_ts, buy, target, eligible, full_grid = last
         if full_grid:
-            # N/N: there are no unoccupied grid levels that need BUYs.
-            # Clear obsolete false incidents without fabricated recovery.
-            incidents.pop(name,None)
+            # N/N occupied: no BUY is due; discard obsolete false zero-BUY incident.
+            incidents.pop(name, None)
             continue
         if not eligible or Path('/var/lib/okxbot/account_soft_stop.json').exists():
             incidents.pop(name, None)
@@ -394,6 +395,9 @@ def zero_buy_scan(api, st, names):
             one(api, st, f'zero_restored/{name}/{prior["since"]}',
                 f'🟢 BUY {target}/{target} | {name}\nВосстановление ≈{duration:.2f} с')
             del incidents[name]
+    if last_cursor is not None:
+        st['buy_zero_stream_cursor_v4'] = last_cursor
+        ack(last_cursor)
 
 
 def _discard_nonactionable_mismatch_notifications(st):

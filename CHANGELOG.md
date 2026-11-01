@@ -1,3 +1,10 @@
+## v0.7.48 — 2026-11-01 — Telegram Monitor v4.1 maintenance (engine v0.7.47)
+- Только Telegram Monitor LIVE: M1, M3, M5, безопасная M2, N/N GRID_LEVELS fix, отключён ежедневный статус в 09:00.
+- M3: постоянный journal follower вместо повторного `journalctl -g`, сохранение курсора и диагностика сбоев потока.
+- M5: 10-минутные сводки этапов и subprocess I/O. Замеры: CPU монитора 2.34% одного ядра, около 0.006 MiB/s физических чтений, 97 циклов / 601.7 с.
+- Пакет maintenance; движок, Reader, торговые позиции, ордера, настройки GRID, financial state без изменений.
+- Известные ограничения: аварийные алерты по всем сценариям не воспроизведены на LIVE; P0 Virtual TP DOOD и M4 Reader bypass открыты.
+
 ## v0.7.47 — 2026-10-31 — B1 classification + 2+ missing fills (7/7 LIVE)
 - 7/7 LIVE engine v0.7.47: NEAR → WLD → DOOD → INIT → BLUR → ZEC → BTC последним; каждый прошёл backup, GET-only финансовый аудит и fresh heartbeat.
 - StatsWorker: bulk recovery `/trade/fills-history` теперь при >=2 отсутствующих `ordId` (раньше >=4), для одного — targeted; все unresolved после bulk по-прежнему проверяются точечно. Финансовые инварианты сохранены.
