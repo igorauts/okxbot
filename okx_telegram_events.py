@@ -319,7 +319,7 @@ def partial_scan(api,st,names):
 
 GRID_LEVELS = re.compile(r'\|\s*гриды\s+(\d+)/(\d+)\b')
 def zero_buy_scan(api, st, names):
-    """One bounded journalctl for all active units; preserve original 0/N policy."""
+    """Process bounded fresh BUY 0/N stream, including explicit observation gaps."""
     now = time.time()
     incidents = st.setdefault('buy_zero', {})
     if not names:
@@ -361,8 +361,8 @@ def zero_buy_scan(api, st, names):
             levels = GRID_LEVELS.search(message)
             full_grid = False
             if levels:
-                occupied, capacity = map(int, levels.groups())
-                full_grid = capacity > 0 and occupied >= capacity
+                occupied, capacity = map(int,levels.groups())
+                full_grid = capacity>0 and occupied>=capacity
             eligible = (mode.group(1) == 'RUN' and
                         'WAITING' not in message and
                         'VIP fee unavailable' not in message)
@@ -379,8 +379,9 @@ def zero_buy_scan(api, st, names):
             continue
         sample_ts, buy, target, eligible, full_grid = last
         if full_grid:
-            # N/N occupied: no BUY is due; discard obsolete false zero-BUY incident.
-            incidents.pop(name, None)
+            # N/N: there are no unoccupied grid levels that need BUYs.
+            # Clear obsolete false incidents without fabricated recovery.
+            incidents.pop(name,None)
             continue
         if not eligible or Path('/var/lib/okxbot/account_soft_stop.json').exists():
             incidents.pop(name, None)
@@ -396,8 +397,9 @@ def zero_buy_scan(api, st, names):
                 f'🟢 BUY {target}/{target} | {name}\nВосстановление ≈{duration:.2f} с')
             del incidents[name]
     if last_cursor is not None:
-        st['buy_zero_stream_cursor_v4'] = last_cursor
-        ack(last_cursor)
+        if ack(last_cursor):
+            st['buy_zero_stream_cursor_v4'] = last_cursor
+            st['buy_zero_stream_cursor_at_v4'] = time.time()
 
 
 def _discard_nonactionable_mismatch_notifications(st):

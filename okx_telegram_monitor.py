@@ -21,7 +21,9 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
-from urllib.request import Request, urlopen
+from urllib.request import Request, urlopen, getproxies
+import http.client
+import ssl
 import html
 from okx_telegram_views import status_one, latency_report, read_json, LINE
 from okx_telegram_events import (one, event_alert, market_event, market_process, zero_buy_scan, observer_fault_scan, gate_alert_scan)
@@ -186,20 +188,55 @@ class TelegramPermanentError(RuntimeError):
 class Telegram:
     def __init__(self,token,chat):
         self.base='https://api.telegram.org/bot'+token+'/'
+        self.path='/bot'+token+'/'
         self.chat=str(chat)
+        self._http=None
+        # urllib respects HTTP[S]_PROXY. Preserve that behavior on VPSes
+        # configured for a proxy; otherwise reuse a verified TLS connection.
+        self._proxy=bool(getproxies().get('https'))
+
+    def _close_http(self):
+        conn=self._http
+        self._http=None
+        if conn is not None:
+            try: conn.close()
+            except OSError: pass
+
     def call(self,method,params):
         payload=json.dumps(params).encode()
-        req=Request(self.base+method,data=payload,headers={'Content-Type':'application/json'})
-        from urllib.error import HTTPError
-        try:
-            with urlopen(req,timeout=18) as response:
-                result=json.loads(response.read().decode())
-        except HTTPError as exc:
-            # Permanent, independently established HTTP errors only.
-            # 403 may mean bot blocked; 400 indicates a malformed message.
-            if exc.code in (400,403):
-                raise TelegramPermanentError(f'Telegram permanent HTTP {exc.code}') from exc
-            raise
+        if self._proxy:
+            # Explicit, compatible fallback; do not silently bypass a proxy.
+            from urllib.error import HTTPError
+            req=Request(self.base+method,data=payload,headers={'Content-Type':'application/json'})
+            try:
+                with urlopen(req,timeout=18) as response:
+                    result=json.loads(response.read().decode())
+            except HTTPError as exc:
+                if exc.code in (400,403):
+                    raise TelegramPermanentError(f'Telegram permanent HTTP {exc.code}') from exc
+                raise
+        else:
+            # A lost sendMessage response is ambiguous: NEVER automatically
+            # resend it here. The existing durable outbox controls retries.
+            if self._http is None:
+                self._http=http.client.HTTPSConnection(
+                    'api.telegram.org',timeout=18,context=ssl.create_default_context())
+            try:
+                self._http.request('POST',self.path+method,body=payload,
+                                   headers={'Content-Type':'application/json'})
+                response=self._http.getresponse()
+                status=response.status
+                raw=response.read()
+                if response.will_close:
+                    self._close_http()
+                if status in (400,403):
+                    raise TelegramPermanentError(f'Telegram permanent HTTP {status}')
+                if status != 200:
+                    raise RuntimeError('Telegram transient HTTP '+str(status))
+                result=json.loads(raw.decode())
+            except BaseException:
+                self._close_http()
+                raise
         if not result.get('ok'):
             raise RuntimeError('Telegram '+method+' returned not-ok')
         return result.get('result')

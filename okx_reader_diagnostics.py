@@ -6,6 +6,7 @@ manage systemd services. Individual bot rows are presented on ONE account page.
 from __future__ import annotations
 
 import json
+from collections import deque
 import re
 import socket
 import subprocess
@@ -135,6 +136,92 @@ def _latency_summary(path, *, now=None, window=WINDOW, limit=TAIL_BYTES):
     return out
 
 
+
+# Monitor-only, process-local offset cache. The public CLI keeps the original
+# exact tail reader; only the 30-second Telegram safety loop opts in.
+_LATENCY_CURSORS = {}
+
+
+def _latency_summary_incremental(path, *, now, window=WINDOW, limit=1024*1024):
+    result = {'ipc_ok': 0, 'ipc_fail': 0, 'direct': 0,
+              'last_ok': None, 'last_fail': None, 'last_direct': None,
+              'recent_direct': 0, 'recent_fail': 0, 'truncated': False}
+    p = Path(path)
+    if not p.is_file() or p.is_symlink():
+        _LATENCY_CURSORS.pop(str(p), None)
+        return result
+    try:
+        stat = p.stat()
+        key = str(p)
+        cached = _LATENCY_CURSORS.get(key)
+        identity = (stat.st_dev, stat.st_ino)
+        if (cached is None or cached['identity'] != identity or
+                stat.st_size < cached['offset']):
+            cached = {'identity':identity, 'offset':max(0,stat.st_size-limit),
+                      'rows':deque(), 'truncated':stat.st_size>limit}
+            _LATENCY_CURSORS[key] = cached
+        if stat.st_size - cached['offset'] > limit:
+            # Unbounded backlog means continuity unproven; rebuild from tail.
+            cached['rows'].clear()
+            cached['offset'] = stat.st_size - limit
+            cached['truncated'] = True
+        with p.open('rb') as f:
+            f.seek(cached['offset'])
+            if cached['offset'] and cached['offset'] == max(0,stat.st_size-limit):
+                # Initial partial first line, only when starting from tail.
+                f.readline()
+            while f.tell() < stat.st_size:
+                start = f.tell()
+                line = f.readline()
+                if not line.endswith(b'\n'):
+                    f.seek(start)
+                    break
+                try:
+                    row=json.loads(line)
+                    if not isinstance(row,dict):
+                        continue
+                    ts=datetime.fromisoformat(str(row.get('ts','')).replace('Z','+00:00'))
+                    if ts.tzinfo is None:
+                        continue
+                    at=ts.timestamp()
+                    phase=row.get('phase')
+                    if phase == 'position_reader_ipc':
+                        kind='ok' if row.get('outcome')=='ok' else 'fail'
+                    elif phase=='positions_gate' and row.get('route')==POSITIONS_ROUTE:
+                        kind='direct'
+                    else:
+                        continue
+                    if now-window-20 <= at <= now+10:
+                        cached['rows'].append((at,kind))
+                except (ValueError,TypeError,KeyError,UnicodeError,OverflowError):
+                    continue
+            cached['offset'] = f.tell()
+        if len(cached['rows'])>100000:
+            # Fail observable, not falsely precise, on pathological volume.
+            cached['truncated'] = True
+            while len(cached['rows'])>100000:
+                cached['rows'].popleft()
+        # No assumption of append timestamps being strictly sorted.
+        cached['rows'] = deque((ts,k) for ts,k in cached['rows'] if ts>=now-window)
+        result['truncated']=cached['truncated']
+        for ts,kind in cached['rows']:
+            if ts>now+10:continue
+            if kind=='ok':
+                result['ipc_ok']+=1
+                result['last_ok']=max(result['last_ok'] or ts,ts)
+            elif kind=='fail':
+                result['ipc_fail']+=1
+                result['last_fail']=max(result['last_fail'] or ts,ts)
+                result['recent_fail']+=int(ts>=now-120)
+            else:
+                result['direct']+=1
+                result['last_direct']=max(result['last_direct'] or ts,ts)
+                result['recent_direct']+=int(ts>=now-120)
+    except (OSError,ValueError):
+        _LATENCY_CURSORS.pop(str(p),None)
+        return result
+    return result
+
 def _active(unit):
     if not isinstance(unit, str) or not re.fullmatch(r'okx-grid-[a-z0-9-]+(?:\.service)?', unit):
         return False
@@ -146,7 +233,7 @@ def _active(unit):
         return False
 
 
-def collect(roots, services, *, now=None, health=None, active=None, tail_bytes=TAIL_BYTES):
+def collect(roots, services, *, now=None, health=None, active=None, tail_bytes=TAIL_BYTES, incremental=False):
     """One account snapshot. No OKX GET; no state, service, or registry mutations."""
     now = time.time() if now is None else now
     info = reader_health() if health is None else health
@@ -183,7 +270,8 @@ def collect(roots, services, *, now=None, health=None, active=None, tail_bytes=T
                 and reader_mode in (None, 'priority'))
         )
         registered_ok = instrument in registered if info else None
-        metrics = _latency_summary(root/'logs/latency.jsonl', now=now, limit=tail_bytes)
+        metrics = (_latency_summary_incremental(root/'logs/latency.jsonl', now=now, limit=tail_bytes)
+                   if incremental else _latency_summary(root/'logs/latency.jsonl', now=now, limit=tail_bytes))
         if not socket_ok or not fifo_ok:
             state = 'CONFIG BYPASS'
         elif info is None:

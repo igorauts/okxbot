@@ -1,3 +1,10 @@
+## v0.7.49 — 2026-11-01 — Telegram Monitor recovery maintenance (engine 0.7.47)
+- P0: BUY 0/N follower recovery from malformed lines, overflow, stale cursor >45s, ACK errors; single gap incident per episode; live tests no fault injection.
+- New regression tests and updated full-grid contract; full run_checks.sh PASS required before push.
+- IO probe fail-open for diagnostics; M4 reader-bypass incremental I/O and removal of duplicate systemctl is-active; HTTPS keepalive; 10-minute observer enabled cache.
+- LIVE M5 after rollout: CPU cgroup usage ~1.57% one CPU; 111 cycles/600.8s; journal follower 509 lines without errors or restarts.
+- Engine unchanged, seven trading services and Shared Reader not restarted; S1 and observer consolidation deferred.
+
 ## v0.7.48 — 2026-11-01 — Telegram Monitor v4.1 maintenance (engine v0.7.47)
 - Только Telegram Monitor LIVE: M1, M3, M5, безопасная M2, N/N GRID_LEVELS fix, отключён ежедневный статус в 09:00.
 - M3: постоянный journal follower вместо повторного `journalctl -g`, сохранение курсора и диагностика сбоев потока.

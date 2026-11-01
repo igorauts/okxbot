@@ -200,8 +200,18 @@ def install():
     global _INSTALLED
     if _INSTALLED:
         return
-    if _OUT.is_symlink() or not _OUT.is_dir():
-        raise RuntimeError('Monitor I/O probe output directory unavailable')
+    # Diagnostics are optional; never crash-loop the safety monitor when the
+    # telemetry directory is missing (e.g. on a newly provisioned VPS).
+    try:
+        if _OUT.is_symlink():
+            raise OSError('unsafe telemetry directory')
+        if not _OUT.exists():
+            _OUT.mkdir(mode=0o700)
+        if not _OUT.is_dir():
+            raise OSError('telemetry path is not a directory')
+    except OSError:
+        print('Telegram monitor IO telemetry disabled (directory unavailable)', flush=True)
+        return
     _advance_if_needed()
     subprocess.run = _instrumented_run
     _INSTALLED = True

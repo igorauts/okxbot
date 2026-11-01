@@ -81,6 +81,9 @@ python3 -B -m unittest tests.test_reader_physical_http_telemetry_contract -q
 # opt-in quiet audit phase alignment contract; strictly offline
 python3 -B -m unittest tests.test_aligned_idle_audit_contract -q
 
+# Monitor maintenance: follower recovery, IO probe, M4 incremental, HTTPS reuse.
+python3 -B -m unittest tests.test_telegram_follower_recovery_vnext -q
+
 # B1 shadow eligibility + Telegram full-grid BUY-zero regression (offline)
 python3 -B -m unittest tests.test_b1_shadow_full_grid_contract -q
 

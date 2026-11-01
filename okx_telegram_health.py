@@ -549,9 +549,14 @@ def engine_heartbeat_check(api, st, services, roots, now=None):
 
 _ENABLED_CACHE = {}
 
-def _observer_enabled(unit, now):
+def _observer_enabled(unit, now, props=None):
+    # 10-minute policy TTL, with instant refresh on lifecycle changes.
+    # Uncertain/unavailable snapshot => do not serve a stale cached decision.
+    fingerprint = ((props.get('ActiveState'),props.get('InvocationID'))
+                   if isinstance(props,dict) else None)
     cached = _ENABLED_CACHE.get(unit)
-    if cached and 0 <= now - cached[0] < 30:
+    if (cached and fingerprint is not None and cached[2] == fingerprint
+            and 0 <= now - cached[0] < 600):
         return cached[1]
     try:
         p = _run(['systemctl', 'is-enabled', unit], timeout=3)
@@ -560,7 +565,7 @@ def _observer_enabled(unit, now):
             return None
     except (OSError, subprocess.TimeoutExpired):
         return None
-    _ENABLED_CACHE[unit] = (now, enabled)
+    _ENABLED_CACHE[unit] = (now, enabled, fingerprint)
     return enabled
 
 
@@ -577,7 +582,7 @@ def observers_check(api, st, services, roots, now=None):
             info = _show(unit)
             if info is None:
                 continue
-            enabled = _observer_enabled(unit, now)
+            enabled = _observer_enabled(unit, now, info)
             if enabled is None:
                 continue  # unknown is not healthy; do not synthesize false alarm
             if enabled not in ('enabled', 'enabled-runtime'):
@@ -678,7 +683,10 @@ def reader_bypass_check(api, st, services, roots, *, now=None):
     run_services = {n: services[n] for n in run_roots if n in services}
     if not run_services:
         return
-    snap = collect(run_roots, run_services, now=now, tail_bytes=1024*1024)
+    # Existing M2 snapshot is authoritative for ActiveState; no seven extra
+    # systemctl is-active child processes. Unknown is not ACTIVE.
+    snap = collect(run_roots, run_services, now=now, tail_bytes=1024*1024,
+                   active=systemd_active, incremental=True)
     if snap['health'] is None:
         return  # Reader DOWN has its own incident, do not double-alert
     active = set()

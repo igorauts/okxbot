@@ -64,7 +64,7 @@ class ZeroBuyGridFull(unittest.TestCase):
         row={'_SYSTEMD_UNIT':'okx-grid-near0721.service',
              '__REALTIME_TIMESTAMP':str(int(now*1_000_000)),
              'MESSAGE':message}
-        proc=SimpleNamespace(returncode=0,stdout=json.dumps(row,ensure_ascii=False)+'\n')
+        row['__CURSOR']='test-cursor'  # current persistent follower contract
         state={'buy_zero':dict(prior or {})}
         emitted=[]
         with tempfile.TemporaryDirectory() as td:
@@ -72,7 +72,8 @@ class ZeroBuyGridFull(unittest.TestCase):
             def safe_exists(self):
                 if str(self)=='/var/lib/okxbot/account_soft_stop.json':return False
                 return real_exists(self)
-            with patch.object(te.subprocess,'run',return_value=proc), \
+            with patch('okx_telegram_journal_stream_v4.drain',return_value=[row]), \
+                 patch('okx_telegram_journal_stream_v4.ack',return_value=True), \
                  patch.object(te,'one',side_effect=lambda api,st,key,msg:emitted.append(msg)), \
                  patch.object(Path,'exists',safe_exists):
                 te.zero_buy_scan(None,state,{'near0721':Path(td)})
