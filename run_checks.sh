@@ -107,3 +107,6 @@ python3 -B -m unittest tests.test_b2_b3_integrated_contract -q
 
 # vnext scoped threshold/B1 contract (offline)
 python3 -B -m unittest tests.test_v0747_threshold_and_b1_contract -q
+
+# S1 maintenance: version-neutral offline regressions.
+python3 -B -m unittest tests.test_s1_maintenance -q

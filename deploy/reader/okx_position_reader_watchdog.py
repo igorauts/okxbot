@@ -22,6 +22,7 @@ LOCK = Path('/run/okx-position-reader-watchdog.lock')
 MIN_FAILURES = 3
 MIN_RESTART_GAP = 600
 MAX_RESTARTS_PER_HOUR = 2
+HEALTHY_HEARTBEAT_SECONDS = 600
 
 
 def show():
@@ -125,6 +126,23 @@ def policy(prev, *, now, pid, healthy):
     return data,authorized
 
 
+def should_persist_state(previous, current, *, healthy, now):
+    """Only suppress stable, healthy heartbeat writes; preserve all transitions."""
+    if not healthy or not isinstance(previous, dict):
+        return True
+    if previous.get('pid') != current.get('pid'):
+        return True
+    if previous.get('fails') != 0 or current.get('fails') != 0:
+        return True
+    if previous.get('restarts') != current.get('restarts'):
+        return True
+    last = previous.get('last_check')
+    if not isinstance(last, (int, float)):
+        return True
+    age = now - last
+    # Backward time jumps, NaN and infinity all force a durable save.
+    return not (0 <= age < HEALTHY_HEARTBEAT_SECONDS)
+
 def main():
     args=argparse.ArgumentParser(description=__doc__)
     args.add_argument('--check-only',action='store_true',help='never restart service')
@@ -161,7 +179,7 @@ def main():
                 p=subprocess.run(['systemctl','restart',UNIT],timeout=12,check=False)
                 print('Reader restart attempted; status:',p.returncode)
                 return
-        if not opts.check_only:
+        if not opts.check_only and should_persist_state(previous, state, healthy=healthy, now=now):
             _state_save(state)
         print('reader IPC:', 'OK' if healthy else 'UNRESPONSIVE',
               '| consecutive failures:',state.get('fails',0),
