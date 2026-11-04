@@ -217,9 +217,7 @@ class IdleGetConnectionTest(unittest.TestCase):
 
 class WiringAndSafetyTest(unittest.TestCase):
     def test_live_worker_has_market_and_stats_only_does_not(self):
-        # The former string equality constrained the *old* call signature;
-        # verify actual AST-level safety invariants after the incremental
-        # source cache was added, without weakening STATS_ONLY separation.
+        # RAM-safety rollback contract: LIVE uses the exact original FULL oracle.
         text=(BASE/'okx_bot.py').read_text(encoding='utf-8')
         tree=ast.parse(text)
         classes=[n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='StatsWorker']
@@ -231,57 +229,57 @@ class WiringAndSafetyTest(unittest.TestCase):
         def calls(node,name):
             return [c for c in ast.walk(node) if isinstance(c,ast.Call)
                     and isinstance(c.func,ast.Name) and c.func.id==name]
-        def is_self_attr(value,attr):
-            return (isinstance(value,ast.Attribute)
-                    and isinstance(value.value,ast.Name) and value.value.id=='self'
-                    and value.attr==attr)
-        # The running worker must use the EXISTING market and its own cache.
-        constructors=calls(init[0],'StatsSourceCache')
-        self.assertEqual(len(constructors),1)
-        self.assertEqual([ast.unparse(a) for a in constructors[0].args],
-                         ['FILL_DB','ARCHIVE_DB','INST'])
-        self.assertEqual(sum(isinstance(n,ast.Assign)
-                             and len(n.targets)==1
-                             and is_self_attr(n.targets[0],'stats_cache')
-                             and n.value is constructors[0]
-                             for n in ast.walk(init[0])),1)
-        calls_run=calls(run[0],'print_full_stats')
-        self.assertEqual(len(calls_run),1)
-        finance_kw=[k.value for k in calls_run[0].keywords if k.arg=='finance_cache']
-        self.assertEqual(len(finance_kw),1)
-        self.assertIsInstance(finance_kw[0],ast.Attribute)
-        self.assertEqual(finance_kw[0].attr,'finance_cache')
-        args={k.arg:k.value for k in calls_run[0].keywords}
-        self.assertTrue(is_self_attr(args.get('market'),'market'))
-        self.assertTrue(is_self_attr(args.get('stats_cache'),'stats_cache'))
-        self.assertEqual(len(calls_run[0].args),1)
-        self.assertTrue(is_self_attr(calls_run[0].args[0],'pnl'))
-        # Independent one-shot STATS_ONLY must NOT use a worker, cache, or
-        # market watcher. It retains the original FULL financial path.
+        def attr(value,name):
+            return isinstance(value,ast.Attribute) and isinstance(value.value,ast.Name) \
+                   and value.value.id=='self' and value.attr==name
+        for name in ('stats_cache','finance_cache'):
+            assigns=[n for n in ast.walk(init[0]) if isinstance(n,ast.Assign)
+                     and len(n.targets)==1 and attr(n.targets[0],name)]
+            self.assertEqual(len(assigns),1)
+            self.assertIsInstance(assigns[0].value,ast.Constant)
+            self.assertIsNone(assigns[0].value.value)
+        self.assertEqual(len(calls(init[0],'StatsSourceCache')),0)
+        self.assertEqual(len(calls(init[0],'IncrementalFinance')),0)
+        stats=calls(run[0],'print_full_stats')
+        self.assertEqual(len(stats),1)
+        self.assertEqual(len(stats[0].args),1)
+        self.assertTrue(attr(stats[0].args[0],'pnl'))
+        kw={k.arg:k.value for k in stats[0].keywords}
+        for key,name in (('market','market'),('stats_cache','stats_cache'),
+                         ('finance_cache','finance_cache')):
+            self.assertTrue(attr(kw.get(key),name))
+        self.assertIn('STATS_CACHE_MODE=ORIGINAL_FULL_LOW_RAM',text)
+        # Oracle, exact-fill recovery, snapshot ledger parity and stale
+        # stats-only independence must all remain reachable in the source.
+        oracle=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='print_full_stats']
+        self.assertEqual(len(oracle),1)
+        fn=oracle[0]
+        names={c.func.id for c in ast.walk(fn) if isinstance(c,ast.Call)
+               and isinstance(c.func,ast.Name)}
+        self.assertTrue({'archived_rows','stats_exchange_fills','full_stats_snapshot',
+                         '_last_24h_profit','trim_verified_fills_for_snapshot'}<=names)
+        # Verify the ledger call structurally, not ast.unparse whitespace.
+        ledger_calls=[c for c in ast.walk(fn) if isinstance(c,ast.Call)
+                      and isinstance(c.func,ast.Attribute)
+                      and c.func.attr=='total_for_snapshot'
+                      and isinstance(c.func.value,ast.Name)
+                      and c.func.value.id=='pnl']
+        self.assertEqual(len(ledger_calls),1)
+        ledger=ledger_calls[0]
+        self.assertEqual(len(ledger.args),2)
+        self.assertEqual(len(ledger.keywords),0)
+        self.assertEqual([a.id if isinstance(a,ast.Name) else None
+                          for a in ledger.args],['st','archive'])
         mains=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='main']
         self.assertEqual(len(mains),1)
-        only=[n for n in ast.walk(mains[0]) if isinstance(n,ast.If)
+        solo=[n for n in ast.walk(mains[0]) if isinstance(n,ast.If)
               and isinstance(n.test,ast.Name) and n.test.id=='STATS_ONLY']
-        self.assertEqual(len(only),1)
-        solo=calls(only[0],'print_full_stats')
         self.assertEqual(len(solo),1)
-        self.assertEqual(len(solo[0].args),0)
-        self.assertEqual(len(solo[0].keywords),0)
-        self.assertEqual(len(calls(only[0],'StatsWorker')),0)
-        self.assertEqual(len(calls(only[0],'StatsSourceCache')),0)
-        # Live worker construction still happens exactly once.
+        one=calls(solo[0],'print_full_stats')
+        self.assertEqual(len(one),1)
+        self.assertEqual(len(one[0].args),0)
+        self.assertEqual(len(one[0].keywords),0)
         self.assertEqual(text.count('stats_worker=StatsWorker(pnl,market);stats_worker.start()'),1)
-        fn=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='print_full_stats']
-        self.assertEqual(len(fn),1)
-        kwonly=fn[0].args.kwonlyargs
-        defaults=fn[0].args.kw_defaults
-        named={k.arg:d for k,d in zip(kwonly,defaults)}
-        self.assertTrue({'require_complete','market','stats_cache'} <= set(named))
-        for key in ('market','stats_cache'):
-            self.assertIsInstance(named[key],ast.Constant)
-            self.assertIsNone(named[key].value)
-        self.assertIn("journal.record('stats_detail'",text)
-
     def test_telemetry_allowed(self):
         text=(BASE/'okx_latency.py').read_text(encoding='utf-8')
         self.assertIn("'tp_recon_phase','stats_stage','stats_detail'",text)

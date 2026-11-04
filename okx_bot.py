@@ -3602,15 +3602,69 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             active=active_buy(st)
             # Avoid an extra REST ticker request on every idle second when
             # no cleanup is due (the public WS quote can be >3s old).
-            cleanup_due=False
+            cleanup_due=(time.monotonic()-live_loop._shift_at>=BUY_BUFFER_COOLDOWN
+                         and len(active)>=TARGET+1)
             capacity_due=(len(active)>=BUY_MAX and bool(missing))
-            if capacity_due:
-                if not getattr(live_loop, "_buy_cap_reported", False):
-                    log("BUY_CAPACITY_HOLD", active=len(active), maximum=BUY_MAX,
-                        reason="No voluntary BUY CANCEL; retain confirmed orders")
-                    live_loop._buy_cap_reported=True
-            else:
-                live_loop._buy_cap_reported=False
+            if (mode=='RUN' and not waiting and len(active)>=TARGET
+                and (cleanup_due or capacity_due)):
+                fresh_bid=market.get_bid()
+                fresh_top=grid_top(fresh_bid)
+                if fresh_top!=live_loop._shift_top:
+                    live_loop._shift_top=fresh_top
+                    live_loop._shift_at=time.monotonic()
+                fresh_desired=desired_buy_levels(fresh_top,occupied_tp)
+                still_missing=bool(fresh_desired-{D(c['buyPx']) for c in active})
+                needs_room=len(active)>=BUY_MAX and still_missing
+                cooling=time.monotonic()-live_loop._shift_at>=BUY_BUFFER_COOLDOWN
+                max_remove=(max(0,len(active)-TARGET) if cooling
+                            else (1 if needs_room else 0))
+                selected,protected=plan_buy_buffer_cleanup(
+                    active,fresh_bid,min(max_remove,5))
+                for c in selected:
+                    # A fresh quote immediately before each cancel protects
+                    # against mid-batch reversal and REST/WS scheduling delays.
+                    cancel_bid=market.get_bid()
+                    cancel_top=grid_top(cancel_bid)
+                    cancel_desired=desired_buy_levels(cancel_top,occupied_tp)
+                    if cancel_top!=live_loop._shift_top:
+                        live_loop._shift_top=cancel_top
+                        live_loop._shift_at=time.monotonic()
+                        # New grid shift: allow cancellation ONLY to free
+                        # capacity at the hard 30-BUY ceiling. Otherwise wait
+                        # the complete 1.5s cooldown again.
+                        latest_missing=bool(cancel_desired-
+                            {D(x['buyPx']) for x in active_buy(st)})
+                        if not (len(active_buy(st))>=BUY_MAX and latest_missing):
+                            log('BUY_CANCEL_DEFERRED',bid=str(cancel_bid),
+                                reason='Grid shifted while cleanup was pending')
+                            break
+                    # Re-evaluate ALL currently open BUYs under the latest BID.
+                    # The originally selected order must STILL be the lowest
+                    # cancellable one: never cancel a higher price by mistake.
+                    fresh_lowest,_=plan_buy_buffer_cleanup(
+                        active_buy(st),cancel_bid,1)
+                    if not fresh_lowest or fresh_lowest[0].get('ordId')!=c.get('ordId'):
+                        log('BUY_CANCEL_DEFERRED',price=c['buyPx'],
+                            bid=str(cancel_bid),reason='Lowest safe BUY changed before cancel')
+                        break
+                    if cancel_lowest_specific(st,c):
+                        moved+=1
+                if moved:
+                    log('BUY_BUFFER_CLEANUP',count=moved,
+                        bid=str(fresh_bid),age_ms=int(
+                            1000*(time.monotonic()-live_loop._shift_at)))
+                elif max_remove and protected:
+                    # emit only when the protected identity set changes.
+                    # This does not modify which BUYs are safe to cancel.
+                    protected_signature=tuple(sorted(str(c.get('ordId') or c.get('clOrdId') or c['buyPx'])
+                                                      for c in protected))
+                    if protected_signature!=last_protected_signature:
+                        log('BUY_CANCEL_PROTECTED',
+                            levels=[c['buyPx'] for c in protected[:5]],
+                            bid=str(fresh_bid),reason='Near BID; retained inside 30 BUY limit')
+                        last_protected_signature=protected_signature
+                else:
+                    last_protected_signature=None
             # surplus TP cleanup is opportunistic and one-at-a-time,
             # after a pass with no new BUY/BUY-cancel request. This preserves
             # the existing rule: every TP cancellation must reconcile fully
@@ -4532,10 +4586,11 @@ class StatsWorker(threading.Thread):
         super().__init__(daemon=True)
         self.pnl=pnl
         self.market=market
-        from okx_stats_incremental_runtime import StatsSourceCache
-        self.stats_cache=StatsSourceCache(FILL_DB,ARCHIVE_DB,INST)
-        from okx_stats_finance_incremental import IncrementalFinance
-        self.finance_cache=IncrementalFinance()
+        # P0 RAM relief: no permanently retained fills/archived-cycle caches.
+        # Original verified FULL finance + original FillStore are unchanged.
+        self.stats_cache=None
+        self.finance_cache=None
+        print('STATS_CACHE_MODE=ORIGINAL_FULL_LOW_RAM',flush=True)
 
     def run(self):
             last_attempt=0.0

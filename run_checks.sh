@@ -110,3 +110,5 @@ python3 -B -m unittest tests.test_v0747_threshold_and_b1_contract -q
 
 # S1 maintenance: version-neutral offline regressions.
 python3 -B -m unittest tests.test_s1_maintenance -q
+# Current LIVE StatsWorker must not retain full-history source caches.
+python3 -B -m unittest tests.test_stats_low_ram_fallback -q

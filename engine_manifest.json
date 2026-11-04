@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "current_version": "0.7.51",
+  "current_version": "0.7.53",
   "engines": {
     "0.7.28": {
       "file": "okx_bot.py",
@@ -410,12 +410,58 @@
         "okx_position_reader_client.py",
         "okx_position_reader_core.py",
         "okx_positions_priority.py",
+        "okx_idle_reconcile.py"
+      ],
+      "sha256": "bcba2f02086543c15d501fb7b1bb6e486877da78c66ca63b506c64bab76f7a27"
+    },
+    "0.7.52": {
+      "file": "okx_bot.py",
+      "dependencies": [
+        "okx_terminal_accounting.py",
+        "okx_latency.py",
+        "okx_positions_fifo.py",
+        "okx_fill_singleflight.py",
+        "okx_emergency_gate.py",
+        "okx_version.py",
+        "okx_state.py",
+        "okx_contracts.py",
+        "okx_accounting.py",
+        "okx_api.py",
+        "okx_strategy.py",
+        "okx_latency_rollup.py",
+        "okx_tp_telemetry.py",
+        "okx_position_reader_client.py",
+        "okx_position_reader_core.py",
+        "okx_positions_priority.py",
+        "okx_idle_reconcile.py"
+      ],
+      "sha256": "4e194ffa20501d811dbf16dbb9dcd5258ac2d5be7d04fa4b49ef26efd6f64fab"
+    },
+    "0.7.53": {
+      "file": "okx_bot.py",
+      "dependencies": [
+        "okx_terminal_accounting.py",
+        "okx_latency.py",
+        "okx_positions_fifo.py",
+        "okx_fill_singleflight.py",
+        "okx_emergency_gate.py",
+        "okx_version.py",
+        "okx_state.py",
+        "okx_contracts.py",
+        "okx_accounting.py",
+        "okx_api.py",
+        "okx_strategy.py",
+        "okx_latency_rollup.py",
+        "okx_tp_telemetry.py",
+        "okx_position_reader_client.py",
+        "okx_position_reader_core.py",
+        "okx_positions_priority.py",
         "okx_idle_reconcile.py",
         "okx_stats_finance_incremental.py",
         "okx_stats_incremental_runtime.py",
         "okx_stats_sqlite_delta_v0751.py"
       ],
-      "sha256": "bcba2f02086543c15d501fb7b1bb6e486877da78c66ca63b506c64bab76f7a27"
+      "sha256": "5c116a04df618ccd50a1f48cff8bf252e0b8e85b4ef894708f7368a7b4d3e2fe"
     }
   }
 }
