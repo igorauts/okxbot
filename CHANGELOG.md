@@ -1,9 +1,43 @@
-## v0.7.56 — 2026-11-04 — 7/7 LIVE; elective CANCEL isolation and urgent LIMIT TP rearm
-- v0.7.54: safe background cleanup of buffer orders.
-- v0.7.55: isolated uncertain elective CANCEL, exact-ordId retry, full coverage protection, no global trade starvation.
-- v0.7.56: real LIMIT TP below target bypasses elective 10s quiet timer; no change to virtual-MARKET exit priority.
-- 7/7 live engine rollout, financial audits, and selected local TP transition telemetry checked.
-- GitHub publication is source-only; does not touch LIVE services or exchange.
+## v0.7.57 — 2026-11-04 — LIVE 7/7 + GitHub Release
+
+**Scope: elective CANCEL stale HTTPS, dynamic `/latency`, CHANGELOG only.**
+
+- Only the `SingleOwnerCancelTransport`-owned elective `POST /api/v5/trade/cancel-order` checks its own thread-local HTTPS socket before the ONE permitted network attempt; if idle >15 seconds (or unknown last-used time), it closes the idle socket before POST. No test request, POST replay, or strategy changes. Critical BUY, TP, MARKET, PANIC and non-elective CANCEL connections retain their previous semantics.
+- Bounded local diagnostics `cancel_idle_socket` (fresh/reused/rotated, idle_ms) and `cancel_post_transport_error` (exception class only). No order IDs or credentials collected by latency journal.
+- Telegram `/latency` and `/latency8h` use a source-controlled versionless sibling CLI, which discovers actual running `okx-grid-*.service`, validates systemd WorkingDirectory and MainPID and reads per-bot telemetry only. No hardcoded bot names or per-instance paths.
+- No StatsWorker, Reader, Telegram HTTP keep-alive, sampler, follower or strategy changes in this release. Offline tests finished before LIVE installation; **no tests run during GitHub publication**.
+- LIVE installation passed for all 7 active engines; BTC last, financial and coverage audits PASS, Telegram `/latency` works.
+- Known limitation accepted by operator: `/latency8h` requests 480 minutes, while CLI supports only 15–180 minutes.
+- Stale elective CANCEL improvements need post-rollout telemetry before claiming eliminated disconnects.
+
+## v0.7.56 — 2026-11-04 — Real TP rearm without elective cooldown (LIVE + GitHub)
+
+- Under-target real LIMIT TP restoration, including last-real TP `0→1`, bypasses the 10-second elective TP buffer cooldown. Discretionary surplus cleanup remains gated. Position/order coverage and durable intents retained.
+- All seven engines were confirmed LIVE on v0.7.56, including operator-authorized BLUR virtual TP repair and WLD recovery. GitHub Release v0.7.56, commit `c7ced0eb89f5d5aca152be49c34e402aaa922205`, ZIP SHA256 `9380d7c7052f830c9556bd861192d61cb0cf33224d90bfd3e8b906824770043e`.
+
+## v0.7.55 — 2026-11-04 — Isolation of uncertain elective CANCEL (LIVE)
+
+- An unresolved elective CANCEL can be isolated by exact order identity while independent levels continue only after full coverage and safety reconciliation. Never silently treats ACK as confirmed cancellation. WLD incident was handled separately; not a transport reconnect fix.
+
+## v0.7.54 — 2026-11-04 — Single-owner nonblocking elective CANCEL (LIVE)
+
+- Added `SingleOwnerCancelTransport` for elective cleanup: durable intent before one cancellation POST, worker thread, event preemption and owner-side reconciliation. No blind retry; no general trading strategy change.
+
+## v0.7.53 — 2026-11-04 — StatsWorker low-memory recovery (LIVE + GitHub)
+
+- Disabled long-lived incremental finance `stats_cache`/`finance_cache` retention while preserving the original FULL ledger, after excessive RAM pressure in v0.7.51. Seven LIVE engines and financial audits PASS. Published GitHub commit `a99325238961e9ec9dbeec5d3cd2467e986b69e5`.
+
+## v0.7.52 — 2026-11-04 — Restored BUY rotation (LIVE)
+
+- Reinstated known-good BUY buffer rotation from pre-regression v0.7.50, eliminating the v0.7.51 `BUY_CAPACITY_HOLD` that prevented replacement of BUY levels. Seven LIVE engines updated, BTC last. No independently confirmed GitHub Release claimed.
+
+## v0.7.51 — 2026-11-03/04 — Incremental-finance LIVE regression
+
+- Incremental finance and checkpoints were developed and validated offline, but LIVE brought high memory retention and removed the elective BUY rotation, causing missed replenishment. Fixed by v0.7.52 (BUY) and v0.7.53 (finance retention). Not recommended as recovery target. No independently confirmed GitHub Release claimed.
+
+## v0.7.50 — 2026-11-02 — S1 watchdog/sampler maintenance (LIVE + GitHub)
+
+- Healthy Reader watchdog heartbeat frequency reduced, resource sampler systemd calls optimized; subsequent LIVE sampler fix removed hardcoded service discovery. Trading engine remained v0.7.47. Published GitHub maintenance release.
 
 ## v0.7.49 — 2026-11-01 — Telegram Monitor recovery maintenance (engine 0.7.47)
 - P0: BUY 0/N follower recovery from malformed lines, overflow, stale cursor >45s, ACK errors; single gap incident per episode; live tests no fault injection.

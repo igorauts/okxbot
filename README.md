@@ -1,5 +1,13 @@
 # OKX Grid Bot
 
+## v0.7.57 — LIVE: защита idle HTTPS для CANCEL и динамический `/latency` (04.11.2026)
+- Изолированный elective CANCEL: обновление простаивающего TLS до одного POST, без повторов и изменения безопасности BUY/TP/MARKET/PANIC.
+- Telegram `/latency` обнаруживает работающих ботов динамически.
+- Известное ограничение: `/latency8h` запрашивает 480 минут, но CLI принимает только 15–180; `/latency` за 60 минут работает.
+- GitHub-публикация не меняет работающие сервисы и не запускает тесты.
+- Подробности: `V0757_LIVE_RELEASE_NOTES_RU.md`.
+
+
 ## v0.7.56 — LIVE trading engine (04.11.2026)
 - v0.7.54/55: TP/BUY cleanup and nonblocking isolated elective CANCEL reconciliation.
 - v0.7.56: real protective LIMIT TP is restored without elective 10-second quiet cooldown when below target.
@@ -7,7 +15,7 @@
 - See `V0756_LIVE_RELEASE_NOTES_RU.md` and the GitHub Release for details.
 
 
-**Последний опубликованный релиз: [v0.7.56](https://github.com/igorauts/okxbot/releases/tag/v0.7.56).**
+**Последний опубликованный релиз: [v0.7.57](https://github.com/igorauts/okxbot/releases/tag/v0.7.57).**
 
 Алгоритмический LONG Grid Bot для реального OKX-аккаунта: линейные бессрочные
 USDT-margined SWAP, режим NET/CROSS. Позиции, ордера и результаты учитываются

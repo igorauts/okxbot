@@ -5,8 +5,8 @@ package explicitly declares its type instead of adding a hard-coded pair to
 an ever-growing compatibility table. Engine identity remains authoritative
 in the engine manifest, not the release number.
 """
-RELEASE_VERSION = '0.7.56'
-ENGINE_VERSION = '0.7.56'
+RELEASE_VERSION = '0.7.57'
+ENGINE_VERSION = '0.7.57'
 STATE_SCHEMA = 1
 RELEASE_KIND = 'engine'
 def validate_version_ids(release=RELEASE_VERSION, engine=ENGINE_VERSION):

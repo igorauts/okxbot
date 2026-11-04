@@ -94,6 +94,30 @@ def _stats_note_http_use(api):
         api._local.conn_last_used=time.monotonic()
 
 
+def _elective_cancel_idle_socket(api, *, now=None):
+    """Refresh idle TLS only for an explicitly marked elective CANCEL POST.
+
+    Called after durable preparation, but BEFORE the one permitted POST.  It
+    never sends traffic; closing an unused idle socket cannot duplicate CANCEL.
+    Thread-local state prevents one worker from altering another worker's TLS.
+    Returns sanitized diagnostic data, not an order result.
+    """
+    now=time.monotonic() if now is None else now
+    conn=getattr(api._local,'conn',None)
+    used=getattr(api._local,'conn_last_used',None)
+    if conn is None:
+        return 'fresh',0.0
+    if used is None:
+        # Unknown socket age: do not risk the first mutating POST on stale TLS.
+        api._close()
+        return 'rotated_unknown_age',0.0
+    idle=max(0.0,now-used)
+    if idle>15.0:
+        api._close()
+        return 'rotated_idle',min(idle*1000,86_400_000.0)
+    return 'reused',min(idle*1000,86_400_000.0)
+
+
 def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
               CONTRACT_LOT, CONTRACT_MIN, CONTRACT_VALUE, PRICE_STEP,
               QTY, STEP, TP, ExchangeTemporary, ExchangeUnresolved,
@@ -144,7 +168,11 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
                 self._close()
                 raise
 
-        def req(self, method, path, params=None, body=None, *, background=False, exp_time_ms=None):
+        def req(self, method, path, params=None, body=None, *, background=False, exp_time_ms=None,
+                elective_cancel=False):
+            if elective_cancel and (method!='POST' or path!='/api/v5/trade/cancel-order'
+                                    or not background):
+                raise ValueError('Elective CANCEL socket guard requires exact background CANCEL route')
             if method != 'GET' and not LIVE:
                 die('Write operations disabled in DRY RUN')
             if method != 'GET':
@@ -209,6 +237,11 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
                         http_status=None
                         try:
                             _stats_rotate_idle_get(self,method)
+                            if elective_cancel:
+                                socket_state,idle_ms=_elective_cancel_idle_socket(self)
+                                latency_ms('cancel_idle_socket',time.perf_counter_ns(),
+                                           method=method,route=route,
+                                           outcome=socket_state,idle_ms=round(idle_ms,1))
                             if p is not None:
                                 status,result=p.run('rest_http',self._http,method,path,payload,headers)
                             else:
@@ -225,6 +258,9 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
                         continue
                     except (OSError,TimeoutError,ConnectionError,http.client.HTTPException,
                             ssl.SSLError) as exc:
+                        if elective_cancel:
+                            latency_ms('cancel_post_transport_error',time.perf_counter_ns(),
+                                       method=method,route=route,outcome=type(exc).__name__)
                         if method!='GET':
                             raise ExchangeUnresolved(
                                 f'UNKNOWN {method} OUTCOME: {type(exc).__name__}; reconcile stored intent') from exc

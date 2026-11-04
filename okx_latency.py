@@ -44,7 +44,8 @@ class LatencyJournal:
                 'tp_to_intent', 'tp_cross_to_collect',
                 'tp_collect_to_intent', 'tp_intent_to_submit',
                 'position_reader_ipc','position_reader_quota','position_reader_http',
-                'tp_recon_phase','stats_stage','stats_detail'):
+                'tp_recon_phase','stats_stage','stats_detail',
+                'cancel_idle_socket','cancel_post_transport_error'):
                 return
             permitted = {'route', 'method', 'passes', 'mismatches', 'outcome',
                          'count', 'placed', 'attempted', 'status', 'partial',
@@ -52,7 +53,7 @@ class LatencyJournal:
                          'reason','attempt','source','cycles','added',
                          'priority','batch_size','trace_id','step',
                          'start_unix_ms','end_unix_ms','expected','missing',
-                         'event_clock'}
+                         'event_clock','idle_ms'}
             safe = {k: v for k,v in fields.items()
                     if k in permitted and (v is None or type(v) in (str, int, float, bool))}
             if 'trace_id' in safe and (len(str(safe['trace_id']))>32 or

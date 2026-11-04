@@ -527,7 +527,7 @@ def ingest_events(api,st):
     gate_alert_scan(api,st)
 
 
-# Console latency bridge: reuses /srv/okx_v0747_per_bot_speed_readonly.py.
+# Console latency bridge: source-controlled, versionless read-only sibling CLI.
 # No API calls or trading mutations here. Main thread owns Telegram send and state.
 import html as _latency_html
 import queue as _latency_queue
@@ -536,7 +536,7 @@ import subprocess as _latency_subprocess
 import threading as _latency_threading
 import time as _latency_time
 
-_LATENCY_CLI_PATH = '/srv/okx_v0747_per_bot_speed_readonly.py'
+_LATENCY_CLI_PATH = str(Path(__file__).resolve().with_name('okx_per_bot_speed_readonly.py'))
 _LATENCY_CLI_RESULTS = _latency_queue.Queue(maxsize=1)
 _LATENCY_CLI_THREAD = None
 _LATENCY_CLI_TIMEOUT = 25

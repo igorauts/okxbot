@@ -3473,7 +3473,8 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                 or worker_critical_preempt())
     elective_cancel_transport=SingleOwnerCancelTransport(
         send_cancel=lambda oid:A.req('POST','/api/v5/trade/cancel-order',
-                                     body={'instId':INST,'ordId':oid},background=True),
+                                     body={'instId':INST,'ordId':oid},
+                                     background=True,elective_cancel=True),
         urgent_pending=worker_urgent_preempt,
         critical_pending=worker_critical_preempt,
         wake_owner=watcher.wake.set,

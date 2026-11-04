@@ -123,3 +123,7 @@ python3 -B -m unittest tests.test_cancel_retry_rc3 -q
 
 # P0: Restore under-target protective real TP without elective 10s grace.
 python3 -B -m unittest tests.test_tp_rearm_without_quiet_wait_p0 -q
+
+# v0.7.57 candidate-only offline tests; NEVER run from the GitHub publisher.
+python3 -B -m unittest tests.test_v0757_idle_cancel_socket -q
+python3 -B -m unittest tests.test_v0757_latency_discovery -q

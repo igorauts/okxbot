@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read-only LIVE per-bot trading speed report for OKX Grid Bot v0.7.47.
+"""Read-only LIVE per-bot trading speed report for OKX Grid Bot.
 
 Uses bounded minute histogram files for complete-minute percentile coverage.
 Reads at most 8 MiB of each latency.jsonl for BUY batch attempted/placed details.
@@ -10,11 +10,58 @@ import collections
 import datetime as dt
 import json
 import math
+import os
+import re
+import subprocess
 from pathlib import Path
 import time
 
-BOTS = ('near0721','wld0728','dood0735','init0738','blur0738','zec0742','btc0721')
-ROOT = Path('/root/okx')
+
+def discover_running_bots(*, runner=None, base=None):
+    """Discover active grid services and their authoritative working dirs.
+
+    No hardcoded bot IDs/count or per-instance paths. Fail closed on ambiguous
+    paths, inactive PIDs or systemctl failures; never inspect credentials.
+    """
+    base = Path(base or os.environ.get('OKXBOT_BASE_DIR','/root/okx')).resolve()
+    if runner is None:
+        def runner(args):
+            return subprocess.run(args, capture_output=True, text=True, timeout=4,
+                                  check=True).stdout
+    listing=runner(['systemctl','list-units','--type=service','--state=running',
+                    '--all','--plain','--no-legend','okx-grid-*.service'])
+    result=[]
+    seen=set()
+    for line in listing.splitlines():
+        fields=line.split()
+        if not fields:
+            continue
+        match=re.fullmatch(r'okx-grid-([a-z0-9][a-z0-9_-]*)\.service',fields[0])
+        if not match:
+            continue
+        unit=fields[0]
+        bot=match.group(1)
+        if bot in seen:
+            raise RuntimeError('Duplicate active bot service: '+bot)
+        seen.add(bot)
+        properties=dict(row.split('=',1) for row in runner(
+            ['systemctl','show',unit,'-p','ActiveState','-p','MainPID',
+             '-p','WorkingDirectory']).splitlines() if '=' in row)
+        if properties.get('ActiveState')!='active':
+            raise RuntimeError('Service changed state during discovery: '+unit)
+        pid=properties.get('MainPID','')
+        if not pid.isdigit() or int(pid)<=0:
+            raise RuntimeError('Invalid live PID: '+unit)
+        work=Path(properties.get('WorkingDirectory',''))
+        if not work.is_absolute() or work.is_symlink():
+            raise RuntimeError('Unsafe working directory: '+unit)
+        path=work.resolve()
+        if path!=base/bot or not path.is_dir() or not (path/'config.json').is_file():
+            raise RuntimeError('Working directory mismatch: '+unit)
+        result.append((bot,path))
+    if not result:
+        raise RuntimeError('No active okx-grid service discovered')
+    return sorted(result)
 BOUNDS = (.001,.005,.01,.02,.05,.1,.25,.5,1,2,5,10,20,50,100,250,
           500,1000,2000,5000,10000,30000,60000,120000,float('inf'))
 PHASES = (
@@ -66,8 +113,8 @@ def safe_file(p,limit):
     except OSError:return False
 
 
-def rollups(bot,first_minute,last_minute):
-    base=ROOT/bot/'logs'
+def rollups(root,first_minute,last_minute):
+    base=root/'logs'
     seg=base/'latency_24h_rollups.segments'
     hours=range(first_minute//60,last_minute//60+1)
     paths=[seg/(str(h)+'.jsonl') for h in hours]
@@ -95,9 +142,9 @@ def rollups(bot,first_minute,last_minute):
     return result,seen_minutes,malformed
 
 
-def raw_buy_batches(bot,first_minute,last_minute):
+def raw_buy_batches(root,first_minute,last_minute):
     """Bounded supplementary counts; never treat incomplete raw tails as full hour."""
-    path=ROOT/bot/'logs'/'latency.jsonl'
+    path=root/'logs'/'latency.jsonl'
     summary=collections.Counter();last=[]
     try:
         if path.is_symlink() or not path.is_file():return summary,last,True
@@ -126,10 +173,10 @@ def raw_buy_batches(bot,first_minute,last_minute):
     except OSError:return summary,last,True
 
 
-def emit_table(title,key,data):
+def emit_table(title,key,data,bots):
     print('\n=== '+title+' ===')
     print(f'{"BOT":<11} {"N":>6} {"P50<=" :>9} {"P95<=" :>9} {"P99<=" :>9} {"MAX":>9} ms')
-    for bot in BOTS:
+    for bot in bots:
         d=data[bot][0][key]
         print(f'{bot:<11} {d["n"]:>6} {percentile_ceiling(d,.50):>9} '
               f'{percentile_ceiling(d,.95):>9} {percentile_ceiling(d,.99):>9} '
@@ -145,18 +192,21 @@ def main():
     utc=lambda minute:dt.datetime.fromtimestamp(minute*60,dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
     print('OKX LIVE PER-BOT SPEED | READ-ONLY | NO API | NO WRITES')
     print('WINDOW (complete minutes):',utc(first),'->',utc(last),f'({args.minutes} min)')
-    data={bot:rollups(bot,first,last) for bot in BOTS}
+    active=discover_running_bots()
+    bots=[bot for bot,_ in active]
+    roots=dict(active)
+    data={bot:rollups(root,first,last) for bot,root in active}
     print('\nCOVERAGE (complete recorded minutes):')
-    for bot in BOTS:
+    for bot in bots:
         _,minutes,invalid=data[bot]
         print(f'  {bot:<11} {len(minutes):>3}/{args.minutes} minutes'+
               (f' | duplicate/corrupt rows {invalid}' if invalid else '')+
               (' | INCOMPLETE' if len(minutes)<args.minutes-2 else ''))
-    for key,title in PHASES:emit_table(title,key,data)
+    for key,title in PHASES:emit_table(title,key,data,bots)
     print('\n=== BUY REPLACEMENT / REPLENISHMENT EVENTS (bounded raw detail) ===')
     print(f'{"BOT":<11} {"BATCHES":>7} {"ATTEMPT":>8} {"PLACED":>7} {"SCOPE":>10}')
-    for bot in BOTS:
-        counts,_,truncated=raw_buy_batches(bot,first,last)
+    for bot in bots:
+        counts,_,truncated=raw_buy_batches(roots[bot],first,last)
         n_rollup=data[bot][0]['buy_batch||']['n']
         scope='FULL' if counts['batches']==n_rollup else 'PARTIAL'
         print(f'{bot:<11} {counts["batches"]:>7} {counts["attempted"]:>8} '
