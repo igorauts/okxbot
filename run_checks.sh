@@ -112,3 +112,14 @@ python3 -B -m unittest tests.test_v0747_threshold_and_b1_contract -q
 python3 -B -m unittest tests.test_s1_maintenance -q
 # Current LIVE StatsWorker must not retain full-history source caches.
 python3 -B -m unittest tests.test_stats_low_ram_fallback -q
+
+# RC2 elective cancellation: transport, owner durable intent and 228-step model.
+python3 -B -m unittest tests.test_cleanup_transport_rc2 tests.test_cancel_owner_integration_rc2 tests.test_deep_grid_capacity_model_rc2 -q
+# Isolated elective-CANCEL reconciliation: remote live with exact reservation,
+# absence/identity mismatch fail-closed, no global hold from one known TP.
+python3 -B -m unittest tests.test_cancel_isolation_rc3 -q
+# Verified exact-ID, bounded same-order CANCEL retry; never duplicate an order.
+python3 -B -m unittest tests.test_cancel_retry_rc3 -q
+
+# P0: Restore under-target protective real TP without elective 10s grace.
+python3 -B -m unittest tests.test_tp_rearm_without_quiet_wait_p0 -q

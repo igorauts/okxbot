@@ -45,7 +45,13 @@ assert len(loops)==1
 loop=loops[0]
 calls=[n for n in ast.walk(loop) if isinstance(n,ast.Call)
        and isinstance(n.func,ast.Name)]
-assert sum(n.func.id=='cancel_lowest_specific' for n in calls)==1,        'Restored BUY rotation must have exactly one cancellation callsite'
+# The price ladder and lowest-safe-BUY selection remain identical. The
+# elective transport must be the ONLY cancel callsite in live_loop; synchronous
+# cancel_lowest_specific remains available for emergency/partial BUY only.
+assert sum(n.func.id=='queue_elective_buy_cancel' for n in calls)==1, \
+       'Exactly one elective BUY cancellation dispatch point required'
+assert sum(n.func.id=='cancel_lowest_specific' for n in calls)==0, \
+       'No blocking elective BUY REST POST in trading loop' 
 assert sum(n.func.id=='plan_buy_buffer_cleanup' for n in calls)>=2,        'Missing fresh-bid BUY cancel protection'
 assert not any(n.func.id=='log' and n.args and
        isinstance(n.args[0],ast.Constant) and n.args[0].value=='BUY_CAPACITY_HOLD'
@@ -59,18 +65,16 @@ assert ast.dump(cap_checks[0].value,include_attributes=False)==ast.dump(
 assert 'protected_signature!=last_protected_signature' in source
 assert "fresh_lowest[0].get('ordId')!=c.get('ordId')" in source
 assert 'BUY_CANCEL_DEFERRED' in source
-# Keep protective TP under-target gate from the v0.7.51 review.
+# The under-target protective TP restoration remains before BUY. A separate
+# emergency TP-capacity call precedes BUY; an elective TP call is AFTER BUY.
 tp_calls=[n for n in calls if n.func.id=='maintain_virtual_tp']
-assert len(tp_calls)==1, 'Unexpected TP maintenance call sites'
-tp_guards=[n for n in ast.walk(loop) if isinstance(n,ast.If)
-    and ast.dump(n.test,include_attributes=False)==ast.dump(
-        ast.parse('real_tp_now>=REAL_TP_TARGET',mode='eval').body,
-        include_attributes=False)]
-assert len(tp_guards)==1
-assert any(n is tp_calls[0] for stmt in tp_guards[0].orelse
-           for n in ast.walk(stmt)), 'Protective TP restore missing below target'
-assert not any(n is tp_calls[0] for stmt in tp_guards[0].body
-           for n in ast.walk(stmt)), 'Unexpected elective TP cancel at target'
+assert len(tp_calls)==2, 'Both early rescue and post-BUY TP cleanup required'
+assert all(any(kw.arg=='cancel_override' for kw in n.keywords) for n in tp_calls), \
+       'TP CANCEL must be routed through nonblocking transport'
+assert 'real_tp_now>=REAL_TP_TARGET and not tp_pressure' in source
+assert 'tp_pressure=(real_tp_now>REAL_TP_TARGET' in source
+assert "if (mode=='RUN' and not waiting and not placed and not moved" in source
+assert 'queue_elective_tp_cancel' in source
 
 assert "log('TRADING_LOOP_LONG_PASS'" in source
 assert "BUY_CANCEL_PROTECT_STEPS = 5" in source

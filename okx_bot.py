@@ -51,7 +51,7 @@ LOCAL_CONTROL_POLL_SEC = 0.2
 # Exchange-attached TP can grow during a burst. Surplus is trimmed only
 # after quiet time, one confirmed cancellation per REST reconciliation.
 REAL_TP_CONFIG = int(CFG.get('active_tp_orders',0))
-# BUY remains capped at 30. Real SELL TP may grow up to the 150-order safety cap.
+# BUY remains capped at 30. Exchange hard cap remains 150 independent of cleanup.
 # Historical active_tp_orders=75 remains parsed for config safety, but never
 # controls live real TP count. New config uses 1..25 real TP baseline.
 REAL_TP_TARGET = int(CFG.get('real_tp_target', min(25, REAL_TP_CONFIG)))
@@ -62,10 +62,10 @@ BUY_BUFFER = 5
 BUY_MAX = TARGET + BUY_BUFFER
 BUY_CANCEL_PROTECT_STEPS = 5
 REAL_TP_RESERVE = TARGET + BUY_BUFFER
-REAL_TP_MAX = 150  # hard TP safety limit, NOT a cleanup threshold
-TP_BUFFER_COOLDOWN = 1.5
+REAL_TP_MAX = 100  # operational TP budget; independent exchange guard remains 150
+TP_BUFFER_COOLDOWN = 10.0
 TP_BUFFER_CANCEL_INTERVAL = 0.1
-BUY_BUFFER_COOLDOWN = 1.5
+BUY_BUFFER_COOLDOWN = 10.0
 PRICE_WAKE_COOLDOWN = 0.5
 ESCAPE_COALESCE_SEC = 0.15
 
@@ -207,7 +207,7 @@ if (INST != f'{COIN}-USDT-SWAP'
     or not (1<=CAP<=500 and 1<=TARGET<=min(CAP,25)
             and 1<=REAL_TP_CONFIG<=75 and 1<=REAL_TP_TARGET<=25
             and BUY_BUFFER==5 and BUY_MAX<=30
-            and REAL_TP_RESERVE==TARGET+5 and REAL_TP_MAX==REDUCE_ONLY_HARD_CAP
+            and REAL_TP_RESERVE==TARGET+5 and 25<=REAL_TP_MAX<REDUCE_ONLY_HARD_CAP
             and BUY_CANCEL_PROTECT_STEPS==5) or EX_CAP != 500
     or D(CFG.get('buy_base_qty'))!=QTY*CONTRACT_VALUE
     or (UPPER and UPPER!=CAPITAL_REFERENCE)):
@@ -1393,7 +1393,9 @@ def count(state):
     return sum(x['state'] not in ('CLOSED','CANCELED','EXITED') for x in state['cycles'].values())
 
 def active_buy(state):
-    return [x for x in state['cycles'].values() if x['state'] in ('BUY_LIVE','BUY_PARTIAL','PLACING')]
+    # CANCELING BUY remains an exchange-live reservation until terminal proof.
+    # Never free BUY capacity merely because an elective CANCEL was dispatched.
+    return [x for x in state['cycles'].values() if x['state'] in ('BUY_LIVE','BUY_PARTIAL','PLACING','CANCELING')]
 
 
 def validate_buy_buffer(active):
@@ -1710,6 +1712,7 @@ def tp_record_update(st, c, rec, order):
             tpPx=c['tpPx'],cycleId=c['cycleId'],
             tpOrdId=order['ordId'],clOrdId=rec['clOrdId'],buyOrdId=c.get('ordId',''))
     if filled!=D(rec.get('filled')):
+        note_cleanup_fill()
         rec['filled']=str(filled);changed=True
     state=order.get('state')
     trip_if_margin_cancel(order, 'TP_CANCELED_BY_OKX')
@@ -1726,6 +1729,7 @@ def tp_record_update(st, c, rec, order):
             # It can be safely considered ACTIVE again; a new cancel will
             # require a new explicit operator/strategy decision.
             rec.pop('cancelRejectAt',None)
+            rec.pop('electiveCancel',None)
             rec['phase']='ACTIVE'
             save(st)
             return 'ACTIVE'
@@ -1740,6 +1744,8 @@ def tp_record_update(st, c, rec, order):
         new='CANCELING'
     if rec.get('phase')!=new:
         rec['phase']=new;changed=True
+        if new in ('FILLED','CANCELED'):
+            rec.pop('electiveCancel',None)
         if new=='CANCELED':journal_tp('TP_CANCELED_CONFIRMED',c,ordId=rec['ordId'],filled=rec['filled'])
         if new=='FILLED':journal_tp('TP_FILLED_CONFIRMED',c,ordId=rec['ordId'],filled=rec['filled'])
     if changed:save(st)
@@ -1774,6 +1780,7 @@ def reconcile_aggregate(st):
         filled=D(o.get('accFillSz'))
         if filled<D(g.get('filled','0')) or filled>D(g['sz']):
             die('Nonmonotonic aggregate MARKET quantity')
+        if filled>D(g.get('filled','0')):note_cleanup_fill()
         g['ordId']=str(o['ordId'])
         g['filled']=str(filled)
         g['phase']=('FILLED' if state=='filled' else 'CANCELED'
@@ -1995,6 +2002,7 @@ def track(st,pending):
             if filled < D(c.get('filledBuy')) or filled > D(c['sz']):
                 die('Nonmonotonic BUY cancel fill '+key)
             if state in ('canceled','mmp_canceled'):
+                if filled>D(c.get('filledBuy')):note_cleanup_fill()
                 resolve_partial_cancel(st,c,filled)
                 if not filled:
                     log('BUY_CANCEL_CONFIRMED',price=key,ordId=c['ordId'])
@@ -2004,6 +2012,7 @@ def track(st,pending):
                 # Cancel lost the race. Keep SAME cycle ID, linked attached TP.
                 if c.pop('partial_cleanup',None):
                     log('PARTIAL_EXIT_ABORTED_FULL_BUY',price=key)
+                if filled>D(c.get('filledBuy')):note_cleanup_fill()
                 c['state']='BUY_LIVE';save(st)
                 log('BUY_FILLED_DURING_CANCEL',price=key,ordId=c['ordId'])
                 status='BUY_LIVE'
@@ -2011,6 +2020,7 @@ def track(st,pending):
                 if filled != D(c.get('filledBuy')):
                     if filled and not c.get('partial_since'):
                         c['partial_since']=time.time()
+                    note_cleanup_fill()
                     c['filledBuy']=str(filled);save(st)
                 # A definitive cancel rejection means no cancellation was
                 # accepted. Wait 10s, confirm the order STILL live, then
@@ -2018,14 +2028,31 @@ def track(st,pending):
                 if c.get('cancelRejectAt') and time.time()-float(c['cancelRejectAt'])>=10:
                     c['state']='BUY_PARTIAL' if filled else 'BUY_LIVE'
                     c.pop('cancelRejectAt',None)
+                    c.pop('electiveCancel',None)
                     save(st)
                     all_resolved=False
                     continue
-                all_resolved=False
+                # A completed *elective* CANCEL transport may have an
+                # uncertain outcome. That does NOT make every other cycle
+                # uncertain. Keep THIS BUY in durable CANCELING, count its
+                # full capacity, and isolate its ambiguity only if the fresh
+                # COMPLETE orders-pending snapshot still contains the exact
+                # original BUY with identical identity/price/size/fills.
+                listed=byid.get(str(c.get('ordId'))) or byid.get(c.get('ordId'))
+                independently_live=(bool(c.get('electiveCancel')) and
+                    listed is not None and listed.get('state') in ('live','partially_filled')
+                    and listed.get('instId')==INST and listed.get('side')=='buy'
+                    and listed.get('ordId')==c.get('ordId')
+                    and listed.get('clOrdId')==c.get('clOrdId')
+                    and D(listed.get('px'))==D(c['buyPx'])
+                    and D(listed.get('sz'))==D(c['sz'])
+                    and D(listed.get('accFillSz'))==filled)
+                if not independently_live:
+                    all_resolved=False
                 started=D(c.get('cancelAt'))
                 elapsed=time.time()-float(started) if started else 0
-                # Never blindly resubmit a cancellation or place replacement
-                # buys. Log a warning periodically, but keep reconciling.
+                # Never re-POST an uncertain CANCEL. Terminal exchange proof
+                # remains required to release THIS order's reservation.
                 if elapsed>=30 and time.time()-float(c.get('cancelWarnAt',0))>=30:
                     c['cancelWarnAt']=time.time();save(st)
                     log('BUY_CANCEL_PENDING',price=key,ordId=c['ordId'],
@@ -2042,6 +2069,7 @@ def track(st,pending):
             trip_if_margin_cancel(o, 'BUY_CANCELED_BY_OKX')
             state=o.get('state');filled=D(o.get('accFillSz'))
             if state=='filled':
+                if filled>D(c.get('filledBuy')):note_cleanup_fill()
                 c['state']='TP_WAIT';c['filledBuy']=str(filled)
                 if not tp_records(c):
                     tp_records(c).append({'clOrdId':c['tpClOrdId'],
@@ -2061,11 +2089,13 @@ def track(st,pending):
                     elif filled and not c.get('partial_since'):
                         # Migration of an already partially-filled BUY.
                         c['partial_since']=time.time()
+                    if filled>D(c.get('filledBuy')):note_cleanup_fill()
                     c['state']=target;c['filledBuy']=str(filled);save(st)
                     if filled:
                         log('BUY_PARTIAL',price=key,filled=str(filled),
                             total=c['sz'],remaining=str(D(c['sz'])-filled))
             elif state in ('canceled','mmp_canceled'):
+                if filled>D(c.get('filledBuy')):note_cleanup_fill()
                 resolve_partial_cancel(st,c,filled)
                 if not filled:continue
             else:die('Unknown BUY status '+str(state))
@@ -2141,8 +2171,26 @@ def track(st,pending):
                         tpPx=c['tpPx'],cycleId=c['cycleId'],
                         tpId=tp_records(c)[-1].get('ordId',''))
         elif active:
-            if any(r['phase'] in ('PENDING','PLACING','CANCELING') for r in active):
-                all_resolved=False
+            for r in active:
+                if r.get('phase') in ('PENDING','PLACING'):
+                    all_resolved=False
+                elif r.get('phase')=='CANCELING':
+                    # Elective CANCEL is isolated only while the exact still-
+                    # live SELL is positively present in this fresh COMPLETE
+                    # pending snapshot. TP record update above validates the
+                    # clOrdId, price, quantity, side and nondecreasing fill.
+                    # A missing/terminal/unknown SELL cannot be isolated.
+                    listed=byid.get(r.get('ordId'))
+                    if not (r.get('electiveCancel') and listed is not None
+                            and listed.get('state') in ('live','partially_filled')
+                            and listed.get('instId')==INST
+                            and listed.get('side')=='sell'
+                            and listed.get('clOrdId')==r.get('clOrdId')
+                            and listed.get('reduceOnly') in ('true',True)
+                            and D(listed.get('sz'))==D(r['sz'])
+                            and D(listed.get('px'))==D(c['tpPx'])
+                            and D(listed.get('accFillSz'))==D(r.get('filled'))):
+                        all_resolved=False
             target='TP_PARTIAL' if filled else 'TP_WAIT'
             if c['state']!=target:c['state']=target;save(st)
         else:
@@ -2154,7 +2202,7 @@ def track(st,pending):
 
 def real_tp_active(st):
     return [(k,c,r) for k,c in st['cycles'].items()
-            for r in tp_records(c) if r['phase']=='ACTIVE']
+            for r in tp_records(c) if r['phase'] in ('ACTIVE','CANCELING')]
 
 class CoverageMismatch(ExchangeTemporary):
     """Coverage mismatch: block BUY; continue reconciling outstanding SELL."""
@@ -2369,10 +2417,212 @@ def partial_cleanup_action(st,bid,actual,mode):
 
 
 
+# Session clock of REST-confirmed execution increments, not BID shifts.
+# Initial startup/restart begins with a full 10-second grace interval.
+CLEANUP_LAST_FILL_AT = time.monotonic()
+
+def note_cleanup_fill():
+    global CLEANUP_LAST_FILL_AT
+    CLEANUP_LAST_FILL_AT = time.monotonic()
+
+def queue_elective_tp_cancel(st,c,rec,transport,emergency=False):
+    """Only elective TP trim/rotation; owner fsyncs intent before worker POST."""
+    if rec.get('phase')!='ACTIVE' or not rec.get('ordId'):
+        die('Elective TP cancel requires confirmed active identity')
+    oid=str(rec['ordId']);token=str(c['cycleId'])
+    def durable_prepare():
+        rec['phase']='CANCELING'
+        rec['electiveCancel']=True
+        rec['cancelAt']=time.time()
+        save(st)
+        journal_tp('CANCEL_INTENT',c,ordId=oid,clOrdId=rec['clOrdId'])
+    return transport.submit(kind='TP',ord_id=oid,token=token,
+                            durable_prepare=durable_prepare,emergency=emergency)
+
+
+def queue_elective_buy_cancel(st,c,transport,emergency=False):
+    """Only elective BUY buffer cancellation; no change to emergency path."""
+    if c.get('state') not in ('BUY_LIVE','BUY_PARTIAL') or not c.get('ordId'):
+        die('Elective BUY cancel requires confirmed live/partial identity')
+    oid=str(c['ordId']);token=str(c['cycleId'])
+    def durable_prepare():
+        c['state']='CANCELING'
+        c['electiveCancel']=True
+        c['cancelAt']=time.time()
+        save(st)
+    return transport.submit(kind='BUY',ord_id=oid,token=token,
+                            durable_prepare=durable_prepare,emergency=emergency)
+
+
+def consume_elective_cancel(st,transport):
+    """Only main trading thread consumes ACK and writes durable rejections.
+
+    In all outcomes, REST reconciliation remains final authority. Transport
+    error NEVER sends another cancel or releases a BUY/TP reservation.
+    """
+    result=transport.consume()
+    if result is None:return None
+    matches=[c for c in st['cycles'].values() if str(c.get('cycleId'))==result.token]
+    if len(matches)!=1:
+        raise ExchangeUnresolved('Background cancel cycle identity mismatch')
+    c=matches[0]
+    if result.kind=='BUY':
+        if str(c.get('ordId'))!=result.ord_id:
+            raise ExchangeUnresolved('Background BUY cancel ordId mismatch')
+        rec=None
+    elif result.kind=='TP':
+        records=[r for r in tp_records(c) if str(r.get('ordId'))==result.ord_id]
+        if len(records)!=1:
+            raise ExchangeUnresolved('Background TP cancel ordId mismatch')
+        rec=records[0]
+    else:raise ExchangeUnresolved('Background cancel wrong kind')
+    if not result.sent and result.error is None:
+        # Worker explicitly confirms NO exchange call was made. Re-arm the
+        # unchanged local identity for a FRESH REST reconciliation; only
+        # that subsequent pass may authorize another strategic write.
+        if result.kind=='TP':
+            if rec.get('phase')!='CANCELING':
+                raise ExchangeUnresolved('Preempted TP intent state changed')
+            rec['phase']='ACTIVE'
+            rec.pop('electiveCancel',None)
+            rec['cancelNotSentAt']=time.time()
+        else:
+            if c.get('state')!='CANCELING':
+                raise ExchangeUnresolved('Preempted BUY intent state changed')
+            c['state']='BUY_PARTIAL' if D(c.get('filledBuy'))>0 else 'BUY_LIVE'
+            c.pop('electiveCancel',None)
+            c['cancelNotSentAt']=time.time()
+        save(st)
+        log('ELECTIVE_CANCEL_PREEMPTED_BEFORE_POST',kind=result.kind,
+            ordId=result.ord_id,cycleId=result.token)
+        return 'NOT_SENT_RECONCILE_REQUIRED'
+    if result.error is not None:
+        # An uncertain POST must NEVER be repeated automatically. Existing
+        # CANCELING state blocks new exposure until terminal REST proof.
+        log('ELECTIVE_CANCEL_UNCERTAIN',kind=result.kind,ordId=result.ord_id,
+            cycleId=result.token,error=type(result.error).__name__,severity='WARNING')
+        return 'UNKNOWN'
+    rows=result.reply
+    if not isinstance(rows,list) or len(rows)!=1 or not isinstance(rows[0],dict):
+        log('ELECTIVE_CANCEL_UNCERTAIN',kind=result.kind,ordId=result.ord_id,
+            cycleId=result.token,error='MalformedACK',severity='WARNING')
+        return 'UNKNOWN'
+    row=rows[0]
+    if str(row.get('ordId'))!=result.ord_id or not str(row.get('sCode','')):
+        raise ExchangeUnresolved('Background CANCEL ACK identity/sCode unknown')
+    if row['sCode']!='0':
+        if result.kind=='TP':
+            rec['cancelRejectCode']=row['sCode']
+            rec['cancelRejectAt']=time.time()
+            save(st)
+            log('TP_CANCEL_REJECTED',cycleId=result.token,ordId=result.ord_id,
+                code=row['sCode'],message=str(row.get('sMsg',''))[:120])
+        else:
+            c['cancelRejectCode']=row['sCode']
+            c['cancelRejectAt']=time.time()
+            save(st)
+            log('BUY_CANCEL_REJECTED',price=c['buyPx'],ordId=result.ord_id,
+                code=row['sCode'],message=str(row.get('sMsg',''))[:120])
+        return 'REJECTED'
+    if result.kind=='TP':
+        journal_tp('CANCEL_ACCEPTED_PENDING_FINAL',c,ordId=result.ord_id)
+    else:
+        log('BUY_CANCEL_REQUESTED',cancelled=c['buyPx'],ordId=result.ord_id)
+    log('ELECTIVE_CANCEL_ACK',kind=result.kind,ordId=result.ord_id,
+        cycleId=result.token,request_ms=round(1000*result.duration_s,1))
+    return 'ACK_PENDING_RECONCILIATION'
+
+# Avoid a permanent TP/BUY CANCELING reservation when the first POST reply
+# was ambiguous and OKX still has that EXACT exchange order live. This is a
+# bounded retry of CANCEL on the SAME ordId, never a new order or a state reset.
+ELECTIVE_CANCEL_RETRY_AFTER_SEC = 30.0
+ELECTIVE_CANCEL_MAX_RETRIES = 2
+
+
+def retry_stale_elective_cancel(st,pending,transport):
+    """Opportunistic owner-thread recovery after full coverage reconciliation.
+
+    Called AFTER urgent BUY/TP work. No retry during an execution burst or
+    while a cancel is in flight. Network GET proves identity immediately
+    before a new one-shot CANCEL of the SAME previously reserved order ID.
+    An exhausted, absent or inconsistent order remains reserved, fail-closed.
+    """
+    if transport.busy or time.monotonic()-CLEANUP_LAST_FILL_AT<TP_BUFFER_COOLDOWN:
+        return False
+    pending_byid={str(o.get('ordId')):o for o in pending if o.get('ordId')}
+    candidates=[]
+    for c in st['cycles'].values():
+        if c.get('state')=='CANCELING' and c.get('electiveCancel'):
+            candidates.append(('BUY',c,None))
+        for rec in tp_records(c):
+            if rec.get('phase')=='CANCELING' and rec.get('electiveCancel'):
+                candidates.append(('TP',c,rec))
+    # One candidate per pass; deterministic oldest-attempt first.
+    candidates.sort(key=lambda item:float((item[2] if item[2] is not None else item[1]).get('cancelRetryAt') or
+                                         (item[2] if item[2] is not None else item[1]).get('cancelAt') or 0))
+    for kind,c,rec in candidates:
+        obj=rec if rec is not None else c
+        if obj.get('cancelRejectAt'):
+            continue  # explicit rejection uses the existing reconciliation path
+        prev=float(obj.get('cancelRetryAt') or obj.get('cancelAt') or 0)
+        if prev<=0 or time.time()-prev<ELECTIVE_CANCEL_RETRY_AFTER_SEC:
+            continue
+        count=int(obj.get('electiveCancelRetryCount') or 0)
+        if count>=ELECTIVE_CANCEL_MAX_RETRIES:
+            if not obj.get('electiveCancelExhaustedAt'):
+                obj['electiveCancelExhaustedAt']=time.time();save(st)
+                log('ELECTIVE_CANCEL_RETRY_EXHAUSTED',kind=kind,
+                    ordId=obj.get('ordId'),cycleId=c.get('cycleId'),
+                    retries=count,severity='CRITICAL',
+                    message='Order remains reserved; independent grid work may continue only on verified coverage')
+            continue
+        oid=str(obj.get('ordId') or '')
+        listed=pending_byid.get(oid)
+        if not oid or listed is None or listed.get('state') not in ('live','partially_filled'):
+            continue  # no positive proof the original order is still live
+        side='buy' if kind=='BUY' else 'sell'
+        px=c['buyPx'] if kind=='BUY' else c['tpPx']
+        if (listed.get('instId')!=INST or listed.get('side')!=side or
+            listed.get('clOrdId')!=obj.get('clOrdId') or
+            D(listed.get('sz'))!=D(obj['sz']) or D(listed.get('px'))!=D(px) or
+            D(listed.get('accFillSz'))!=D(obj.get('filledBuy') if kind=='BUY' else obj.get('filled')) or
+            (kind=='TP' and listed.get('reduceOnly') not in ('true',True))):
+            raise ExchangeUnresolved('Elective CANCEL retry pending identity mismatch')
+        # A second authoritative GET protects against a terminal change since
+        # the pending snapshot; do not auto-retry on absence/unknown status.
+        try:
+            latest=A.order(oid=oid)
+        except (ExchangeTemporary,RateLimitedError):
+            return False
+        if latest is None:
+            return False
+        if (latest.get('instId')!=INST or latest.get('side')!=side or
+            latest.get('ordId')!=oid or latest.get('clOrdId')!=obj.get('clOrdId') or
+            D(latest.get('sz'))!=D(obj['sz']) or D(latest.get('px'))!=D(px) or
+            D(latest.get('accFillSz'))!=D(listed.get('accFillSz')) or
+            (kind=='TP' and latest.get('reduceOnly') not in ('true',True))):
+            raise ExchangeUnresolved('Elective CANCEL retry order identity mismatch')
+        if latest.get('state') not in ('live','partially_filled'):
+            return False
+        def durable_retry():
+            # Existing durable CANCELING intent is kept; no state reset.
+            obj['electiveCancelRetryCount']=count+1
+            obj['cancelRetryAt']=time.time()
+            save(st)
+        accepted=transport.submit(kind=kind,ord_id=oid,token=str(c['cycleId']),
+                                  durable_prepare=durable_retry,emergency=False)
+        if accepted:
+            log('ELECTIVE_CANCEL_RETRY',kind=kind,ordId=oid,
+                cycleId=c['cycleId'],attempt=count+1,
+                message='Same ordId only; no replacement order')
+        return accepted
+    return False
+
+
 class TPBufferScheduler:
     """Runtime timing only; exchange order states/cancel intent remain durable.
 
-    Each newly observed attached SELL restarts the 1500ms quiet period
+    Each confirmed BUY/TP fill restarts the 10-second quiet period
     while above the TP target. A process restart starts a fresh quiet
     period. Never sleep here or send exchange requests.
     """
@@ -2386,32 +2636,29 @@ class TPBufferScheduler:
         ids={(str(c.get('cycleId')),str(rec.get('clOrdId') or rec.get('ordId')))
              for _,c,rec in active}
         extra=len(active)>REAL_TP_TARGET
-        if extra and (self.quiet_since is None or bool(ids-self.seen)):
-            self.quiet_since=now
-        if not extra:
-            self.quiet_since=None
-            self.overflow_notified=False
+        self.quiet_since=CLEANUP_LAST_FILL_AT
+        if not extra:self.overflow_notified=False
         self.seen=ids
 
     def cancel_due(self,count,now):
         if count<=REAL_TP_TARGET:return False
         if self.last_cancel_at is not None and now-self.last_cancel_at<TP_BUFFER_CANCEL_INTERVAL:
             return False
-        # Normal 15/25/55 TP bursts never force immediate cancellation.
-        # At the HARD limit, trim one at a time as soon as possible.
-        if count>=REAL_TP_MAX:return True
-        return False
+        # Emergency: keep enough capacity for the full BUY buffer and
+        # exchange-attached TP reserve. No quiet wait under pressure.
+        if count+BUY_MAX+5>=REAL_TP_MAX:return True
+        return now-CLEANUP_LAST_FILL_AT>=TP_BUFFER_COOLDOWN
 
     def canceled(self,now):
         self.last_cancel_at=now
 
 
-def maintain_virtual_tp(st,pending,position,bid=None,tp_buffer=None):
+def maintain_virtual_tp(st,pending,position,bid=None,tp_buffer=None,cancel_override=None):
     real,_,_=coverage_audit(st,pending,position)
     active=real_tp_active(st)
     if tp_buffer is None and real>REAL_TP_TARGET:
         # Offline callers may omit controller.  LIVE loop always passes one
-        # persistent scheduler; an implicit one never bypasses 1.5s grace.
+        # persistent scheduler; an implicit one never bypasses the trade-quiet grace.
         tp_buffer=TPBufferScheduler()
     now=time.monotonic()
     if tp_buffer is not None:tp_buffer.observe(active,now)
@@ -2422,7 +2669,11 @@ def maintain_virtual_tp(st,pending,position,bid=None,tp_buffer=None):
     elif tp_buffer is not None and real<REAL_TP_MAX:
         tp_buffer.overflow_notified=False
     if real>REAL_TP_TARGET:
-        # Cancel surplus only after a quiet interval (or at the 150 cap).
+        # One uncertain elective SELL cancel may remain live and reserved.
+        # Never pile further voluntary cancels onto an unresolved one.
+        if any(rec.get('phase')=='CANCELING' for _,_,rec in active):
+            return 'NONE'
+        # Cancel surplus only after trade-quiet interval (or pressure threshold).
         # During active BUY refill, the live loop defers this cleanup.
         if not tp_buffer.cancel_due(real,now):return 'NONE'
         # Exactly ONE cancel per reconciled REST snapshot, and no faster than
@@ -2430,14 +2681,18 @@ def maintain_virtual_tp(st,pending,position,bid=None,tp_buffer=None):
         candidates=tp_buffer_candidates(active,bid)
         if not candidates:die('TP buffer has no removable surplus')
         _,c,rec=candidates[0]
-        if (tp_buffer is not None and callable(getattr(tp_buffer, 'preempt', None))
-                and tp_buffer.preempt()):
-            return 'NONE'
+        capacity_pressure=(real+BUY_MAX+5>=REAL_TP_MAX)
+        preempt=(getattr(tp_buffer,'critical_preempt',None) if capacity_pressure
+                 else getattr(tp_buffer,'preempt',None))
+        if callable(preempt) and preempt():return 'NONE'
         gap_ms=(round((now-tp_buffer.last_cancel_at)*1000,1)
                 if tp_buffer and tp_buffer.last_cancel_at is not None else None)
         quiet_ms=(round((now-tp_buffer.quiet_since)*1000,1)
                   if tp_buffer and tp_buffer.quiet_since is not None else None)
-        result=cancel_tp(st,c,rec)
+        if cancel_override is not None:
+            if not cancel_override(st,c,rec,capacity_pressure):return 'NONE'
+        else:
+            cancel_tp(st,c,rec)
         tp_buffer.canceled(time.monotonic())
         log('TP_BUFFER_CLEANUP',price=c['tpPx'],
             buyPx=c['buyPx'],tpPx=c['tpPx'],cycleId=c['cycleId'],bid=str(bid),
@@ -2446,6 +2701,11 @@ def maintain_virtual_tp(st,pending,position,bid=None,tp_buffer=None):
             quiet_ms=quiet_ms,cancel_gap_ms=gap_ms,
             reason='order_cap' if real>=REAL_TP_MAX else 'cooldown')
         return 'CANCEL'
+    # Quiet grace is ONLY for elective rotation/cleanup, NEVER for
+    # replenishing a missing real protective TP below its configured target.
+    # The independent fresh coverage/position/price gates still apply.
+    if real >= REAL_TP_TARGET and tp_buffer is not None and tp_buffer.quiet_since is not None and now-tp_buffer.quiet_since<TP_BUFFER_COOLDOWN:
+        return 'NONE'
     # At the target choose the nearest virtual TP only if it is closer
     # than the farthest currently live SELL. This avoids needless churn.
     virtual=sorted((item for item in virtual_cycles(st)
@@ -2461,6 +2721,8 @@ def maintain_virtual_tp(st,pending,position,bid=None,tp_buffer=None):
     if not virtual:return 'NONE'
     active=real_tp_active(st)
     if active and real>=REAL_TP_TARGET:
+        if any(rec.get('phase')=='CANCELING' for _,_,rec in active):
+            return 'NONE'
         farthest=max(active,key=lambda y:D(y[1]['tpPx']))
         if (not virtual[0][1].get('tpFailureManualReview') and
             D(virtual[0][1]['tpPx'])<D(farthest[1]['tpPx'])):
@@ -2474,7 +2736,12 @@ def maintain_virtual_tp(st,pending,position,bid=None,tp_buffer=None):
                 virtual[0][1]['tpRestoreRetryAt']=time.time()+30
                 save(st)
                 return 'NONE'
-            cancel_tp(st,farthest[1],farthest[2]);return 'CANCEL'
+            if cancel_override is not None:
+                if not cancel_override(st,farthest[1],farthest[2],False):return 'NONE'
+            else:
+                cancel_tp(st,farthest[1],farthest[2])
+            tp_buffer.canceled(time.monotonic()) if tp_buffer is not None else None
+            return 'CANCEL' 
         return 'NONE'
     if real<REAL_TP_TARGET:
         # A rejected SELL can be retried only after its cooldown; an
@@ -3164,6 +3431,9 @@ SYNC_IDLE_AUDITS_EXPERIMENT = True
 B1_ACTIVE_BACKGROUND_EXPERIMENT = True
 
 def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
+    # Starts a new complete 10-second grace AFTER startup/account checks,
+    # not at module import (which can precede slow Reader/ledger bootstrap).
+    note_cleanup_fill()
     last_status_key=None
     last_print=0
     last_sync_notice=0.0
@@ -3174,12 +3444,42 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
     last_protected_signature=None
     sync_since=None
     sync_warn_level=0
+    last_isolated_cancel_ids=()
     maker_cost=None
     tp_buffer=TPBufferScheduler()
     # Local hint only: it does not authorize trading or consume WS causes.
     tp_buffer.preempt=lambda: (watcher.private_wake.is_set()
         or not watcher.events.empty() or control_mode() != 'RUN'
         or reader_exit_priority_hint(st, market))
+    # A single in-process transport is permitted to send a previously
+    # durably authorized elective CANCEL. No second strategy or state writer.
+    # Main thread remains the only owner of order state and OKX ACK handling.
+    from okx_cleanup_transport import SingleOwnerCancelTransport
+    def worker_critical_preempt():
+        # Worker is REST-only: never invoke control_mode(), which may
+        # persist the account SOFT latch and thereby violate single-owner
+        # durable-state writes. This predicate performs ONLY reads.
+        try:
+            if ACCOUNT_SOFT_STOP.exists():return True
+            if CONTROL_FILE.exists():
+                control=json.loads(CONTROL_FILE.read_text(encoding='utf-8'))
+                if not isinstance(control,dict) or control.get('mode')!='RUN':
+                    return True
+            return reader_exit_priority_hint(st,market)
+        except Exception:
+            return True  # An unreadable control state forbids elective POST.
+    def worker_urgent_preempt():
+        return (watcher.private_wake.is_set() or not watcher.events.empty()
+                or worker_critical_preempt())
+    elective_cancel_transport=SingleOwnerCancelTransport(
+        send_cancel=lambda oid:A.req('POST','/api/v5/trade/cancel-order',
+                                     body={'instId':INST,'ordId':oid},background=True),
+        urgent_pending=worker_urgent_preempt,
+        critical_pending=worker_critical_preempt,
+        wake_owner=watcher.wake.set,
+        interval_s=TP_BUFFER_CANCEL_INTERVAL)
+    tp_buffer.critical_preempt=lambda: (control_mode()!='RUN'
+        or reader_exit_priority_hint(st,market))
     coverage_hold_reason=None
     coverage_hold_attempts=0
     previous_trigger='internal'
@@ -3204,6 +3504,7 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             started=time.monotonic()
             loop_start_ns=time.perf_counter_ns()
             mode=control_mode()
+            consume_elective_cancel(st,elective_cancel_transport)
             ws_epoch_at_start=(watcher.connection_epoch,market.connection_epoch)
             if st.get('terminal_mode'):
                 control_ack(mode,st['terminal_mode'])
@@ -3292,6 +3593,25 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                 if _b1_local is not None:
                     _b1_local.b1_active_context=None
             last_full_reconcile_mono=time.monotonic()
+            # Never submit a new order while an elective CANCEL POST remains
+            # in flight. After completion, exact fresh pending + coverage
+            # permits only independent grid work; CANCELING stays durable.
+            if elective_cancel_transport.busy:
+                all_resolved=False
+            # Only the uncertain SAME ordId remains reserved. Independent
+            # grid writes may resume after FULL position and coverage proof.
+            if all_resolved:
+                isolated_ids=tuple(sorted(
+                    [('BUY',str(c.get('ordId'))) for c in st['cycles'].values()
+                     if c.get('state')=='CANCELING' and c.get('electiveCancel')]+
+                    [('TP',str(r.get('ordId'))) for c in st['cycles'].values()
+                     for r in tp_records(c)
+                     if r.get('phase')=='CANCELING' and r.get('electiveCancel')]))
+                if isolated_ids!=last_isolated_cancel_ids and isolated_ids:
+                    log('ELECTIVE_CANCEL_ISOLATED',count=len(isolated_ids),
+                        kinds=sorted({kind for kind,_ in isolated_ids}),
+                        message='Exact exchange-live orders stay reserved; independent levels may trade after full coverage audit')
+                last_isolated_cancel_ids=isolated_ids
             b1_shadow_changed=bool(getattr(_b1_local,'b1_shadow_changed',False))
             if _b1_local is not None:
                 _b1_local.b1_shadow_capture=False
@@ -3445,10 +3765,14 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             # now waits until after the BUY refill. Surplus already waits.
             real_tp_now=len(real_tp_active(st))
             tp_buffer.observe(real_tp_active(st),time.monotonic())
-            if real_tp_now>=REAL_TP_TARGET:
+            tp_pressure=(real_tp_now>REAL_TP_TARGET and
+                         real_tp_now+BUY_MAX+5>=REAL_TP_MAX)
+            if real_tp_now>=REAL_TP_TARGET and not tp_pressure:
                 tp_action='NONE'
             else:
-                tp_action=maintain_virtual_tp(st,pending,actual,bid,tp_buffer)
+                tp_action=maintain_virtual_tp(st,pending,actual,bid,tp_buffer,
+                    cancel_override=lambda _s,_c,_r,_emergency:queue_elective_tp_cancel(
+                        _s,_c,_r,elective_cancel_transport,emergency=_emergency))
             if tp_action!='NONE':
                 watcher.wake.wait(0.10 if tp_action=='CANCEL' else 0.15)
                 watcher.wake.clear()
@@ -3542,10 +3866,10 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                 reserve=False
             slots=(BUY_MAX if reserve else TARGET)-len(active)
             real_tp_count=len(real_tp_active(st))
-            # All outstanding SELLs count toward the 150-instrument cap.
+            # All outstanding SELLs count toward the operational capacity budget.
             # Keep the existing 5-slot headroom for asynchronously attached
             # TP; never borrow capacity from unresolved exchange orders.
-            allowed_buys=max(0,min(BUY_MAX,REDUCE_ONLY_HARD_CAP-real_tp_count-5))
+            allowed_buys=max(0,min(BUY_MAX,REAL_TP_MAX-real_tp_count-5))
             cap=(0 if waiting or mode!='RUN' else max(0,min(slots,allowed_buys-len(active),
                  CAP-count(st),EX_CAP-len(pending))))
             candidates=[]
@@ -3594,7 +3918,7 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                 latency_ms('buy_batch',buy_batch_start,
                            attempted=len(candidates),placed=placed,
                            active_buys=len(active_buy(st)),target_buys=TARGET)
-            # After 1.5s without ANY grid shift, trim surplus BUYs BOTTOM-UP.
+            # After 10s without a confirmed fill, trim surplus BUYs BOTTOM-UP.
             # At the 30-BUY ceiling, a missing level may release the LOWEST
             # confirmed safe BUY earlier. Never choose cancellation candidates
             # based on the computed desired grid; it is only for additions.
@@ -3602,7 +3926,7 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             active=active_buy(st)
             # Avoid an extra REST ticker request on every idle second when
             # no cleanup is due (the public WS quote can be >3s old).
-            cleanup_due=(time.monotonic()-live_loop._shift_at>=BUY_BUFFER_COOLDOWN
+            cleanup_due=(time.monotonic()-CLEANUP_LAST_FILL_AT>=BUY_BUFFER_COOLDOWN
                          and len(active)>=TARGET+1)
             capacity_due=(len(active)>=BUY_MAX and bool(missing))
             if (mode=='RUN' and not waiting and len(active)>=TARGET
@@ -3615,11 +3939,15 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                 fresh_desired=desired_buy_levels(fresh_top,occupied_tp)
                 still_missing=bool(fresh_desired-{D(c['buyPx']) for c in active})
                 needs_room=len(active)>=BUY_MAX and still_missing
-                cooling=time.monotonic()-live_loop._shift_at>=BUY_BUFFER_COOLDOWN
+                cooling=time.monotonic()-CLEANUP_LAST_FILL_AT>=BUY_BUFFER_COOLDOWN
                 max_remove=(max(0,len(active)-TARGET) if cooling
                             else (1 if needs_room else 0))
+                # Never enqueue a burst. Guard global cleanup spacing.
+                last_cancel=getattr(live_loop,'_last_cleanup_cancel_at',None)
+                cancel_spacing_ok=(last_cancel is None or
+                    time.monotonic()-last_cancel>=TP_BUFFER_CANCEL_INTERVAL)
                 selected,protected=plan_buy_buffer_cleanup(
-                    active,fresh_bid,min(max_remove,5))
+                    active,fresh_bid,min(max_remove,1) if cancel_spacing_ok else 0)
                 for c in selected:
                     # A fresh quote immediately before each cancel protects
                     # against mid-batch reversal and REST/WS scheduling delays.
@@ -3631,7 +3959,7 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                         live_loop._shift_at=time.monotonic()
                         # New grid shift: allow cancellation ONLY to free
                         # capacity at the hard 30-BUY ceiling. Otherwise wait
-                        # the complete 1.5s cooldown again.
+                        # the complete 10s trade-quiet cooldown again.
                         latest_missing=bool(cancel_desired-
                             {D(x['buyPx']) for x in active_buy(st)})
                         if not (len(active_buy(st))>=BUY_MAX and latest_missing):
@@ -3647,7 +3975,12 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                         log('BUY_CANCEL_DEFERRED',price=c['buyPx'],
                             bid=str(cancel_bid),reason='Lowest safe BUY changed before cancel')
                         break
-                    if cancel_lowest_specific(st,c):
+                    urgent_exit=(control_mode()!='RUN' or reader_exit_priority_hint(st,market))
+                    if urgent_exit or ((watcher.private_wake.is_set() or not watcher.events.empty())
+                            and not needs_room):
+                        break
+                    if queue_elective_buy_cancel(st,c,elective_cancel_transport,
+                            emergency=needs_room):
                         moved+=1
                 if moved:
                     log('BUY_BUFFER_CLEANUP',count=moved,
@@ -3665,6 +3998,27 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                         last_protected_signature=protected_signature
                 else:
                     last_protected_signature=None
+            # TP surplus/rotation is elective and comes AFTER urgent BUY work.
+            # One durable cancel per reconciled pass; preemption is checked
+            # inside maintain_virtual_tp before its synchronous REST call.
+            if (mode=='RUN' and not waiting and not placed and not moved
+                    and not watcher.private_wake.is_set()
+                    and watcher.events.empty() and not reader_exit_priority_hint(st,market)):
+                tp_action=maintain_virtual_tp(st,pending,actual,bid,tp_buffer,
+                    cancel_override=lambda _s,_c,_r,_emergency:queue_elective_tp_cancel(
+                        _s,_c,_r,elective_cancel_transport,emergency=_emergency))
+                if tp_action!='NONE':
+                    previous_trigger='internal'
+                    continue
+            # P0: bounded recovery of a previously uncertain elective CANCEL.
+            # No duplicate order is ever created and independent BUY/TP work
+            # above has precedence over this noncritical maintenance.
+            if (mode=='RUN' and not placed and not moved and not waiting
+                    and not watcher.private_wake.is_set() and watcher.events.empty()
+                    and not reader_exit_priority_hint(st,market)):
+                if retry_stale_elective_cancel(st,pending,elective_cancel_transport):
+                    previous_trigger='internal'
+                    continue
             # surplus TP cleanup is opportunistic and one-at-a-time,
             # after a pass with no new BUY/BUY-cancel request. This preserves
             # the existing rule: every TP cancellation must reconcile fully
@@ -3710,7 +4064,7 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             earliest_due=idle_deadline(
                 now=time.monotonic(),
                 buy_over_target=len(active_buy(st))>TARGET,
-                buy_shift_at=live_loop._shift_at,
+                buy_shift_at=CLEANUP_LAST_FILL_AT,
                 buy_cooldown=BUY_BUFFER_COOLDOWN,
                 tp_over_target=len(real_tp_active(st))>REAL_TP_TARGET,
                 tp_quiet_since=tp_buffer.quiet_since,

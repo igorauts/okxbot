@@ -1,6 +1,13 @@
 # OKX Grid Bot
 
-**Последний опубликованный релиз: [v0.7.50](https://github.com/igorauts/okxbot/releases/tag/v0.7.50).**
+## v0.7.56 — LIVE trading engine (04.11.2026)
+- v0.7.54/55: TP/BUY cleanup and nonblocking isolated elective CANCEL reconciliation.
+- v0.7.56: real protective LIMIT TP is restored without elective 10-second quiet cooldown when below target.
+- Seven active engines verified at publication preflight; no VPS changes on GitHub push.
+- See `V0756_LIVE_RELEASE_NOTES_RU.md` and the GitHub Release for details.
+
+
+**Последний опубликованный релиз: [v0.7.56](https://github.com/igorauts/okxbot/releases/tag/v0.7.56).**
 
 Алгоритмический LONG Grid Bot для реального OKX-аккаунта: линейные бессрочные
 USDT-margined SWAP, режим NET/CROSS. Позиции, ордера и результаты учитываются

@@ -140,7 +140,7 @@ class AttachedTPTests(unittest.TestCase):
             def canceled(self,*a):pass
         ns.update(A=SimpleNamespace(req=lambda *a,**kw:[{'instId':'DOOD-USDT-SWAP',
                   'sellLmt':sell_limit[0]}]),
-                  REAL_TP_MAX=150,coverage_audit=lambda *a:(2,0,1),
+                  REAL_TP_MAX=100,TP_BUFFER_COOLDOWN=10.0,coverage_audit=lambda *a:(2,0,1),
                   real_tp_active=lambda st:real_orders,
                   virtual_cycles=lambda st:[('v',virtual)],
                   tp_quantity_placeable=lambda sz:True,

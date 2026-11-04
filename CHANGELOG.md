@@ -1,3 +1,10 @@
+## v0.7.56 — 2026-11-04 — 7/7 LIVE; elective CANCEL isolation and urgent LIMIT TP rearm
+- v0.7.54: safe background cleanup of buffer orders.
+- v0.7.55: isolated uncertain elective CANCEL, exact-ordId retry, full coverage protection, no global trade starvation.
+- v0.7.56: real LIMIT TP below target bypasses elective 10s quiet timer; no change to virtual-MARKET exit priority.
+- 7/7 live engine rollout, financial audits, and selected local TP transition telemetry checked.
+- GitHub publication is source-only; does not touch LIVE services or exchange.
+
 ## v0.7.49 — 2026-11-01 — Telegram Monitor recovery maintenance (engine 0.7.47)
 - P0: BUY 0/N follower recovery from malformed lines, overflow, stale cursor >45s, ACK errors; single gap incident per episode; live tests no fault injection.
 - New regression tests and updated full-grid contract; full run_checks.sh PASS required before push.
