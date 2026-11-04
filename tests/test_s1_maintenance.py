@@ -49,45 +49,64 @@ class S1Contracts(unittest.TestCase):
 
     def test_sampler_units_completeness(self):
         mod=get('offline_sampler_a','okx_vps_resource_collector.py')
-        self.assertEqual(len(mod.UNITS[:len(mod.BOTS)]),len(mod.BOTS))
-        self.assertEqual(len(set(mod.BOTS)),len(mod.BOTS))
-        self.assertIn('if len(result)<len(UNITS)',(ROOT/'okx_vps_resource_collector.py').read_text())
+        self.assertFalse(hasattr(mod,'BOTS'))
+        self.assertFalse(hasattr(mod,'UNITS'))
+        self.assertTrue(hasattr(mod,'discover_units'))
+        answers=iter((
+            types.SimpleNamespace(returncode=0,stdout=(
+                'okx-grid-testalpha.service loaded active running Test\n'
+                'okx-grid-archived.service loaded inactive dead Archived\n')),
+            types.SimpleNamespace(returncode=0,stdout=(
+                'okx-grid-testbeta.service enabled enabled\n'
+                'okx-grid-archived.service disabled enabled\n'))))
+        with mock.patch.object(mod.subprocess,'run',side_effect=lambda *a,**k:next(answers)):
+            units=mod.discover_units()
+        self.assertIn('okx-grid-testalpha.service',units)
+        self.assertIn('okx-grid-testbeta.service',units)
+        self.assertNotIn('okx-grid-archived.service',units)
+        self.assertEqual(set(units[-len(mod.BASE_UNITS):]),set(mod.BASE_UNITS))
 
     def test_sampler_does_not_call_third_status_fetch(self):
         mod=get('offline_sampler_b','okx_vps_resource_collector.py')
-        units={u:{'ActiveState':'active','MainPID':'9','NRestarts':'0'} for u in mod.UNITS}
-        g={u:{'cpu_usage_usec':100,'io_bytes':{x:0 for x in ('rbytes','wbytes','rios','wios')}} for u in mod.UNITS}
-        ticks=iter(((1.0,[1,1,1,1,1,1,1,1],{'pswpin':0,'pswpout':0},g,units),
-                    (1.25,[2,2,2,2,2,2,2,2],{'pswpin':0,'pswpout':0},g,units)))
-        with mock.patch.object(mod,'tick',side_effect=lambda:next(ticks)), \
-             mock.patch.object(mod,'active_units',side_effect=AssertionError('third systemctl')), \
+        units=('okx-grid-testalpha.service',)+mod.BASE_UNITS
+        g={u:{'cpu_usage_usec':100,'io_bytes':{k:0 for k in ('rbytes','wbytes','rios','wios')}} for u in units}
+        states={u:{'ActiveState':'active','MainPID':'9','NRestarts':'0'} for u in units}
+        ticks=iter(((1.0,[1,1,1,1,1,1,1,1],{'pswpin':0,'pswpout':0},g,states),
+                    (1.25,[2,2,2,2,2,2,2,2],{'pswpin':0,'pswpout':0},g,states)))
+        calls=[]
+        def observed_tick(given):
+            calls.append(given)
+            return next(ticks)
+        with mock.patch.object(mod,'discover_units',return_value=units), \
+             mock.patch.object(mod,'tick',side_effect=observed_tick), \
+             mock.patch.object(mod,'active_units',side_effect=AssertionError('third status')), \
              mock.patch.object(mod.time,'sleep',return_value=None), \
              mock.patch.object(mod.shutil,'disk_usage',return_value=types.SimpleNamespace(free=2**30)):
             row=mod.sample()
-        self.assertEqual(set(row['units']),set(mod.UNITS))
+        self.assertEqual(calls,[units,units])
+        self.assertEqual(set(row['units']),set(units))
 
     def test_sampler_refuses_missing_bot(self):
         mod=get('offline_sampler_c','okx_vps_resource_collector.py')
-        botunits=mod.UNITS[:len(mod.BOTS)]
-        observed={u:{'active':'active'} for u in list(botunits[1:])+list(mod.UNITS[len(mod.BOTS):])}
         with tempfile.TemporaryDirectory() as td, \
              mock.patch.object(mod,'ROOT',Path(td)), \
-             mock.patch.object(mod,'sample',return_value={'utc':'test','units':observed}):
-            with self.assertRaisesRegex(RuntimeError,'seven-bot'):
+             mock.patch.object(mod,'sample',return_value={'utc':'test','units':{}}):
+            with self.assertRaisesRegex(RuntimeError,'No dynamically discovered'):
                 mod.main()
             self.assertFalse(list(Path(td).glob('*.jsonl')))
 
     def test_sampler_records_inactive_bot(self):
         mod=get('offline_sampler_d','okx_vps_resource_collector.py')
-        observed={u:{'active':('inactive' if u == mod.UNITS[0] else 'active')}
-                  for u in mod.UNITS[:len(mod.BOTS)]}
+        unit='okx-grid-testalpha.service'
+        observed={unit:{'active':'inactive'}}
         with tempfile.TemporaryDirectory() as td, \
              mock.patch.object(mod,'ROOT',Path(td)), \
-             mock.patch.object(mod,'sample',return_value={'utc':'test','units':observed}):
+             mock.patch.object(mod,'sample',return_value={'utc':'test','units':observed}), \
+             mock.patch('builtins.print'):
             mod.main()
             rows=list(Path(td).glob('*.jsonl'))
             self.assertEqual(len(rows),1)
-            self.assertEqual(json.loads(rows[0].read_text())['units'][mod.UNITS[0]]['active'],'inactive')
+            self.assertEqual(json.loads(rows[0].read_text())['units'][unit]['active'],'inactive')
 
 if __name__ == '__main__':
     unittest.main()

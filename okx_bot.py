@@ -2400,8 +2400,7 @@ class TPBufferScheduler:
         # Normal 15/25/55 TP bursts never force immediate cancellation.
         # At the HARD limit, trim one at a time as soon as possible.
         if count>=REAL_TP_MAX:return True
-        return (self.quiet_since is not None
-                and now-self.quiet_since>=TP_BUFFER_COOLDOWN)
+        return False
 
     def canceled(self,now):
         self.last_cancel_at=now
@@ -2431,6 +2430,9 @@ def maintain_virtual_tp(st,pending,position,bid=None,tp_buffer=None):
         candidates=tp_buffer_candidates(active,bid)
         if not candidates:die('TP buffer has no removable surplus')
         _,c,rec=candidates[0]
+        if (tp_buffer is not None and callable(getattr(tp_buffer, 'preempt', None))
+                and tp_buffer.preempt()):
+            return 'NONE'
         gap_ms=(round((now-tp_buffer.last_cancel_at)*1000,1)
                 if tp_buffer and tp_buffer.last_cancel_at is not None else None)
         quiet_ms=(round((now-tp_buffer.quiet_since)*1000,1)
@@ -3174,6 +3176,10 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
     sync_warn_level=0
     maker_cost=None
     tp_buffer=TPBufferScheduler()
+    # Local hint only: it does not authorize trading or consume WS causes.
+    tp_buffer.preempt=lambda: (watcher.private_wake.is_set()
+        or not watcher.events.empty() or control_mode() != 'RUN'
+        or reader_exit_priority_hint(st, market))
     coverage_hold_reason=None
     coverage_hold_attempts=0
     previous_trigger='internal'
@@ -3596,92 +3602,23 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             active=active_buy(st)
             # Avoid an extra REST ticker request on every idle second when
             # no cleanup is due (the public WS quote can be >3s old).
-            cleanup_due=(time.monotonic()-live_loop._shift_at>=BUY_BUFFER_COOLDOWN
-                         and len(active)>=TARGET+1)
+            cleanup_due=False
             capacity_due=(len(active)>=BUY_MAX and bool(missing))
-            if (mode=='RUN' and not waiting and len(active)>=TARGET
-                and (cleanup_due or capacity_due)):
-                fresh_bid=market.get_bid()
-                fresh_top=grid_top(fresh_bid)
-                if fresh_top!=live_loop._shift_top:
-                    live_loop._shift_top=fresh_top
-                    live_loop._shift_at=time.monotonic()
-                fresh_desired=desired_buy_levels(fresh_top,occupied_tp)
-                still_missing=bool(fresh_desired-{D(c['buyPx']) for c in active})
-                needs_room=len(active)>=BUY_MAX and still_missing
-                cooling=time.monotonic()-live_loop._shift_at>=BUY_BUFFER_COOLDOWN
-                max_remove=(max(0,len(active)-TARGET) if cooling
-                            else (1 if needs_room else 0))
-                selected,protected=plan_buy_buffer_cleanup(
-                    active,fresh_bid,min(max_remove,5))
-                for c in selected:
-                    # A fresh quote immediately before each cancel protects
-                    # against mid-batch reversal and REST/WS scheduling delays.
-                    cancel_bid=market.get_bid()
-                    cancel_top=grid_top(cancel_bid)
-                    cancel_desired=desired_buy_levels(cancel_top,occupied_tp)
-                    if cancel_top!=live_loop._shift_top:
-                        live_loop._shift_top=cancel_top
-                        live_loop._shift_at=time.monotonic()
-                        # New grid shift: allow cancellation ONLY to free
-                        # capacity at the hard 30-BUY ceiling. Otherwise wait
-                        # the complete 1.5s cooldown again.
-                        latest_missing=bool(cancel_desired-
-                            {D(x['buyPx']) for x in active_buy(st)})
-                        if not (len(active_buy(st))>=BUY_MAX and latest_missing):
-                            log('BUY_CANCEL_DEFERRED',bid=str(cancel_bid),
-                                reason='Grid shifted while cleanup was pending')
-                            break
-                    # Re-evaluate ALL currently open BUYs under the latest BID.
-                    # The originally selected order must STILL be the lowest
-                    # cancellable one: never cancel a higher price by mistake.
-                    fresh_lowest,_=plan_buy_buffer_cleanup(
-                        active_buy(st),cancel_bid,1)
-                    if not fresh_lowest or fresh_lowest[0].get('ordId')!=c.get('ordId'):
-                        log('BUY_CANCEL_DEFERRED',price=c['buyPx'],
-                            bid=str(cancel_bid),reason='Lowest safe BUY changed before cancel')
-                        break
-                    if cancel_lowest_specific(st,c):
-                        moved+=1
-                if moved:
-                    log('BUY_BUFFER_CLEANUP',count=moved,
-                        bid=str(fresh_bid),age_ms=int(
-                            1000*(time.monotonic()-live_loop._shift_at)))
-                elif max_remove and protected:
-                    # emit only when the protected identity set changes.
-                    # This does not modify which BUYs are safe to cancel.
-                    protected_signature=tuple(sorted(str(c.get('ordId') or c.get('clOrdId') or c['buyPx'])
-                                                      for c in protected))
-                    if protected_signature!=last_protected_signature:
-                        log('BUY_CANCEL_PROTECTED',
-                            levels=[c['buyPx'] for c in protected[:5]],
-                            bid=str(fresh_bid),reason='Near BID; retained inside 30 BUY limit')
-                        last_protected_signature=protected_signature
-                else:
-                    last_protected_signature=None
+            if capacity_due:
+                if not getattr(live_loop, "_buy_cap_reported", False):
+                    log("BUY_CAPACITY_HOLD", active=len(active), maximum=BUY_MAX,
+                        reason="No voluntary BUY CANCEL; retain confirmed orders")
+                    live_loop._buy_cap_reported=True
+            else:
+                live_loop._buy_cap_reported=False
             # surplus TP cleanup is opportunistic and one-at-a-time,
             # after a pass with no new BUY/BUY-cancel request. This preserves
             # the existing rule: every TP cancellation must reconcile fully
             # before any subsequent exchange write.
-            if (not placed and not moved and
-                    len(real_tp_active(st))>REAL_TP_TARGET):
-                trim_action=maintain_virtual_tp(st,pending,actual,
-                    market.get_bid(),tp_buffer)
-                if trim_action!='NONE':
-                    watcher.wake.wait(0.10 if trim_action=='CANCEL' else 0.15)
-                    watcher.wake.clear()
-                    continue
+            # P0: capacity HOLD: no discretionary TP CANCEL or TP rotation in LIVE.
             # Rotation at the baseline is not a hard safety rearm: only do it
             # on an idle pass, never ahead of restoring missing BUY slots.
-            if (not placed and not moved
-                    and len(real_tp_active(st))==REAL_TP_TARGET
-                    and virtual_cycles(st)):
-                rotate_action=maintain_virtual_tp(st,pending,actual,
-                    market.get_bid(),tp_buffer)
-                if rotate_action!='NONE':
-                    watcher.wake.wait(0.15)
-                    watcher.wake.clear()
-                    continue
+            # P0: capacity HOLD: no discretionary TP CANCEL or TP rotation in LIVE.
             states={}
             for c in st['cycles'].values():
                 states[c['state']]=states.get(c['state'],0)+1
@@ -4299,7 +4236,7 @@ def stats_capture_bid(market=None):
         return value
     return A.ticker()
 
-def print_full_stats(pnl=None, *, require_complete=False, market=None):
+def print_full_stats(pnl=None, *, require_complete=False, market=None, stats_cache=None, finance_cache=None):
     """Complete verified account snapshot anchored to one pre-REST state.
 
     Never demand that trading stop while the history calls run. The report's
@@ -4320,14 +4257,16 @@ def print_full_stats(pnl=None, *, require_complete=False, market=None):
     # Archive captured immediately after the state. The state view wins for
     # duplicate cycle IDs, so a later archive compaction cannot replace it.
     archive_start=clock()
-    archive=archived_rows()
+    archive=(stats_cache.archive_rows() if stats_cache is not None else archived_rows())
     archive_done=clock()
     bid=stats_capture_bid(market) if market is not None else A.ticker()
     bid_done=clock()
     captured_at=time.time()
     t_capture=clock()
     expected=expected_filled_orders(st,snapshot_archive=archive)
-    fetched=stats_exchange_fills(st,snapshot_archive=archive,expected=expected)
+    fetched=(stats_cache.expected_rows(expected,FILL_STORE.ensure_expected)
+             if stats_cache is not None else
+             stats_exchange_fills(st,snapshot_archive=archive,expected=expected))
     t_fills=clock()
     fills_breakdown=getattr(getattr(globals().get('FILL_STORE'),'perf',None),'last',{})
     # A BUY/SELL can fill AGAIN on the same ordId while REST paginates. Its
@@ -4338,7 +4277,17 @@ def print_full_stats(pnl=None, *, require_complete=False, market=None):
         if require_complete:
             raise ExchangeUnresolved('Incomplete/straddling fills in mandatory pre-LIVE audit')
         return False
-    d=full_stats_snapshot(st,fills,bid,CONTRACT_VALUE,snapshot_archive=archive)
+    if finance_cache is not None:
+        if stats_cache is None or require_complete:
+            raise RuntimeError('Incremental finance only supported in independently verified LIVE StatsWorker')
+        d,cached_past24,finance_mode=finance_cache.calculate(
+            st,archive,fills,bid,CONTRACT_VALUE,int(captured_at*1000),
+            full=full_stats_snapshot,pct=stats_pct,rolling=_last_24h_profit,
+            allocate=allocated_market_fills,source_cache=stats_cache)
+    else:
+        d=full_stats_snapshot(st,fills,bid,CONTRACT_VALUE,snapshot_archive=archive)
+        cached_past24=None
+        finance_mode='original_full' 
     t_calculated=clock()
     if not d['complete']:
         print('⚠️ Статистика неполная: часть исполнений отсутствует',flush=True)
@@ -4370,8 +4319,8 @@ def print_full_stats(pnl=None, *, require_complete=False, market=None):
     # with the completion time.  Consumers assess freshness by captured_at.
     now=captured_at
     _, capital_top=_first_anchor(fills)
-    past24=(_last_24h_profit(st,fills,CONTRACT_VALUE,int(now*1000),snapshot_archive=archive)
-            if capital_top is not None else None)
+    past24=(cached_past24 if finance_cache is not None else
+            _last_24h_profit(st,fills,CONTRACT_VALUE,int(now*1000),snapshot_archive=archive)) if capital_top is not None else None
     report=format_okx_report(st,fills,d,now=now,snapshot_archive=archive,precomputed_24h=past24)
     detail=performance_snapshot(st,fills,d,now,snapshot_archive=archive,precomputed_24h=past24)
     t_render=clock()
@@ -4393,6 +4342,13 @@ def print_full_stats(pnl=None, *, require_complete=False, market=None):
             'performance_v0724': detail,  # stable legacy wire alias
             'report': report,
         })
+    if LIVE and stats_cache is not None:
+        checkpoint=stats_cache.checkpoint_metadata(financial_signature(st),now)
+        if checkpoint is not None:
+            atomic_json(ROOT / 'state' / 'stats_checkpoint.json', checkpoint)
+    if finance_cache is not None and stats_cache is not None:
+        # Clear only after full financial + ledger verification and report write.
+        stats_cache.last_added_order_ids.clear()
     t_written=clock()
     # Wall interval anchors allow OFFLINE overlap analysis with WS→intent.
     # These records are enqueued asynchronously *after* finance calculation;
@@ -4576,6 +4532,10 @@ class StatsWorker(threading.Thread):
         super().__init__(daemon=True)
         self.pnl=pnl
         self.market=market
+        from okx_stats_incremental_runtime import StatsSourceCache
+        self.stats_cache=StatsSourceCache(FILL_DB,ARCHIVE_DB,INST)
+        from okx_stats_finance_incremental import IncrementalFinance
+        self.finance_cache=IncrementalFinance()
 
     def run(self):
             last_attempt=0.0
@@ -4595,7 +4555,7 @@ class StatsWorker(threading.Thread):
                             due=financial_signature(current)!=anchor.get('signature')
                     if due:
                         last_attempt=now
-                        successful=bool(print_full_stats(self.pnl,market=self.market))
+                        successful=bool(print_full_stats(self.pnl,market=self.market,stats_cache=self.stats_cache,finance_cache=self.finance_cache))
                         unsuccessful=not successful
                         if successful:last_success=time.monotonic()
                 except RateLimitedError:

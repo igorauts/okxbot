@@ -526,7 +526,110 @@ def ingest_events(api,st):
     zero_buy_scan(api,st,names)
     gate_alert_scan(api,st)
 
+
+# Console latency bridge: reuses /srv/okx_v0747_per_bot_speed_readonly.py.
+# No API calls or trading mutations here. Main thread owns Telegram send and state.
+import html as _latency_html
+import queue as _latency_queue
+import re as _latency_re
+import subprocess as _latency_subprocess
+import threading as _latency_threading
+import time as _latency_time
+
+_LATENCY_CLI_PATH = '/srv/okx_v0747_per_bot_speed_readonly.py'
+_LATENCY_CLI_RESULTS = _latency_queue.Queue(maxsize=1)
+_LATENCY_CLI_THREAD = None
+_LATENCY_CLI_TIMEOUT = 25
+
+
+def _latency_console_worker(minutes):
+    start = _latency_time.monotonic()
+    try:
+        proc = _latency_subprocess.run(
+            ['nice', '-n', '19', 'ionice', '-c3', '/usr/bin/python3', '-B',
+             _LATENCY_CLI_PATH, '--minutes', str(minutes)],
+            stdout=_latency_subprocess.PIPE, stderr=_latency_subprocess.PIPE,
+            text=True, errors='replace', timeout=_LATENCY_CLI_TIMEOUT,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError('код возврата ' + str(proc.returncode) +
+                               '; stderr: ' + proc.stderr.strip()[-400:])
+        if 'OKX LIVE PER-BOT SPEED' not in proc.stdout or 'NO API' not in proc.stdout:
+            raise RuntimeError('консольный анализатор вернул неожиданный формат')
+        if len(proc.stdout) > 30000:
+            raise RuntimeError('консольный отчёт слишком большой для Telegram')
+        _LATENCY_CLI_RESULTS.put(('ok', minutes, proc.stdout,
+            round(_latency_time.monotonic() - start, 2)))
+    except _latency_subprocess.TimeoutExpired:
+        _LATENCY_CLI_RESULTS.put(('error', minutes,
+            'консольный анализатор превысил лимит 25 секунд',
+            round(_latency_time.monotonic() - start, 2)))
+    except Exception as exc:
+        _LATENCY_CLI_RESULTS.put(('error', minutes, str(exc),
+            round(_latency_time.monotonic() - start, 2)))
+
+
+def _latency_console_send_chunks(api, raw, minutes, duration):
+    # Formatting only; no recalculation, filtering or truncation of statistics.
+    clean = _latency_re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', raw).strip()
+    # Telegram HTML 4096 UTF-16 character limit. Escape ONE CHARACTER at a
+    # time so a chunk boundary can never split &lt; or &amp; entities.
+    chunks = []
+    block = ''
+    for char in clean:
+        escaped = _latency_html.escape(char)
+        if len(block) + len(escaped) > 2200:
+            chunks.append(block)
+            block = ''
+        block += escaped
+    if block:
+        chunks.append(block)
+    if not chunks:
+        raise RuntimeError('консольный отчёт пустой')
+    for idx, chunk in enumerate(chunks, 1):
+        title = ('<b>⚡ OKX LATENCY — консольный отчёт (' +
+                 str(minutes) + ' мин), ' + str(idx) + '/' +
+                 str(len(chunks)) + ', ' + str(duration) + ' с</b>')
+        api.send(title + '\n<pre>' + chunk + '</pre>')
+
+
+def _latency_console_flush(api):
+    global _LATENCY_CLI_THREAD
+    try:
+        kind, minutes, payload, duration = _LATENCY_CLI_RESULTS.get_nowait()
+    except _latency_queue.Empty:
+        return
+    _LATENCY_CLI_THREAD = None
+    if kind == 'ok':
+        print('TG_LATENCY_CLI_DONE minutes=' + str(minutes) +
+              ' seconds=' + str(duration) + ' chars=' +
+              str(len(payload)), flush=True)
+        _latency_console_send_chunks(api, payload, minutes, duration)
+    else:
+        print('TG_LATENCY_CLI_FAILED minutes=' + str(minutes) +
+              ' reason=' + str(payload)[:200], flush=True)
+        api.send('⚠️ /latency: консольный отчёт не получен (' +
+                 _latency_html.escape(str(payload)[:350]) + '). ' +
+                 'Торговля не затронута.')
+
+
+def _latency_console_start(api, minutes):
+    global _LATENCY_CLI_THREAD
+    if _LATENCY_CLI_THREAD is not None:
+        api.send('⏳ Предыдущий отчёт latency ещё формируется.')
+        return
+    _LATENCY_CLI_THREAD = _latency_threading.Thread(
+        target=_latency_console_worker, args=(minutes,),
+        name='tg-console-latency-readonly', daemon=True)
+    _LATENCY_CLI_THREAD.start()
+    print('TG_LATENCY_CLI_STARTED minutes=' + str(minutes), flush=True)
+    api.send('⏳ Запустил консольный расчёт latency за ' + str(minutes) +
+             ' минут. /status продолжает работать.')
+
+
 def poll_commands(api,st):
+    _latency_console_flush(api)
     updates=api.call('getUpdates',{'offset':st['updates_offset'],'timeout':0,'limit':20})
     for msg in updates:
         st['updates_offset']=msg['update_id']+1
@@ -545,10 +648,7 @@ def poll_commands(api,st):
                 if ((cmd=='/latency8h' and len(parts)>1) or (cmd=='/latency' and len(parts)>1 and (len(parts)!=2 or parts[1].casefold()!='8h'))):
                     api.send('Допустимо: /latency или /latency8h')
                 else:
-                    refresh_bots(force=True)
-                    active=[(name,Path(root)) for name,root in BOT_DIRS.items()
-                            if _active_service(name) and not (Path(root)/'state/final_stats.json').exists()]
-                    send_report(api,latency_report(active,hours))
+                    _latency_console_start(api, hours*60)
         save_state(st)
 
 def services_check(api,st):

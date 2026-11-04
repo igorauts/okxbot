@@ -217,10 +217,69 @@ class IdleGetConnectionTest(unittest.TestCase):
 
 class WiringAndSafetyTest(unittest.TestCase):
     def test_live_worker_has_market_and_stats_only_does_not(self):
+        # The former string equality constrained the *old* call signature;
+        # verify actual AST-level safety invariants after the incremental
+        # source cache was added, without weakening STATS_ONLY separation.
         text=(BASE/'okx_bot.py').read_text(encoding='utf-8')
+        tree=ast.parse(text)
+        classes=[n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='StatsWorker']
+        self.assertEqual(len(classes),1)
+        worker=classes[0]
+        init=[n for n in worker.body if isinstance(n,ast.FunctionDef) and n.name=='__init__']
+        run=[n for n in worker.body if isinstance(n,ast.FunctionDef) and n.name=='run']
+        self.assertEqual((len(init),len(run)),(1,1))
+        def calls(node,name):
+            return [c for c in ast.walk(node) if isinstance(c,ast.Call)
+                    and isinstance(c.func,ast.Name) and c.func.id==name]
+        def is_self_attr(value,attr):
+            return (isinstance(value,ast.Attribute)
+                    and isinstance(value.value,ast.Name) and value.value.id=='self'
+                    and value.attr==attr)
+        # The running worker must use the EXISTING market and its own cache.
+        constructors=calls(init[0],'StatsSourceCache')
+        self.assertEqual(len(constructors),1)
+        self.assertEqual([ast.unparse(a) for a in constructors[0].args],
+                         ['FILL_DB','ARCHIVE_DB','INST'])
+        self.assertEqual(sum(isinstance(n,ast.Assign)
+                             and len(n.targets)==1
+                             and is_self_attr(n.targets[0],'stats_cache')
+                             and n.value is constructors[0]
+                             for n in ast.walk(init[0])),1)
+        calls_run=calls(run[0],'print_full_stats')
+        self.assertEqual(len(calls_run),1)
+        finance_kw=[k.value for k in calls_run[0].keywords if k.arg=='finance_cache']
+        self.assertEqual(len(finance_kw),1)
+        self.assertIsInstance(finance_kw[0],ast.Attribute)
+        self.assertEqual(finance_kw[0].attr,'finance_cache')
+        args={k.arg:k.value for k in calls_run[0].keywords}
+        self.assertTrue(is_self_attr(args.get('market'),'market'))
+        self.assertTrue(is_self_attr(args.get('stats_cache'),'stats_cache'))
+        self.assertEqual(len(calls_run[0].args),1)
+        self.assertTrue(is_self_attr(calls_run[0].args[0],'pnl'))
+        # Independent one-shot STATS_ONLY must NOT use a worker, cache, or
+        # market watcher. It retains the original FULL financial path.
+        mains=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='main']
+        self.assertEqual(len(mains),1)
+        only=[n for n in ast.walk(mains[0]) if isinstance(n,ast.If)
+              and isinstance(n.test,ast.Name) and n.test.id=='STATS_ONLY']
+        self.assertEqual(len(only),1)
+        solo=calls(only[0],'print_full_stats')
+        self.assertEqual(len(solo),1)
+        self.assertEqual(len(solo[0].args),0)
+        self.assertEqual(len(solo[0].keywords),0)
+        self.assertEqual(len(calls(only[0],'StatsWorker')),0)
+        self.assertEqual(len(calls(only[0],'StatsSourceCache')),0)
+        # Live worker construction still happens exactly once.
         self.assertEqual(text.count('stats_worker=StatsWorker(pnl,market);stats_worker.start()'),1)
-        self.assertEqual(text.count('successful=bool(print_full_stats(self.pnl,market=self.market))'),1)
-        self.assertIn('def print_full_stats(pnl=None, *, require_complete=False, market=None):',text)
+        fn=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='print_full_stats']
+        self.assertEqual(len(fn),1)
+        kwonly=fn[0].args.kwonlyargs
+        defaults=fn[0].args.kw_defaults
+        named={k.arg:d for k,d in zip(kwonly,defaults)}
+        self.assertTrue({'require_complete','market','stats_cache'} <= set(named))
+        for key in ('market','stats_cache'):
+            self.assertIsInstance(named[key],ast.Constant)
+            self.assertIsNone(named[key].value)
         self.assertIn("journal.record('stats_detail'",text)
 
     def test_telemetry_allowed(self):

@@ -39,7 +39,37 @@ print('PASS 0727 PLACING is durable uncertain intent, not acknowledged BUY')
 source=(ROOT/'okx_bot.py').read_text();tree=ast.parse(source)
 assert 'if placed:' in source and 'placement batch' in source and 'save(st)' in source
 assert "if place(st,price):placed+=1" in source
-assert 'protected_signature!=last_protected_signature' in source
+# v0.7.51: the old protected_signature string was diagnostic-only
+# deduplication for voluntary BUY cleanup. No elective BUY cancellation
+# is permitted in the trading loop anymore; test the actual code paths.
+loops=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='live_loop']
+assert len(loops)==1
+loop=loops[0]
+calls=[n for n in ast.walk(loop) if isinstance(n,ast.Call)
+       and isinstance(n.func,ast.Name)]
+assert not any(n.func.id=='cancel_lowest_specific' for n in calls), \
+       'Elective BUY CANCEL still reachable from live_loop'
+holds=[n for n in calls if n.func.id=='log' and n.args
+       and isinstance(n.args[0],ast.Constant) and n.args[0].value=='BUY_CAPACITY_HOLD']
+assert len(holds)==1, 'Capacity HOLD missing or duplicated'
+cap_checks=[n for n in ast.walk(loop) if isinstance(n,ast.Assign)
+       and any(isinstance(t,ast.Name) and t.id=='capacity_due' for t in n.targets)]
+assert len(cap_checks)==1
+assert ast.dump(cap_checks[0].value,include_attributes=False)==ast.dump(
+    ast.parse('len(active)>=BUY_MAX and bool(missing)',mode='eval').body,
+    include_attributes=False), 'BUY hard cap semantics changed'
+tp_calls=[n for n in calls if n.func.id=='maintain_virtual_tp']
+assert len(tp_calls)==1, 'Unexpected TP maintenance call site'
+tp_guards=[n for n in ast.walk(loop) if isinstance(n,ast.If)
+    and ast.dump(n.test,include_attributes=False)==ast.dump(
+        ast.parse('real_tp_now>=REAL_TP_TARGET',mode='eval').body,
+        include_attributes=False)]
+assert len(tp_guards)==1
+assert any(n is tp_calls[0] for stmt in tp_guards[0].orelse
+           for n in ast.walk(stmt)), 'TP restore call is not under-target only'
+assert not any(n is tp_calls[0] for stmt in tp_guards[0].body
+           for n in ast.walk(stmt)), 'Optional TP cancel reachable at/above target'
+
 assert "log('TRADING_LOOP_LONG_PASS'" in source
 assert "BUY_CANCEL_PROTECT_STEPS = 5" in source
 api=(ROOT/'okx_api.py').read_text()

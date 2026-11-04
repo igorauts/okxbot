@@ -4,10 +4,91 @@
 Never reads API credentials, bot state, trading orders or IP sockets.
 Only output: root-private daily JSONL in /srv/okx-vps-resources.
 """
-import os,time,json,subprocess,shutil,datetime,pathlib,math
+import os,time,json,subprocess,shutil,datetime,pathlib,math,re
 ROOT=pathlib.Path('/srv/okx-vps-resources')
-BOTS=('near0721','dood0735','wld0728','init0738','btc0721','blur0738','zec0742')
-UNITS=tuple('okx-grid-'+b+'.service' for b in BOTS)+('okx-position-reader.service','okx-telegram-monitor.service','okx-position-reader-watchdog.service')
+BOT_UNIT_RE=re.compile(r'^okx-grid-[A-Za-z0-9][A-Za-z0-9_-]*\.service$')
+BASE_UNITS=('okx-position-reader.service','okx-telegram-monitor.service','okx-position-reader-watchdog.service')
+ENABLED_STATES=('enabled','enabled-runtime','linked','linked-runtime')
+OBSERVED_STATES=('active','activating','reloading','deactivating','failed')
+
+
+def discover_units():
+    """Snapshot eligible bot units: active/failed plus enabled, not archived-disabled."""
+    queries=(
+        ['systemctl','list-units','--all','--type=service','--plain','--no-legend','--no-pager','okx-grid-*.service'],
+        ['systemctl','list-unit-files','--type=service','--plain','--no-legend','--no-pager','okx-grid-*.service'],
+    )
+    results=[]
+    for cmd in queries:
+        try:
+            res=subprocess.run(cmd,capture_output=True,text=True,timeout=7,check=False)
+        except (OSError,subprocess.TimeoutExpired) as e:
+            raise RuntimeError('systemd bot discovery unavailable: '+type(e).__name__) from e
+        if res.returncode != 0:
+            raise RuntimeError('systemd bot discovery failed: '+cmd[1])
+        results.append(res.stdout)
+    bots=set()
+    for line in results[0].splitlines():
+        cols=line.strip().lstrip('●').strip().split()
+        if len(cols)<4 or not BOT_UNIT_RE.fullmatch(cols[0]):
+            continue
+        if cols[2] in OBSERVED_STATES:
+            bots.add(cols[0])
+    for line in results[1].splitlines():
+        cols=line.split()
+        if len(cols)>=2 and BOT_UNIT_RE.fullmatch(cols[0]) and cols[1] in ENABLED_STATES:
+            bots.add(cols[0])
+    if not bots:
+        raise RuntimeError('No live/registered OKX grid bot units discovered; refuse sample')
+    return tuple(sorted(bots))+BASE_UNITS
+
+
+def active_units(units):
+    """All expected units must be resolved; never silently return partial data."""
+    fields='--property=Id,LoadState,ActiveState,MainPID,NRestarts,ControlGroup'
+    cmd=['systemctl','show','--no-pager',fields,*units]
+    try:
+        res=subprocess.run(cmd,capture_output=True,text=True,timeout=8,check=False)
+    except (OSError,subprocess.TimeoutExpired) as e:
+        raise RuntimeError('systemd batch show unavailable: '+type(e).__name__) from e
+    if res.returncode:
+        raise RuntimeError('systemd batch show failed')
+    def parse(raw, expected):
+        parsed={}
+        for block in raw.strip().split('\n\n'):
+            props={}
+            for line in block.splitlines():
+                if '=' in line:
+                    key,val=line.split('=',1)
+                    props[key]=val
+            ident=props.get('Id')
+            if ident not in expected:
+                continue
+            if ident in parsed:
+                raise RuntimeError('duplicate systemd unit response: '+ident)
+            if props.get('LoadState') != 'loaded' or not props.get('ActiveState'):
+                raise RuntimeError('invalid systemd unit response: '+ident)
+            parsed[ident]=props
+        return parsed
+    expected=set(units)
+    found=parse(res.stdout,expected)
+    if len(found)!=len(expected):
+        for unit in units:
+            if unit in found:
+                continue
+            try:
+                one=subprocess.run(['systemctl','show','--no-pager',unit,fields],
+                    capture_output=True,text=True,timeout=2,check=False)
+            except (OSError,subprocess.TimeoutExpired):
+                continue
+            if one.returncode:
+                continue
+            found.update(parse(one.stdout,{unit}))
+    missing=expected.difference(found)
+    if missing:
+        raise RuntimeError('Incomplete systemd resource visibility: '+','.join(sorted(missing)))
+    return found
+
 
 def read(path):
     try: return pathlib.Path(path).read_text()[:32768]
@@ -51,37 +132,6 @@ def proc_mem():
     m=kv(read('/proc/meminfo'))
     return {k:round(m.get(k,0)/1024,2) for k in ('MemTotal','MemAvailable','MemFree','Cached','Buffers','SwapTotal','SwapFree','Dirty','Writeback')}
 
-def active_units():
-    cmd=['systemctl','show','--no-pager','--property=Id,ActiveState,MainPID,NRestarts,ControlGroup',*UNITS]
-    try:r=subprocess.run(cmd,capture_output=True,text=True,timeout=8,check=False)
-    except (OSError,subprocess.TimeoutExpired):return {}
-    if r.returncode:return {}
-    result={}
-    for block in r.stdout.split('\n\n'):
-        props={}
-        for line in block.splitlines():
-            if '=' in line:
-                k,v=line.split('=',1);props[k]=v
-        name=props.get('Id')
-        if name in UNITS:result[name]=props
-    # A minority of systemd versions omit multi-unit details; try exact
-    # individual reads only when the aggregated reply was incomplete.
-    if len(result)<len(UNITS):
-        for unit in UNITS:
-            if unit in result:continue
-            try:
-                single=subprocess.run(['systemctl','show','--no-pager',unit,
-                    '--property=Id,ActiveState,MainPID,NRestarts,ControlGroup'],
-                    capture_output=True,text=True,timeout=2,check=False)
-            except (OSError,subprocess.TimeoutExpired):continue
-            if single.returncode:continue
-            props={}
-            for line in single.stdout.splitlines():
-                if '=' in line:
-                    k,v=line.split('=',1);props[k]=v
-            if props.get('Id')==unit:result[unit]=props
-    return result
-
 def cg_stats(props):
     cg=props.get('ControlGroup','')
     if not cg.startswith('/') or '..' in cg.split('/') or len(cg)>200:
@@ -109,16 +159,17 @@ def cg_stats(props):
             'memory_events':kv(read(base/'memory.events')),
             'io_bytes':io}
 
-def tick():
+def tick(units):
     c=cpu();v=kv(read('/proc/vmstat'))
-    info=active_units()
+    info=active_units(units)
     cgs={name:cg_stats(props) for name,props in info.items()}
     return time.monotonic(),c,v,cgs,info
 
 def sample():
-    t0,c0,v0,g0,_=tick()
+    units=discover_units()
+    t0,c0,v0,g0,_=tick(units)
     time.sleep(.25)
-    t1,c1,v1,g1,units=tick()
+    t1,c1,v1,g1,info1=tick(units)
     elapsed=max(.01,t1-t0)
     cp={}
     if c0 and c1 and len(c0)==len(c1):
@@ -131,7 +182,7 @@ def sample():
                 'iowait_pct':round(100*diff[4]/total,2),
                 'steal_pct':round(100*diff[7]/total,2) if len(diff)>7 else None}
     blocks={}
-    for name,props in units.items():
+    for name,props in info1.items():
         curr=g1.get(name,{})
         prev=g0.get(name,{})
         res={'active':props.get('ActiveState'),'pid':props.get('MainPID'),'restarts':props.get('NRestarts'),
@@ -164,9 +215,8 @@ def main():
     ROOT.mkdir(mode=0o700,parents=True,exist_ok=True)
     os.chmod(ROOT,0o700)
     row=sample()
-    missing=[u for u in UNITS[:len(BOTS)] if u not in row['units']]
-    if missing:
-        raise RuntimeError('No authoritative seven-bot systemd resource visibility; refuse sample: '+','.join(missing))
+    if not any(BOT_UNIT_RE.fullmatch(u) for u in row['units']):
+        raise RuntimeError('No dynamically discovered grid bot in resource sample; refuse sample')
     day=datetime.datetime.now(datetime.timezone.utc).strftime('%Y%m%d')
     name=ROOT/('vps-'+day+'.jsonl')
     if name.is_symlink():raise RuntimeError('unsafe diagnostics symlink')
