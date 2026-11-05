@@ -143,10 +143,7 @@ def should_persist_state(previous, current, *, healthy, now):
     # Backward time jumps, NaN and infinity all force a durable save.
     return not (0 <= age < HEALTHY_HEARTBEAT_SECONDS)
 
-def main():
-    args=argparse.ArgumentParser(description=__doc__)
-    args.add_argument('--check-only',action='store_true',help='never restart service')
-    opts=args.parse_args()
+def check_once(*, check_only=False, quiet=False):
     fd=os.open(LOCK,os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
     try:
         fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
@@ -156,7 +153,7 @@ def main():
     try:
         first=show()
         if not first or first.get('ActiveState')!='active':
-            print('Reader not active: no watchdog restart')
+            if not quiet: print('Reader not active: no watchdog restart')
             return
         healthy=ipc_ok()
         try:previous=_state_load()
@@ -165,7 +162,7 @@ def main():
             return
         now=time.time()
         state,may_restart=policy(previous,now=now,pid=first['MainPID'],healthy=healthy)
-        if may_restart and not opts.check_only:
+        if may_restart and not check_only:
             second=show()
             if (second and second.get('ActiveState')=='active' and
                 second.get('MainPID')==first['MainPID'] and
@@ -179,13 +176,37 @@ def main():
                 p=subprocess.run(['systemctl','restart',UNIT],timeout=12,check=False)
                 print('Reader restart attempted; status:',p.returncode)
                 return
-        if not opts.check_only and should_persist_state(previous, state, healthy=healthy, now=now):
+        if not check_only and should_persist_state(previous, state, healthy=healthy, now=now):
             _state_save(state)
-        print('reader IPC:', 'OK' if healthy else 'UNRESPONSIVE',
-              '| consecutive failures:',state.get('fails',0),
-              '| restart eligible:',bool(may_restart and not opts.check_only))
+        if not quiet or not healthy or may_restart:
+            print('reader IPC:', 'OK' if healthy else 'UNRESPONSIVE',
+                  '| consecutive failures:',state.get('fails',0),
+                  '| restart eligible:',bool(may_restart and not check_only), flush=True)
     finally:
         fcntl.flock(fd,fcntl.LOCK_UN);os.close(fd)
+
+
+def main():
+    import signal
+    import threading
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--check-only',action='store_true',help='never restart service')
+    parser.add_argument('--loop',action='store_true',help='run every 20 seconds in a single process')
+    opts=parser.parse_args()
+    if not opts.loop:
+        return check_once(check_only=opts.check_only)
+    stop=threading.Event()
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    print('READER_WATCHDOG_LONG_LIVED=START interval=20s',flush=True)
+    while not stop.is_set():
+        started=time.monotonic()
+        try:
+            check_once(check_only=opts.check_only,quiet=True)
+        except Exception as e:
+            # Never restart Reader on an unexpected watchdog exception.
+            print('WATCHDOG_LOOP_ERROR='+type(e).__name__,flush=True)
+        stop.wait(max(0.,20. - (time.monotonic()-started)))
 
 if __name__=='__main__':
     main()

@@ -510,7 +510,8 @@ class Observer:
 
 
 def run(root,service,mode):
-    observer = Observer(root,service,mode)
+    observers = ([Observer(root,service,'burst'), Observer(root,service,'execution')]
+                 if mode == 'combined' else [Observer(root,service,mode)])
     proc = None
     selector = selectors.DefaultSelector()
     fragment = b''
@@ -535,10 +536,13 @@ def run(root,service,mode):
                 fragment += data
                 while b'\n' in fragment:
                     line,fragment = fragment.split(b'\n',1)
-                    observer.read_bid(line.decode('utf-8',errors='replace'))
+                    decoded=line.decode('utf-8',errors='replace')
+                    for observer in observers:
+                        observer.read_bid(decoded)
                 if len(fragment)>1048576:
                     fragment=b''
-            observer.step()
+            for observer in observers:
+                observer.step()
     finally:
         if proc:
             proc.terminate()
@@ -555,11 +559,15 @@ def main():
     p=argparse.ArgumentParser()
     p.add_argument('--root',type=Path,required=True)
     p.add_argument('--service')
-    p.add_argument('--mode',choices=['burst','execution'],required=True)
+    p.add_argument('--mode',choices=['burst','execution','combined'],required=True)
     p.add_argument('--report',action='store_true')
     a=p.parse_args()
     if a.report:
-        report(a.root,a.mode)
+        if a.mode == 'combined':
+            for kind in ('burst','execution'):
+                report(a.root,kind)
+        else:
+            report(a.root,a.mode)
     else:
         if not re.fullmatch(r'okx-grid-[a-z0-9-]+',a.service or ''):
             raise SystemExit('Invalid service')

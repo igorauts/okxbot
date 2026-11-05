@@ -1,3 +1,7 @@
+## v0.7.60 — S1–S3 и D1: снижение фоновой нагрузки (05.11.2026)
+
+Watchdog — постоянный процесс; resource sampler — кеш systemd units на час; combined observers — один процесс на бота; drawdown — прежние расчёты каждые 5 секунд с более редкой записью current. Торговый движок v0.7.60. См. `V0760_S1_S2_S3_D1_LIVE_RELEASE_NOTES_RU.md`.
+
 # OKX Grid Bot
 
 ## v0.7.59 — Telegram Monitor T1–T4 (05.11.2026)

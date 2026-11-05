@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "current_version": "0.7.57",
+  "current_version": "0.7.60",
   "engines": {
     "0.7.28": {
       "file": "okx_bot.py",
@@ -570,6 +570,33 @@
         "okx_cleanup_transport.py"
       ],
       "sha256": "04c2fb1ebddad3c10274e3a81cb1bb944483ee176e0203e40c295bc6230b3400"
+    },
+    "0.7.60": {
+      "file": "okx_bot.py",
+      "dependencies": [
+        "okx_terminal_accounting.py",
+        "okx_latency.py",
+        "okx_positions_fifo.py",
+        "okx_fill_singleflight.py",
+        "okx_emergency_gate.py",
+        "okx_version.py",
+        "okx_state.py",
+        "okx_contracts.py",
+        "okx_accounting.py",
+        "okx_api.py",
+        "okx_strategy.py",
+        "okx_latency_rollup.py",
+        "okx_tp_telemetry.py",
+        "okx_position_reader_client.py",
+        "okx_position_reader_core.py",
+        "okx_positions_priority.py",
+        "okx_idle_reconcile.py",
+        "okx_stats_finance_incremental.py",
+        "okx_stats_incremental_runtime.py",
+        "okx_stats_sqlite_delta_v0751.py",
+        "okx_cleanup_transport.py"
+      ],
+      "sha256": "9c6cf1b46ba8f0b045a80ea97b3178657fd296c2e6d564fb8579839e66057cbd"
     }
   }
 }

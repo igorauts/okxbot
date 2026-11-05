@@ -11,11 +11,13 @@ import subprocess
 import sys
 
 KINDS=('burst','execution')
+UNIT_KINDS=KINDS+('combined',)
+PROVISION_KINDS=('combined',)
 SERVICE_RE=re.compile(r'okx-grid-[a-z0-9-]+\Z')
 
 
 def unit_name(service,kind):
-    if not SERVICE_RE.fullmatch(service) or kind not in KINDS:
+    if not SERVICE_RE.fullmatch(service) or kind not in UNIT_KINDS:
         raise ValueError('Invalid OKX bot service / observer kind')
     return f'observer-{service}-{kind}.service'
 
@@ -93,6 +95,8 @@ def unit_text(root,service,kind,source):
     script=source/'okx_execution_observer.py'
     if not script.is_file() or script.is_symlink():
         raise RuntimeError('Observer module missing or unsafe')
+    limits=('CPUQuota=10%\nMemoryMax=192M\n' if kind=='combined'
+            else 'CPUQuota=5%\nMemoryMax=96M\n')
     return (f'[Unit]\nDescription=Read-only OKX {kind} observer ({service})\n'
             'After=network-online.target '+service+'.service\n'
             'PartOf='+service+'.service\n'
@@ -102,7 +106,8 @@ def unit_text(root,service,kind,source):
             f'WorkingDirectory={source}\n'
             f'ExecStart=/usr/bin/python3 -B {script} --root {root} --service {service} --mode {kind}\n'
             'Restart=on-failure\nRestartSec=5\nUMask=0077\nNoNewPrivileges=true\n'
-            'Nice=10\nIOSchedulingClass=idle\nCPUQuota=5%\nMemoryMax=96M\n'
+            'Nice=10\nIOSchedulingClass=idle\n'
+            + limits +
             'ProtectSystem=strict\n'
             f'ReadWritePaths={root}/diagnostics\n'
             f'ReadOnlyPaths={root}\n'
@@ -154,7 +159,7 @@ def provision_observers(root,service,source,systemd_dir=Path('/etc/systemd/syste
         raise RuntimeError('Provisioning only permitted before new trading service starts')
     # Validate entire plan BEFORE changes.
     planned=[]
-    for kind in KINDS:
+    for kind in PROVISION_KINDS:
         _collision_guard(service,kind,systemd_dir,active_fn)
         unit=unit_name(service,kind)
         f=systemd_dir/unit
@@ -194,7 +199,11 @@ def monitor_action(root,service,kind,action,source,systemd_dir=Path('/etc/system
     root,cfg=validate_root(root,service,base)
     if not supports_versionless(root,service,base):
         raise RuntimeError('Not a versionless observer instance')
-    unit=unit_name(service,kind)
+    control_kind=kind
+    combined=Path(systemd_dir)/unit_name(service,'combined')
+    if action in ('on','off') and kind in ('burst','execution') and combined.is_file():
+        control_kind='combined'  # Both read-only modes share a process.
+    unit=unit_name(service,control_kind)
     target=Path(systemd_dir)/unit
     if active_fn is None:
         active_fn=lambda n: subprocess.run(
@@ -205,10 +214,12 @@ def monitor_action(root,service,kind,action,source,systemd_dir=Path('/etc/system
         return
     if action not in ('on','off'):
         raise ValueError('Invalid observer command')
-    _collision_guard(service,kind,systemd_dir,active_fn)
+    _collision_guard(service,control_kind,systemd_dir,active_fn)
     if not target.is_file() or target.is_symlink():
         raise RuntimeError('Versionless observer unit not installed')
-    expected=unit_text(root,service,kind,source)
+    expected=unit_text(root,service,control_kind,source)
+    if control_kind=='combined':
+        print('OBSERVER_MODES_COUPLED=burst+execution',flush=True)
     if target.read_text(encoding='utf-8')!=expected:
         raise RuntimeError('Observer unit differs from expected template; refusing modification')
     p=props_fn(unit)

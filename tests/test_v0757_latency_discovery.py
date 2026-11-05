@@ -49,19 +49,25 @@ class DiscoveryTest(unittest.TestCase):
             if 'list-units' in args:
                 return 'okx-grid-alpha.service loaded active running\n'
             return 'ActiveState=active\nMainPID=123\nWorkingDirectory='+str(self.paths['some_new_bot'])+'\n'
-        with self.assertRaisesRegex(RuntimeError,'mismatch'):
-            m.discover_running_bots(runner=runner,base=self.base)
+        skipped=[]
+        with self.assertRaisesRegex(RuntimeError,r'^No verified running grid service \(skipped=1\)$'):
+            m.discover_running_bots(runner=runner,base=self.base,skipped=skipped)
+        self.assertEqual(skipped,[('okx-grid-alpha.service','working directory mismatch')])
 
     def test_rejects_non_running_service_and_pid_zero(self):
         def runner(args):
             if 'list-units' in args:return 'okx-grid-alpha.service loaded active running\n'
             return 'ActiveState=active\nMainPID=0\nWorkingDirectory='+str(self.paths['alpha'])+'\n'
-        with self.assertRaisesRegex(RuntimeError,'PID'):
-            m.discover_running_bots(runner=runner,base=self.base)
+        skipped=[]
+        with self.assertRaisesRegex(RuntimeError,r'^No verified running grid service \(skipped=1\)$'):
+            m.discover_running_bots(runner=runner,base=self.base,skipped=skipped)
+        self.assertEqual(skipped,[('okx-grid-alpha.service','invalid active PID')])
 
     def test_no_bots_fails_closed(self):
-        with self.assertRaisesRegex(RuntimeError,'No active'):
-            m.discover_running_bots(runner=lambda args:'',base=self.base)
+        skipped=[]
+        with self.assertRaisesRegex(RuntimeError,r'^No verified running grid service \(skipped=0\)$'):
+            m.discover_running_bots(runner=lambda args:'',base=self.base,skipped=skipped)
+        self.assertEqual(skipped,[])
 
     def test_dynamic_main_reads_paths_without_hardcoded_bot_names(self):
         with mock.patch.object(m,'discover_running_bots',return_value=[('alpha',self.paths['alpha'])]):

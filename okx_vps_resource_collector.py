@@ -6,35 +6,76 @@ Only output: root-private daily JSONL in /srv/okx-vps-resources.
 """
 import os,time,json,subprocess,shutil,datetime,pathlib,math,re
 ROOT=pathlib.Path('/srv/okx-vps-resources')
+UNIT_FILE_CACHE=ROOT/'enabled_unit_files_cache_v1.json'
+UNIT_CACHE_SECONDS=3600
 BOT_UNIT_RE=re.compile(r'^okx-grid-[A-Za-z0-9][A-Za-z0-9_-]*\.service$')
 BASE_UNITS=('okx-position-reader.service','okx-telegram-monitor.service','okx-position-reader-watchdog.service')
 ENABLED_STATES=('enabled','enabled-runtime','linked','linked-runtime')
 OBSERVED_STATES=('active','activating','reloading','deactivating','failed')
 
 
-def discover_units():
-    """Snapshot eligible bot units: active/failed plus enabled, not archived-disabled."""
-    queries=(
-        ['systemctl','list-units','--all','--type=service','--plain','--no-legend','--no-pager','okx-grid-*.service'],
-        ['systemctl','list-unit-files','--type=service','--plain','--no-legend','--no-pager','okx-grid-*.service'],
-    )
-    results=[]
-    for cmd in queries:
+def _enabled_unit_files():
+    """Durable last-good discovery, refreshed hourly. Fail closed if stale/bad."""
+    now=time.time()
+    if UNIT_FILE_CACHE.is_symlink():
+        raise RuntimeError('Unsafe systemd cache symlink')
+    if UNIT_FILE_CACHE.exists():
+        st=UNIT_FILE_CACHE.stat()
+        if not UNIT_FILE_CACHE.is_file() or st.st_mode & 0o077:
+            raise RuntimeError('Unsafe systemd cache permissions')
         try:
-            res=subprocess.run(cmd,capture_output=True,text=True,timeout=7,check=False)
-        except (OSError,subprocess.TimeoutExpired) as e:
-            raise RuntimeError('systemd bot discovery unavailable: '+type(e).__name__) from e
-        if res.returncode != 0:
-            raise RuntimeError('systemd bot discovery failed: '+cmd[1])
-        results.append(res.stdout)
+            obj=json.loads(UNIT_FILE_CACHE.read_text())
+            if (isinstance(obj,dict) and obj.get('schema')==1
+                    and isinstance(obj.get('at'),(int,float)) and
+                    0 <= now-obj['at']<UNIT_CACHE_SECONDS and
+                    isinstance(obj.get('data'),str)):
+                return obj['data']
+        except (ValueError,TypeError):
+            pass
+    res=subprocess.run(['systemctl','list-unit-files','--type=service','--plain',
+           '--no-legend','--no-pager','okx-grid-*.service'],
+           capture_output=True,text=True,timeout=7,check=False)
+    if res.returncode:
+        raise RuntimeError('systemd unit-files discovery failed')
+    ROOT.mkdir(mode=0o700,parents=True,exist_ok=True)
+    if ROOT.is_symlink():
+        raise RuntimeError('Unsafe systemd cache root')
+    import tempfile
+    fd,tmp=tempfile.mkstemp(dir=ROOT,prefix='.unit-files-')
+    try:
+        with os.fdopen(fd,'w') as f:
+            json.dump({'schema':1,'at':now,'data':res.stdout},f)
+            f.flush();os.fsync(f.fileno())
+        os.chmod(tmp,0o600)
+        os.replace(tmp,UNIT_FILE_CACHE)
+        dir_fd=os.open(ROOT,os.O_RDONLY|os.O_DIRECTORY)
+        try:os.fsync(dir_fd)
+        finally:os.close(dir_fd)
+    finally:
+        if os.path.exists(tmp):os.unlink(tmp)
+    return res.stdout
+
+
+def discover_units():
+    """Active bot units every minute; enabled bot units at most once per hour."""
+    try:
+        res=subprocess.run(['systemctl','list-units','--all','--type=service',
+               '--plain','--no-legend','--no-pager','okx-grid-*.service'],
+               capture_output=True,text=True,timeout=7,check=False)
+    except (OSError,subprocess.TimeoutExpired) as e:
+        raise RuntimeError('systemd active unit discovery unavailable') from e
+    if res.returncode:
+        raise RuntimeError('systemd active unit discovery failed')
     bots=set()
-    for line in results[0].splitlines():
+    for line in res.stdout.splitlines():
         cols=line.strip().lstrip('●').strip().split()
-        if len(cols)<4 or not BOT_UNIT_RE.fullmatch(cols[0]):
-            continue
-        if cols[2] in OBSERVED_STATES:
+        if len(cols)>=4 and BOT_UNIT_RE.fullmatch(cols[0]) and cols[2] in OBSERVED_STATES:
             bots.add(cols[0])
-    for line in results[1].splitlines():
+    try:
+        enabled=_enabled_unit_files()
+    except (OSError,subprocess.TimeoutExpired) as e:
+        raise RuntimeError('systemd cached unit file discovery unavailable') from e
+    for line in enabled.splitlines():
         cols=line.split()
         if len(cols)>=2 and BOT_UNIT_RE.fullmatch(cols[0]) and cols[1] in ENABLED_STATES:
             bots.add(cols[0])

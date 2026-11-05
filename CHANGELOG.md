@@ -1,3 +1,11 @@
+## v0.7.60 — 2026-11-05 — S1–S3/D1 resource maintenance (engine 0.7.60)
+- S1: Reader Watchdog long-lived, 20s policy cycle; timer disabled, unchanged restart protections.
+- S2: VPS resource sampler dynamic unit-list cache 1h, active resource sampling unchanged.
+- S3: one combined observer per bot, both burst/execution results preserved.
+- D1: 5s drawdown calculations intact; immediate durable new worst; current persisted at most once/60s.
+- Seven LIVE engine updates with GET-only financial audits PASS, BTC last; full pre-release test suite PASS.
+- Publication is GitHub-only; no LIVE file changes or service restarts.
+
 ## v0.7.59 — 2026-11-05 — Telegram long polling / command workers / I/O maintenance (engine 0.7.57)
 - T1: 25s Telegram long polling в отдельном потоке, TLS reuse, bounded command queue и обработка offset только после сохранения.
 - T2: `/status`, `/full`, `/latency`, `/help` вне 5s safety loop.

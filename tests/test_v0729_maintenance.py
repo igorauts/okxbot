@@ -118,7 +118,7 @@ class Maintenance0729(unittest.TestCase):
             total=monitor._account_total_pnl(pairs)
             self.assertEqual(total,Decimal('-2.5749'))
             line=monitor._account_total_line(pairs)
-            self.assertEqual(line,'<b>🔴 ACCOUNT TOTAL PnL: −$2.57 🔴</b>')
+            self.assertEqual(line,'<b>🟥 ACCOUNT TOTAL PnL: −$2.57 🟥</b>')
             dispatched=[]
             class FakeApi:
                 def send(self,message,parse_mode=None):
@@ -129,7 +129,7 @@ class Maintenance0729(unittest.TestCase):
                  patch.object(monitor,'BOT_DIRS',{n:str(r) for n,r in pairs}):
                 monitor.send_report(FakeApi(),monitor.status_report(include_account=True))
             self.assertTrue(dispatched)
-            self.assertIn('ACCOUNT TOTAL PnL: −$2.57 🔴',dispatched[-1][0])
+            self.assertIn('ACCOUNT TOTAL PnL: −$2.57 🟥',dispatched[-1][0])
             self.assertEqual(dispatched[-1][1],'HTML')
             # Missing input must not swallow /status.
             (pairs[0][1]/'state'/'stats_financial_anchor.json').unlink()

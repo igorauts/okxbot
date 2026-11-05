@@ -378,17 +378,28 @@ def financial_signature(st):
     return hashlib.sha256(raw.encode('utf-8')).hexdigest()
 
 
-def record_bot_drawdown(total_pnl, now=None, source='fills', bid=None):
-    """Most negative *total bot PnL* since monitoring began, not account equity.
+BOT_DD_CACHE = None
+BOT_DD_LAST_FLUSH = 0.0
+BOT_DD_PENDING_CRITICAL = False
 
-    Intentionally measures max loss versus zero (user's definition), NOT
-    conventional peak-to-trough drawdown. No exchange writes or account reads.
+
+def record_bot_drawdown(total_pnl, now=None, source='fills', bid=None):
+    """5-second samples in memory; persist a new worst immediately, current each 60s.
+
+    Non-critical samples between writes can be lost after an unclean OS/process
+    crash (at most the current interval); a new worst remains fsync-durable.
+    No REST and no trading-loop waits: only the preexisting async writer calls it.
     """
+    global BOT_DD_CACHE, BOT_DD_LAST_FLUSH, BOT_DD_PENDING_CRITICAL
     now=time.time() if now is None else float(now)
     total_pnl=D(total_pnl)
     if not total_pnl.is_finite():raise ValueError('Non-finite bot PnL sample')
     with BOT_DD_LOCK:
-        old=json.loads(BOT_DD_DATA.read_text()) if BOT_DD_DATA.exists() else {}
+        if BOT_DD_CACHE is None:
+            BOT_DD_CACHE=json.loads(BOT_DD_DATA.read_text()) if BOT_DD_DATA.exists() else {}
+            BOT_DD_LAST_FLUSH=0.0
+            BOT_DD_PENDING_CRITICAL=False
+        old=BOT_DD_CACHE
         if old and (old.get('schema')!=1 or old.get('instrument')!=INST):
             raise ValueError('Bot drawdown file instrument/schema mismatch')
         worst=min(Decimal(0),D(old.get('worst_total_pnl_usdt','0')),total_pnl)
@@ -404,7 +415,14 @@ def record_bot_drawdown(total_pnl, now=None, source='fills', bid=None):
                  'worst_total_pnl_usdt':str(worst),
                  'max_drawdown_usdt':str(-worst),'max_drawdown_at':when,
                  'last_source':source,'last_bid':str(bid) if bid is not None else None}
-        atomic_json(BOT_DD_DATA,payload)
+        BOT_DD_CACHE=payload
+        BOT_DD_PENDING_CRITICAL |= (not old or worst<prior)
+        flush_clock=time.monotonic()
+        if BOT_DD_PENDING_CRITICAL or flush_clock-BOT_DD_LAST_FLUSH>=60.:
+            # On fsync failure keep cached worst and retry next tick.
+            atomic_json(BOT_DD_DATA,payload)
+            BOT_DD_LAST_FLUSH=flush_clock
+            BOT_DD_PENDING_CRITICAL=False
         return payload
 
 

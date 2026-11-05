@@ -3,9 +3,14 @@ Description=Bounded GET-free watchdog of OKX Shared Position Reader
 After=okx-position-reader.service
 
 [Service]
-Type=oneshot
+Type=simple
 User=root
 Group=root
-ExecStart=/usr/bin/python3 -u /opt/okx-grid-live/okx_position_reader_watchdog.py
-TimeoutStartSec=16s
+ExecStart=/usr/bin/python3 -u /opt/okx-grid-live/okx_position_reader_watchdog.py --loop
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=10s
 UMask=0077
+
+[Install]
+WantedBy=multi-user.target
