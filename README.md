@@ -1,5 +1,8 @@
 # OKX Grid Bot
 
+## v0.7.58 — Telegram Financial UI maintenance (05.11.2026)
+Пакет v0.7.58 обновляет Telegram `/status`, `/full`, `/latency`, `/help` и GET-only отображение баланса. **Торговый движок v0.7.57 не меняется.** Подробности: `V0758_TELEGRAM_UI_RELEASE_NOTES_RU.md`.
+
 ## v0.7.57 — LIVE: защита idle HTTPS для CANCEL и динамический `/latency` (04.11.2026)
 - Изолированный elective CANCEL: обновление простаивающего TLS до одного POST, без повторов и изменения безопасности BUY/TP/MARKET/PANIC.
 - Telegram `/latency` обнаруживает работающих ботов динамически.
@@ -15,7 +18,7 @@
 - See `V0756_LIVE_RELEASE_NOTES_RU.md` and the GitHub Release for details.
 
 
-**Последний опубликованный релиз: [v0.7.57](https://github.com/igorauts/okxbot/releases/tag/v0.7.57).**
+**Последний опубликованный релиз: [v0.7.58](https://github.com/igorauts/okxbot/releases/tag/v0.7.58).**
 
 Алгоритмический LONG Grid Bot для реального OKX-аккаунта: линейные бессрочные
 USDT-margined SWAP, режим NET/CROSS. Позиции, ордера и результаты учитываются

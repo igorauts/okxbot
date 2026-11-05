@@ -177,7 +177,7 @@ def status_one(name, root, age_text='н/д'):
         pos = format(number(p.group(1)), 'f').rstrip('0').rstrip('.') + ' ' + p.group(2) if '.' in format(number(p.group(1)), 'f') else format(number(p.group(1)), 'f') + ' ' + p.group(2)
     subtotal = fmt_source(value(values,'ИТОГОВЫЙ PnL'))
     sub_n = number(re.search(r'[+\-−]?\$?([\d,.]+)',subtotal.replace('−','-')).group(0).replace('$','')) if re.search(r'[+\-−]?\$?([\d,.]+)',subtotal.replace('−','-')) else None
-    icon = '🟩' if sub_n is not None and sub_n >= 0 else '🟥'
+    icon = '⚪' if sub_n is None else '🟢' if sub_n >= 0 else '🔴'
     # Read the authoritative local 5s DD record, not a stale 10-minute report.
     # No exchange requests; schema/instrument checked before displaying.
     dd_fallback = fmt_source(value(values,'МАКС. ПРОСАДКА БОТА').replace(' от 1x',''))
@@ -370,9 +370,9 @@ def latency_one(name, root, hours):
 
 
 def latency_report(bots, hours=1):
-    if hours not in (1,8):
-        return 'Допустимо: /latency или /latency8h'
-    blocks=['<b>⚡ OKX LATENCY | '+('60 минут' if hours==1 else '8 часов')+'</b>',
+    if hours != 1:
+        return 'Допустимо: /latency'
+    blocks=['<b>⚡ OKX LATENCY | 60 минут</b>',
             '<i>Время: P50 / P95 / P99 / MAX, локальные наблюдения</i>']
     for name,root in bots:
         blocks.append(latency_one(name,root,hours))

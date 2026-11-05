@@ -17,21 +17,25 @@ from pathlib import Path
 import time
 
 
-def discover_running_bots(*, runner=None, base=None):
-    """Discover active grid services and their authoritative working dirs.
+def discover_running_bots(*, runner=None, base=None, skipped=None):
+    """Discover trusted running bot units, isolating individual bad units.
 
-    No hardcoded bot IDs/count or per-instance paths. Fail closed on ambiguous
-    paths, inactive PIDs or systemctl failures; never inspect credentials.
+    A skipped unit MUST be reported as PARTIAL; it is never silently counted
+    as stopped or as valid. A global systemd failure/no valid bots fails closed.
     """
     base = Path(base or os.environ.get('OKXBOT_BASE_DIR','/root/okx')).resolve()
     if runner is None:
         def runner(args):
             return subprocess.run(args, capture_output=True, text=True, timeout=4,
                                   check=True).stdout
-    listing=runner(['systemctl','list-units','--type=service','--state=running',
-                    '--all','--plain','--no-legend','okx-grid-*.service'])
+    try:
+        listing=runner(['systemctl','list-units','--type=service','--state=running',
+                        '--all','--plain','--no-legend','okx-grid-*.service'])
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError('systemd list-units unavailable: '+type(exc).__name__) from None
     result=[]
     seen=set()
+    rejected=[]
     for line in listing.splitlines():
         fields=line.split()
         if not fields:
@@ -41,27 +45,42 @@ def discover_running_bots(*, runner=None, base=None):
             continue
         unit=fields[0]
         bot=match.group(1)
+        reason=None
         if bot in seen:
-            raise RuntimeError('Duplicate active bot service: '+bot)
+            reason='duplicate service name'
         seen.add(bot)
-        properties=dict(row.split('=',1) for row in runner(
-            ['systemctl','show',unit,'-p','ActiveState','-p','MainPID',
-             '-p','WorkingDirectory']).splitlines() if '=' in row)
-        if properties.get('ActiveState')!='active':
-            raise RuntimeError('Service changed state during discovery: '+unit)
-        pid=properties.get('MainPID','')
-        if not pid.isdigit() or int(pid)<=0:
-            raise RuntimeError('Invalid live PID: '+unit)
-        work=Path(properties.get('WorkingDirectory',''))
-        if not work.is_absolute() or work.is_symlink():
-            raise RuntimeError('Unsafe working directory: '+unit)
-        path=work.resolve()
-        if path!=base/bot or not path.is_dir() or not (path/'config.json').is_file():
-            raise RuntimeError('Working directory mismatch: '+unit)
-        result.append((bot,path))
+        try:
+            if reason is None:
+                properties=dict(row.split('=',1) for row in runner(
+                    ['systemctl','show',unit,'-p','ActiveState','-p','MainPID',
+                     '-p','WorkingDirectory']).splitlines() if '=' in row)
+                if properties.get('ActiveState')!='active':
+                    reason='state changed during discovery'
+                else:
+                    pid=properties.get('MainPID','')
+                    if not pid.isdigit() or int(pid)<=0:
+                        reason='invalid active PID'
+                    else:
+                        work=Path(properties.get('WorkingDirectory',''))
+                        if not work.is_absolute() or work.is_symlink():
+                            reason='unsafe working directory'
+                        else:
+                            path=work.resolve()
+                            if path!=base/bot or not path.is_dir() or not (path/'config.json').is_file():
+                                reason='working directory mismatch'
+                            else:
+                                result.append((bot,path))
+        except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError,
+                subprocess.TimeoutExpired) as exc:
+            reason='systemctl show unavailable: '+type(exc).__name__
+        if reason:
+            rejected.append((unit,reason))
+    if skipped is not None:
+        skipped.extend(rejected)
     if not result:
-        raise RuntimeError('No active okx-grid service discovered')
+        raise RuntimeError('No verified running grid service (skipped='+str(len(rejected))+')')
     return sorted(result)
+
 BOUNDS = (.001,.005,.01,.02,.05,.1,.25,.5,1,2,5,10,20,50,100,250,
           500,1000,2000,5000,10000,30000,60000,120000,float('inf'))
 PHASES = (
@@ -192,7 +211,12 @@ def main():
     utc=lambda minute:dt.datetime.fromtimestamp(minute*60,dt.timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
     print('OKX LIVE PER-BOT SPEED | READ-ONLY | NO API | NO WRITES')
     print('WINDOW (complete minutes):',utc(first),'->',utc(last),f'({args.minutes} min)')
-    active=discover_running_bots()
+    skipped=[]
+    active=discover_running_bots(skipped=skipped)
+    if skipped:
+        print('\nDISCOVERY=PARTIAL | verified bots are shown; skipped services have NO asserted status')
+        for unit,reason in skipped:
+            print('SKIPPED '+unit+': '+reason)
     bots=[bot for bot,_ in active]
     roots=dict(active)
     data={bot:rollups(root,first,last) for bot,root in active}
@@ -223,4 +247,11 @@ def main():
     print('Very small N makes P99 unreliable. Missing minute rows/phase samples do not mean zero activity.')
     print('END READ ONLY.')
 
-if __name__=='__main__':main()
+if __name__=='__main__':
+    try:
+        main()
+    except (RuntimeError, OSError, subprocess.TimeoutExpired) as exc:
+        # Never leak systemctl traceback into Telegram; fail closed, readable.
+        print('LATENCY_DISCOVERY_ERROR: '+str(exc).splitlines()[0][:250], file=__import__('sys').stderr)
+        raise SystemExit(2) from None
+

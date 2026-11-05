@@ -1,3 +1,10 @@
+## v0.7.58 — 2026-11-05 — Telegram Financial UI maintenance (engine 0.7.57)
+
+- Telegram-only LIVE sync: compact `/status`, `/full` TOTAL PnL at bottom, circle indicators per bot and square for account TOTAL, `/latency` 60 min without Copy block, `/help` + command menu.
+- Reused existing manager GET-only account balance implementation for Equity, Balance and Floating PnL. No account GET during publishing; only user-requested `/status` can request balance.
+- Trading engine SHA, `engine_manifest.json`, Reader, StatsWorker and strategy untouched. Release/engine versions separated (maintenance release, engine unchanged).
+- GitHub publication: immutable prior release baseline, pinned LIVE source SHA, full Git history, atomic push, remote ZIP SHA; NO tests during publishing.
+
 ## v0.7.57 — 2026-11-04 — LIVE 7/7 + GitHub Release
 
 **Scope: elective CANCEL stale HTTPS, dynamic `/latency`, CHANGELOG only.**

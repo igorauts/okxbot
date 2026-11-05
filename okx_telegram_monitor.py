@@ -21,11 +21,12 @@ import subprocess
 import time
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
+from decimal import Decimal, ROUND_HALF_UP
 from urllib.request import Request, urlopen, getproxies
 import http.client
 import ssl
 import html
-from okx_telegram_views import status_one, latency_report, read_json, LINE
+from okx_telegram_views import status_one, latency_report, read_json, LINE, verified_snapshot_bid, number
 from okx_telegram_events import (one, event_alert, market_event, market_process, zero_buy_scan, observer_fault_scan, gate_alert_scan)
 from okx_telegram_followups import partial_scan, panic_scan
 from okx_telegram_delivery import persist as durable_save, drain as alert_drain
@@ -191,6 +192,7 @@ class Telegram:
         self.path='/bot'+token+'/'
         self.chat=str(chat)
         self._http=None
+        self._http_last_used=0.0
         # urllib respects HTTP[S]_PROXY. Preserve that behavior on VPSes
         # configured for a proxy; otherwise reuse a verified TLS connection.
         self._proxy=bool(getproxies().get('https'))
@@ -198,46 +200,68 @@ class Telegram:
     def _close_http(self):
         conn=self._http
         self._http=None
+        self._http_last_used=0.0
         if conn is not None:
             try: conn.close()
             except OSError: pass
 
     def call(self,method,params):
         payload=json.dumps(params).encode()
+        # getUpdates is read-only and polled frequently. Give it an isolated,
+        # one-request TLS connection so a stale keep-alive cannot delay
+        # critical alert delivery. Bounded timeout prevents 18s monitor stalls.
+        is_poll = method == 'getUpdates'
+        timeout = 5 if is_poll else 18
         if self._proxy:
-            # Explicit, compatible fallback; do not silently bypass a proxy.
+            # Respect the configured proxy; never bypass it silently.
             from urllib.error import HTTPError
             req=Request(self.base+method,data=payload,headers={'Content-Type':'application/json'})
             try:
-                with urlopen(req,timeout=18) as response:
+                with urlopen(req,timeout=timeout) as response:
                     result=json.loads(response.read().decode())
             except HTTPError as exc:
                 if exc.code in (400,403):
                     raise TelegramPermanentError(f'Telegram permanent HTTP {exc.code}') from exc
                 raise
         else:
-            # A lost sendMessage response is ambiguous: NEVER automatically
-            # resend it here. The existing durable outbox controls retries.
-            if self._http is None:
-                self._http=http.client.HTTPSConnection(
-                    'api.telegram.org',timeout=18,context=ssl.create_default_context())
+            if is_poll:
+                conn=http.client.HTTPSConnection(
+                    'api.telegram.org',timeout=timeout,context=ssl.create_default_context())
+            else:
+                # Alert sendMessage is never automatically resent on uncertain
+                # outcome. Refresh idle connections before the *first* send.
+                if (self._http is not None and self._http_last_used
+                        and time.monotonic()-self._http_last_used>15):
+                    self._close_http()
+                if self._http is None:
+                    self._http=http.client.HTTPSConnection(
+                        'api.telegram.org',timeout=timeout,context=ssl.create_default_context())
+                conn=self._http
             try:
-                self._http.request('POST',self.path+method,body=payload,
-                                   headers={'Content-Type':'application/json'})
-                response=self._http.getresponse()
+                conn.request('POST',self.path+method,body=payload,
+                             headers={'Content-Type':'application/json'})
+                response=conn.getresponse()
                 status=response.status
                 raw=response.read()
-                if response.will_close:
-                    self._close_http()
                 if status in (400,403):
                     raise TelegramPermanentError(f'Telegram permanent HTTP {status}')
                 if status != 200:
                     raise RuntimeError('Telegram transient HTTP '+str(status))
                 result=json.loads(raw.decode())
+                if not is_poll:
+                    if response.will_close:
+                        self._close_http()
+                    else:
+                        self._http_last_used=time.monotonic()
             except BaseException:
-                self._close_http()
+                if not is_poll:
+                    self._close_http()
                 raise
-        if not result.get('ok'):
+            finally:
+                if is_poll:
+                    try:conn.close()
+                    except OSError:pass
+        if not isinstance(result,dict) or not result.get('ok'):
             raise RuntimeError('Telegram '+method+' returned not-ok')
         return result.get('result')
     def send(self,text,parse_mode=None):
@@ -427,6 +451,224 @@ def _account_total_pnl(active):
     return total
 
 
+_ACCOUNT_READER = Path('/root/okx/okx_telegram_account_balance_getonly.py')
+_ACCOUNT_READER_SHA = '1556838774bcaa0be9473cb67b2a9c374fe99dbcb46a488c739de55172606754'
+_ACCOUNT_READ_CACHE = {'mono':0.0,'value':None}
+
+
+def _verified_account_balances():
+    """One user-triggered, GET-only balance call via isolated child process.
+
+    Telegram Monitor never loads OKX API credentials. No continuous polling.
+    Readiness checks bypass this call, and no failed results are cached.
+    """
+    if os.environ.get('OKX_TELEGRAM_PREFLIGHT_NO_API')=='1':
+        return None
+    now=time.monotonic()
+    if _ACCOUNT_READ_CACHE['value'] is not None and now-_ACCOUNT_READ_CACHE['mono']<12:
+        return _ACCOUNT_READ_CACHE['value']
+    try:
+        if _ACCOUNT_READER.is_symlink() or not _ACCOUNT_READER.is_file():
+            return None
+        import hashlib
+        if hashlib.sha256(_ACCOUNT_READER.read_bytes()).hexdigest()!=_ACCOUNT_READER_SHA:
+            return None
+        p=subprocess.run([sys.executable,'-B',str(_ACCOUNT_READER),'--fetch'],
+                         stdin=subprocess.DEVNULL,capture_output=True,text=True,
+                         timeout=5.5,check=False)
+        if p.returncode or len(p.stdout)>2048:
+            return None
+        obj=json.loads(p.stdout)
+        if not isinstance(obj,dict) or obj.get('schema')!=1 or obj.get('unit') not in ('USDT','USD'):
+            return None
+        values={k:_account_number(obj.get(k)) for k in ('equity','balance','floating')}
+        if any(x is None for x in values.values()):
+            return None
+        if (values['equity']<0 or
+            abs(values['equity']-values['balance']-values['floating'])>Decimal('0.00000001')):
+            return None
+        asof=datetime.fromisoformat(str(obj.get('asof')).replace('Z','+00:00'))
+        if asof.tzinfo is None or abs((datetime.now(timezone.utc)-asof).total_seconds())>30:
+            return None
+        _ACCOUNT_READ_CACHE.update(mono=now,value=values)
+        return values
+    except (OSError,ValueError,TypeError,ArithmeticError,subprocess.TimeoutExpired,OverflowError):
+        return None
+
+
+_CENT = Decimal('0.01')
+_TERMINAL_GRID_STATES = frozenset(('CLOSED', 'CANCELED', 'EXITED'))
+
+
+def _display_money(value, *, signed=False, symbol=True):
+    """Display-only rounding; never recompute persisted financial records."""
+    if value is None:
+        return 'н/д'
+    q=value.quantize(_CENT, rounding=ROUND_HALF_UP)
+    prefix='+' if q>0 and signed else '−' if q<0 else ''
+    return prefix+('$' if symbol else '')+f'{abs(q):,.2f}'
+
+
+def _grid_formula(net, grid, floating):
+    """Keep the equation true at displayed cent precision.
+
+    Other realized components (open-cycle fees, partial MARKET exits) are
+    not silently called floating. Add an explicit third term when needed.
+    """
+    n=net.quantize(_CENT, rounding=ROUND_HALF_UP)
+    g=grid.quantize(_CENT, rounding=ROUND_HALF_UP)
+    f=floating.quantize(_CENT, rounding=ROUND_HALF_UP)
+    extra=n-g-f
+    first=('−' if g<0 else '')+f'{abs(g):,.2f}'
+    second=('−' if f<0 else '+')+f'{abs(f):,.2f}'
+    third=''
+    if extra:
+        third=('−' if extra<0 else '+')+f'{abs(extra):,.2f}'
+    return _display_money(n,signed=True), first+second+third
+
+
+def _precise_quantity(value, cfg):
+    """Exact base quantity at contract*lot granularity; no invented rounding."""
+    cv=number(cfg.get('contract_value'))
+    lot=number(cfg.get('contract_lot'))
+    quantum=cv*lot if cv is not None and lot is not None else None
+    if quantum is not None and quantum>0 and value%quantum==0:
+        digits=max(0,-quantum.normalize().as_tuple().exponent)
+        raw=f'{value:,.{digits}f}'
+    else:
+        raw=f'{value:,f}'
+    if '.' in raw:
+        raw=raw.rstrip('0').rstrip('.')
+    return raw
+
+
+def _precise_bid(value, cfg):
+    tick=number(cfg.get('tick_size'))
+    if tick is None or tick<=0:
+        return 'н/д'
+    # Use original exchange precision, including trailing zeros in tickSz.
+    raw=str(cfg.get('tick_size')).lower()
+    digits=max(0,-Decimal(raw).as_tuple().exponent)
+    if digits>18:
+        return 'н/д'
+    return f'{value:,.{digits}f}'
+
+
+def _compact_bot_row(name,root,now):
+    """Only verified, co-timestamped stats and existing durable grid state.
+
+    Never calls the exchange, imports a trading engine, or writes state.
+    """
+    cfg=read_json(root/'config.json')
+    stats=read_json(root/'state/stats.json')
+    perf=(stats.get('performance') or stats.get('performance_v0724')) if isinstance(stats,dict) else None
+    if (not isinstance(cfg,dict) or not isinstance(perf,dict)
+        or stats.get('complete') is not True
+        or stats.get('instrument')!=cfg.get('instrument')
+        or perf.get('schema')!=1):
+        raise ValueError('stats not confirmed')
+    generated=_account_number(stats.get('generated_at_unix'))
+    if generated is None or not 0<=Decimal(str(now))-generated<=Decimal('900'):
+        raise ValueError('stats stale')
+    bid=verified_snapshot_bid(root,cfg,stats)
+    if bid is None:
+        raise ValueError('bid/financial anchor not confirmed')
+    values={k:_account_number(perf.get(k)) for k in (
+        'grid_profit','total_pnl','floating_pnl','open_base','bid',
+        'limit_tp_net','market_tp_net','partial_exit_net','realized_open_components')}
+    if any(v is None for v in values.values()):
+        raise ValueError('financial field missing')
+    if (values['bid']!=bid or values['open_base']<0
+        or abs(values['grid_profit']-values['limit_tp_net']-values['market_tp_net'])>Decimal('0.00000001')
+        or abs(values['total_pnl']-values['grid_profit']-values['partial_exit_net']-
+               values['floating_pnl']-values['realized_open_components'])>Decimal('0.00000001')):
+        raise ValueError('financial identity mismatch')
+    anchor=read_json(root/'state/stats_financial_anchor.json')
+    if (anchor.get('schema')!=1 or anchor.get('instrument')!=cfg.get('instrument')
+        or abs((_account_number(anchor.get('at')) or Decimal('-999'))-generated)>Decimal('0.5')
+        or _account_number(anchor.get('total_pnl_usdt'))!=values['total_pnl']):
+        raise ValueError('financial anchor mismatch')
+    cap=cfg.get('max_grids')
+    state=read_json(state_file(root))
+    if (type(cap)!=int or cap<=0 or
+        not isinstance(state.get('cycles'),dict) or
+        (state.get('instrument') not in (None,cfg.get('instrument')))):
+        raise ValueError('grid state unavailable')
+    cycles=state['cycles']
+    if any(not isinstance(c,dict) or not isinstance(c.get('state'),str) for c in cycles.values()):
+        raise ValueError('invalid grid cycles')
+    occupied=sum(c['state'] not in _TERMINAL_GRID_STATES for c in cycles.values())
+    if occupied>cap:
+        raise ValueError('grid over capacity')
+    pct=(Decimal(occupied)*100/Decimal(cap)).quantize(Decimal('1'),rounding=ROUND_HALF_UP)
+    coin=str(cfg.get('instrument') or '').split('-')[0]
+    if not re.fullmatch(r'[A-Z0-9]{2,20}',coin):
+        raise ValueError('invalid coin')
+    net=values['total_pnl'];grid=values['grid_profit'];floating=values['floating_pnl']
+    left,expr=_grid_formula(net,grid,floating)
+    return {'name':name,'marker':'🟢' if net>=0 else '🔴',
+        'left':left,'expr':expr,'sort':grid,'stamp':float(generated),
+        'position':_precise_quantity(values['open_base'],cfg)+' '+coin,
+        'grid':f'{occupied}/{cap} ({pct}%)',
+        'bid':_precise_bid(bid,cfg)}
+
+
+def compact_status_report():
+    """One physical message, one logical row per active bot, no unverified $0."""
+    refresh_bots(force=True)
+    entries=[];failed=[];active=[]
+    now=time.time()
+    for name in BOT_DIRS:
+        if not _active_service(name):continue
+        root=Path(BOT_DIRS[name])
+        if (root/'state/final_stats.json').exists():continue
+        active.append((name,root))
+        try:
+            entries.append(_compact_bot_row(name,root,now))
+        except (OSError,ValueError,KeyError,TypeError,ArithmeticError):
+            failed.append(name)
+    total=len(BOT_DIRS)
+    if not active:
+        return f'<b>Активных ботов: 0/{total} · н/д UTC</b>'
+    stamps=[entry['stamp'] for entry in entries]
+    stamp=(datetime.fromtimestamp(min(stamps),timezone.utc).strftime('%H:%M')
+           if entries and not failed else 'н/д')
+    header=f'<b>Активных ботов: {len(active)}/{total} · {stamp} UTC</b>'
+    entries.sort(key=lambda e:(-e['sort'],e['name']))
+    leftwidth=max((len(e['left']) for e in entries),default=0)
+    exprwidth=max((len(e['expr']) for e in entries),default=0)
+    poswidth=max((len(e['position']) for e in entries),default=0)
+    gridwidth=max((len(e['grid']) for e in entries),default=0)
+    lines=[header]
+    for entry in entries:
+        # The '=' and all subsequent column starts align in monospace.
+        row=(f"{entry['left']:>{leftwidth}}={entry['expr']:<{exprwidth}}  "
+             f"{entry['position']:<{poswidth}}  {entry['grid']:<{gridwidth}}  {entry['bid']}")
+        lines.append(entry['marker']+' <code>'+html.escape(row)+'</code>')
+    for name in failed:
+        lines.append('⚪ <code>'+html.escape(name+' — н/д (снимок не подтверждён)')+'</code>')
+    lines.append('')
+    # Total PnL is verified bot sum; NOT account equity or OKX balance.
+    acc=_account_total_pnl(active) if not failed else None
+    if acc is None:
+        lines.append('<b>⬜ TOTAL PnL: н/д</b>')
+    else:
+        lines.append('<b>'+('🟩' if acc>=0 else '🟥')+' TOTAL PnL: '+
+                     html.escape(_display_money(acc,signed=True))+'</b>')
+    account=_verified_account_balances()
+    if account is None:
+        lines.extend(('', '<b>💰 Account Equity: н/д</b>',
+                      'Balance н/д','Floating PnL н/д'))
+    else:
+        lines.extend(('', '<b>💰 Account Equity: '+_display_money(account['equity'])+'</b>',
+                      'Balance '+_display_money(account['balance']),
+                      'Floating PnL '+_display_money(account['floating'],signed=True)))
+    text='\n'.join(lines)
+    if len(text)>3700:
+        raise ValueError('Compact status cannot fit one Telegram message')
+    return text
+
+
 def _account_total_line(active):
     # An account aggregation fault must not suppress the complete /status.
     try:
@@ -434,9 +676,9 @@ def _account_total_line(active):
     except Exception:
         total=None
     if total is None:
-        return '<b>ACCOUNT TOTAL PnL: н/д (нет полной свежей сверки)</b>'
+        return '<b>⬜ ACCOUNT TOTAL PnL: н/д (нет полной свежей сверки)</b>'
     label=('+' if total>0 else '−' if total<0 else '')+'$'+f'{abs(total):,.2f}'
-    marker='🟢' if total>0 else '🔴' if total<0 else '⚪'
+    marker='🟩' if total>0 else '🟥' if total<0 else '⬜'
     return '<b>'+marker+' ACCOUNT TOTAL PnL: '+html.escape(label)+' '+marker+'</b>'
 
 def status_report(requested=None, *, include_account=False):
@@ -459,7 +701,7 @@ def status_report(requested=None, *, include_account=False):
     if not out:
         return 'Нет активных ботов.'
     if include_account:
-        out.append(_account_total_line(active))
+        out[-1] = out[-1]+'\n\n'+_account_total_line(active)
     return ('\n'+LINE+'\n').join(out)
 
 def send_report(api,report):
@@ -573,25 +815,38 @@ def _latency_console_worker(minutes):
 def _latency_console_send_chunks(api, raw, minutes, duration):
     # Formatting only; no recalculation, filtering or truncation of statistics.
     clean = _latency_re.sub(r'\x1b\[[0-9;]*[A-Za-z]', '', raw).strip()
-    # Telegram HTML 4096 UTF-16 character limit. Escape ONE CHARACTER at a
-    # time so a chunk boundary can never split &lt; or &amp; entities.
-    chunks = []
-    block = ''
-    for char in clean:
-        escaped = _latency_html.escape(char)
-        if len(block) + len(escaped) > 2200:
+    # Use inline <code> per row instead of <pre>: no Telegram Copy header.
+    # Keep line boundaries and escape HTML. Conservative 2200-char chunks
+    # leave room for tags and Telegram UTF-16 accounting on all clients.
+    rows=[]
+    for line in clean.splitlines():
+        line=line.rstrip()
+        if line.startswith('===') and line.endswith('==='):
+            rows.append('<b>'+_latency_html.escape(line)+'</b>')
+        elif line:
+            if len(line)>1500:
+                # Never cut inside an entity: split raw text, escape afterwards.
+                rows.extend('<code>'+_latency_html.escape(line[i:i+1200])+'</code>'
+                            for i in range(0,len(line),1200))
+            else:
+                rows.append('<code>'+_latency_html.escape(line)+'</code>')
+        else:
+            rows.append('')
+    chunks=[];block=''
+    for row in rows:
+        candidate=(block+'\n' if block else '')+row
+        if block and len(candidate)>2200:
             chunks.append(block)
-            block = ''
-        block += escaped
-    if block:
-        chunks.append(block)
+            block=row
+        else:
+            block=candidate
+    if block:chunks.append(block)
     if not chunks:
         raise RuntimeError('консольный отчёт пустой')
-    for idx, chunk in enumerate(chunks, 1):
-        title = ('<b>⚡ OKX LATENCY — консольный отчёт (' +
-                 str(minutes) + ' мин), ' + str(idx) + '/' +
-                 str(len(chunks)) + ', ' + str(duration) + ' с</b>')
-        api.send(title + '\n<pre>' + chunk + '</pre>')
+    for idx, chunk in enumerate(chunks,1):
+        title=('<b>⚡ OKX LATENCY ('+str(minutes)+' мин) '+
+               str(idx)+'/'+str(len(chunks))+', '+str(duration)+' с</b>')
+        api.send(title+'\n'+chunk,parse_mode='HTML')
 
 
 def _latency_console_flush(api):
@@ -628,6 +883,22 @@ def _latency_console_start(api, minutes):
              ' минут. /status продолжает работать.')
 
 
+_TELEGRAM_COMMANDS = (
+    {'command':'status','description':'Кратко: PnL, позиция, сетка, BID'},
+    {'command':'full','description':'Подробная статистика и общий PnL'},
+    {'command':'latency','description':'Скорость торговли за 60 минут'},
+    {'command':'help','description':'Список команд'},
+)
+
+
+def register_command_menu(api):
+    """Register only in the authorized chat; no global bot command changes."""
+    scope={'type':'chat','chat_id':int(api.chat)}
+    api.call('setMyCommands',{'commands':list(_TELEGRAM_COMMANDS),'scope':scope})
+    api.call('setChatMenuButton',{'chat_id':int(api.chat),
+                                 'menu_button':{'type':'commands'}})
+
+
 def poll_commands(api,st):
     _latency_console_flush(api)
     updates=api.call('getUpdates',{'offset':st['updates_offset'],'timeout':0,'limit':20})
@@ -638,17 +909,26 @@ def poll_commands(api,st):
             parts=str(data.get('text','')).strip().split()
             cmd=parts[0].split('@')[0] if parts else ''
             if cmd=='/status':
-                send_report(api,status_report(parts[1] if len(parts)>1 else None, include_account=True))
-            elif cmd=='/help':
-                api.send('🤖 OKX Grid Bot\n/status — статистика активных ботов'
-                         '\n/latency — последние 60 минут'
-                         '\n/latency8h — последние 8 часов\n/help — команды')
-            elif cmd in ('/latency', '/latency8h'):
-                hours=8 if cmd=='/latency8h' or (len(parts)==2 and parts[1].casefold()=='8h') else 1
-                if ((cmd=='/latency8h' and len(parts)>1) or (cmd=='/latency' and len(parts)>1 and (len(parts)!=2 or parts[1].casefold()!='8h'))):
-                    api.send('Допустимо: /latency или /latency8h')
+                if len(parts)!=1:
+                    api.send('Допустимо: /status')
                 else:
-                    _latency_console_start(api, hours*60)
+                    api.send(compact_status_report(),parse_mode='HTML')
+            elif cmd=='/full':
+                if len(parts)>2:
+                    api.send('Допустимо: /full или /full <бот>')
+                else:
+                    send_report(api,status_report(parts[1] if len(parts)==2 else None,
+                                                  include_account=True))
+            elif cmd=='/help':
+                api.send('📊 /status — деньги и позиции одной строкой на бот'
+                         '\n📋 /full — полный отчёт и TOTAL PnL'
+                         '\n⚡ /latency — последние 60 минут'
+                         '\n/help — список команд')
+            elif cmd=='/latency':
+                if len(parts)!=1:
+                    api.send('Допустимо: /latency')
+                else:
+                    _latency_console_start(api, 60)
         save_state(st)
 
 def services_check(api,st):
@@ -697,6 +977,18 @@ def main():
         return _mon_phase(label, original_call, method, params)
     api.call = measured_telegram_call
     st=load_state()
+    # Telegram menu registration is isolated from the monitor's live polling
+    # connection and main loop; a slow Bot API call cannot delay alerts.
+    def _menu_setup():
+        menu_api=Telegram(token,chat)
+        try:
+            register_command_menu(menu_api)
+            print('TG_COMMAND_MENU=PASS',flush=True)
+        except Exception as exc:
+            print('TG_COMMAND_MENU=UNAVAILABLE '+type(exc).__name__,flush=True)
+        finally:
+            menu_api._close_http()
+    _latency_threading.Thread(target=_menu_setup,name='tg-command-menu',daemon=True).start()
     print('OKX Telegram monitor running',flush=True)
     from okx_telegram_phases_v4 import loop_end
     while True:
@@ -708,7 +1000,7 @@ def main():
             _mon_phase('services_check', services_check, api, st)
             _mon_phase('safety_check', safety_check, api, st)
             _mon_phase('poll_commands', poll_commands, api, st)
-            # Scheduled 09:00 report disabled; manual /status unchanged.
+            # Scheduled 09:00 report disabled; /full remains manual.
             _mon_phase('save_state', save_state, st)
             _mon_phase('alert_drain', alert_drain, api, st)
         except Exception as exc:
