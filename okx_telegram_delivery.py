@@ -35,25 +35,39 @@ def prune_sent(st, now):
 
 
 
-def persist(st, path=None):
-    target = Path(path) if path is not None else STATE_PATH
-    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    tmp = target.with_name(target.name + '.tmp')
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+
+_PERSIST_CACHE={}
+
+def persist(st,path=None):
+    target=Path(path) if path is not None else STATE_PATH
+    # Serialize each time, but avoid disk I/O if persistent bytes unchanged.
+    raw=json.dumps(st,ensure_ascii=False).encode('utf-8')
+    cache_key=str(target.resolve())
     try:
-        with os.fdopen(fd, 'w', encoding='utf-8') as out:
-            json.dump(st, out, ensure_ascii=False)
+        stat=target.stat()
+        identity=(stat.st_ino,stat.st_size,stat.st_mtime_ns)
+    except FileNotFoundError:
+        identity=None
+    cached=_PERSIST_CACHE.get(cache_key)
+    if identity is not None and cached is not None and cached==(raw,identity):
+        return False
+    target.parent.mkdir(parents=True,exist_ok=True,mode=0o700)
+    tmp=target.with_name(target.name+'.tmp')
+    fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+    try:
+        with os.fdopen(fd,'wb') as out:
+            out.write(raw)
             out.flush()
             os.fsync(out.fileno())
-        os.replace(tmp, target)
-        dfd = os.open(target.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(dfd)
-        finally:
-            os.close(dfd)
+        os.replace(tmp,target)
+        dfd=os.open(target.parent,os.O_RDONLY|os.O_DIRECTORY)
+        try: os.fsync(dfd)
+        finally: os.close(dfd)
     finally:
-        if tmp.exists():
-            tmp.unlink()
+        if tmp.exists(): tmp.unlink()
+    stat=target.stat()
+    _PERSIST_CACHE[cache_key]=(raw,(stat.st_ino,stat.st_size,stat.st_mtime_ns))
+    return True
 
 
 def enqueue(st, key, message, html_mode=False, path=None):

@@ -94,17 +94,19 @@ def _confirmed_archived(name, root):
         return False
 
 
+
 def refresh_bots(*,force=False):
-    global _DISCOVERY_LAST
+    global _DISCOVERY_LAST, BOT_DIRS, SERVICES
     now=time.monotonic()
     if not force and now-_DISCOVERY_LAST<15:return
-    _DISCOVERY_LAST=now
     discovered=discover_bots()
-    BOT_DIRS.clear();SERVICES.clear()
+    bots={};services={}
     for key,(root,unit) in discovered.items():
-        if _confirmed_archived(key, root):
-            continue
-        BOT_DIRS[key]=root;SERVICES[key]=unit
+        if _confirmed_archived(key,root):continue
+        bots[key]=root;services[key]=unit
+    # Replace rather than clear/update dictionaries shared with report worker.
+    BOT_DIRS=bots;SERVICES=services
+    _DISCOVERY_LAST=now
 
 
 def _active_service(name):
@@ -187,33 +189,35 @@ class TelegramPermanentError(RuntimeError):
 
 
 class Telegram:
-    def __init__(self,token,chat):
+
+    def __init__(self, token, chat):
         self.base='https://api.telegram.org/bot'+token+'/'
         self.path='/bot'+token+'/'
         self.chat=str(chat)
         self._http=None
+        self._poll_http=None
         self._http_last_used=0.0
-        # urllib respects HTTP[S]_PROXY. Preserve that behavior on VPSes
-        # configured for a proxy; otherwise reuse a verified TLS connection.
+        # One SSLContext per Telegram instance. The poller has its own instance.
+        self._tls_context=ssl.create_default_context()
         self._proxy=bool(getproxies().get('https'))
 
-    def _close_http(self):
-        conn=self._http
-        self._http=None
-        self._http_last_used=0.0
-        if conn is not None:
-            try: conn.close()
-            except OSError: pass
 
-    def call(self,method,params):
+    def _close_http(self):
+        for name in ('_http', '_poll_http'):
+            conn=getattr(self, name, None)
+            setattr(self, name, None)
+            if conn is not None:
+                try: conn.close()
+                except OSError: pass
+        self._http_last_used=0.0
+
+
+    def call(self, method, params):
         payload=json.dumps(params).encode()
-        # getUpdates is read-only and polled frequently. Give it an isolated,
-        # one-request TLS connection so a stale keep-alive cannot delay
-        # critical alert delivery. Bounded timeout prevents 18s monitor stalls.
         is_poll = method == 'getUpdates'
-        timeout = 5 if is_poll else 18
+        timeout = max(10, int(params.get('timeout', 25))+10) if is_poll else 18
         if self._proxy:
-            # Respect the configured proxy; never bypass it silently.
+            # Preserve configured proxy; never bypass it silently.
             from urllib.error import HTTPError
             req=Request(self.base+method,data=payload,headers={'Content-Type':'application/json'})
             try:
@@ -225,20 +229,23 @@ class Telegram:
                 raise
         else:
             if is_poll:
-                conn=http.client.HTTPSConnection(
-                    'api.telegram.org',timeout=timeout,context=ssl.create_default_context())
+                if self._poll_http is None:
+                    self._poll_http=http.client.HTTPSConnection(
+                        'api.telegram.org',timeout=timeout,context=self._tls_context)
+                conn=self._poll_http
             else:
-                # Alert sendMessage is never automatically resent on uncertain
-                # outcome. Refresh idle connections before the *first* send.
-                if (self._http is not None and self._http_last_used
-                        and time.monotonic()-self._http_last_used>15):
-                    self._close_http()
+                if self._http is not None and self._http_last_used and time.monotonic()-self._http_last_used>15:
+                    # Close alert connection only, never interrupt concurrent poller.
+                    conn=self._http
+                    self._http=None
+                    try: conn.close()
+                    except OSError: pass
                 if self._http is None:
                     self._http=http.client.HTTPSConnection(
-                        'api.telegram.org',timeout=timeout,context=ssl.create_default_context())
+                        'api.telegram.org',timeout=timeout,context=self._tls_context)
                 conn=self._http
             try:
-                conn.request('POST',self.path+method,body=payload,
+                conn.request('POST', self.path+method, body=payload,
                              headers={'Content-Type':'application/json'})
                 response=conn.getresponse()
                 status=response.status
@@ -248,19 +255,25 @@ class Telegram:
                 if status != 200:
                     raise RuntimeError('Telegram transient HTTP '+str(status))
                 result=json.loads(raw.decode())
-                if not is_poll:
-                    if response.will_close:
-                        self._close_http()
+                if response.will_close:
+                    if is_poll:
+                        self._poll_http=None
                     else:
-                        self._http_last_used=time.monotonic()
+                        self._http=None
+                        self._http_last_used=0.0
+                    try: conn.close()
+                    except OSError: pass
+                elif not is_poll:
+                    self._http_last_used=time.monotonic()
             except BaseException:
-                if not is_poll:
-                    self._close_http()
-                raise
-            finally:
                 if is_poll:
-                    try:conn.close()
-                    except OSError:pass
+                    self._poll_http=None
+                else:
+                    self._http=None
+                    self._http_last_used=0.0
+                try: conn.close()
+                except OSError: pass
+                raise
         if not isinstance(result,dict) or not result.get('ok'):
             raise RuntimeError('Telegram '+method+' returned not-ok')
         return result.get('result')
@@ -899,37 +912,130 @@ def register_command_menu(api):
                                  'menu_button':{'type':'commands'}})
 
 
-def poll_commands(api,st):
-    _latency_console_flush(api)
-    updates=api.call('getUpdates',{'offset':st['updates_offset'],'timeout':0,'limit':20})
-    for msg in updates:
-        st['updates_offset']=msg['update_id']+1
-        data=msg.get('message',{})
-        if str(data.get('chat',{}).get('id',''))==api.chat:
-            parts=str(data.get('text','')).strip().split()
-            cmd=parts[0].split('@')[0] if parts else ''
-            if cmd=='/status':
-                if len(parts)!=1:
-                    api.send('Допустимо: /status')
-                else:
-                    api.send(compact_status_report(),parse_mode='HTML')
-            elif cmd=='/full':
-                if len(parts)>2:
-                    api.send('Допустимо: /full или /full <бот>')
-                else:
-                    send_report(api,status_report(parts[1] if len(parts)==2 else None,
-                                                  include_account=True))
-            elif cmd=='/help':
-                api.send('📊 /status — деньги и позиции одной строкой на бот'
-                         '\n📋 /full — полный отчёт и TOTAL PnL'
-                         '\n⚡ /latency — последние 60 минут'
-                         '\n/help — список команд')
-            elif cmd=='/latency':
-                if len(parts)!=1:
-                    api.send('Допустимо: /latency')
-                else:
-                    _latency_console_start(api, 60)
-        save_state(st)
+
+def _dispatch_command(api, msg):
+    data=msg.get('message',{})
+    if not isinstance(data,dict):
+        return
+    chat=data.get('chat',{})
+    if not isinstance(chat,dict) or str(chat.get('id',''))!=api.chat:
+        return
+    parts=str(data.get('text','')).strip().split()
+    cmd=parts[0].split('@')[0] if parts else ''
+    if cmd=='/status':
+        if len(parts)!=1:
+            api.send('Допустимо: /status')
+        else:
+            api.send(compact_status_report(),parse_mode='HTML')
+    elif cmd=='/full':
+        if len(parts)>2:
+            api.send('Допустимо: /full или /full <бот>')
+        else:
+            send_report(api,status_report(parts[1] if len(parts)==2 else None,
+                                          include_account=True))
+    elif cmd=='/help':
+        api.send('📊 /status — деньги и позиции одной строкой на бот'
+                 '\n📋 /full — полный отчёт и TOTAL PnL'
+                 '\n⚡ /latency — последние 60 минут'
+                 '\n/help — список команд')
+    elif cmd=='/latency':
+        if len(parts)!=1:
+            api.send('Допустимо: /latency')
+        else:
+            _latency_console_start(api,60)
+
+
+# The polling and command workers never own the persisted monitor state.
+# Only the main safety thread durably advances updates_offset, then ACKs poller.
+import queue as _cmd_queue
+import threading as _cmd_threading
+
+class _CommandBridge:
+    def __init__(self, token, chat, offset):
+        self.token=token;self.chat=chat
+        self.offset=int(offset)
+        self.inbox=_cmd_queue.Queue(maxsize=1)
+        self.done=_cmd_queue.Queue(maxsize=1)
+        self.ack=_cmd_queue.Queue(maxsize=1)
+        self._cmd_thread=_cmd_threading.Thread(target=self._command_loop,
+            name='tg-command-worker',daemon=True)
+        self._poll_thread=_cmd_threading.Thread(target=self._poll_loop,
+            name='tg-longpoll-worker',daemon=True)
+
+    def start(self):
+        self._cmd_thread.start()
+        self._poll_thread.start()
+
+    def _poll_loop(self):
+        api=Telegram(self.token,self.chat)
+        error_count=0
+        while True:
+            try:
+                # The offset is not advanced merely by receiving an update.
+                updates=api.call('getUpdates',{'offset':self.offset,'timeout':25,'limit':20})
+                if not isinstance(updates,list):
+                    raise RuntimeError('Invalid Telegram getUpdates result')
+                error_count=0
+                for message in updates:
+                    if not isinstance(message,dict) or type(message.get('update_id')) is not int:
+                        raise RuntimeError('Invalid Telegram update: no update_id')
+                    update_id=message['update_id']
+                    if update_id<self.offset:
+                        continue
+                    self.inbox.put(message)
+                    # One in-flight update: no duplicate execution, bounded RAM.
+                    acknowledged=self.ack.get()
+                    if acknowledged==update_id+1:
+                        self.offset=acknowledged
+                    else:
+                        raise RuntimeError('Command not durably acknowledged')
+            except Exception as exc:
+                # getUpdates is retriable; sendMessage is never automatically
+                # retried by Telegram.call() on an uncertain HTTP outcome.
+                api._close_http()
+                error_count=min(error_count+1,10)
+                print('TG_LONGPOLL_RETRY',type(exc).__name__,flush=True)
+                time.sleep(min(10, 1 if error_count==1 else 2**min(error_count-1,4)))
+
+    def _command_loop(self):
+        api=Telegram(self.token,self.chat)
+        while True:
+            try:
+                message=self.inbox.get(timeout=0.25)
+            except _cmd_queue.Empty:
+                try:
+                    _latency_console_flush(api)
+                except Exception as exc:
+                    print('TG_LATENCY_FLUSH_ERROR',type(exc).__name__,flush=True)
+                continue
+            update_id=message['update_id']
+            try:
+                _dispatch_command(api,message)
+                self.done.put((update_id,True))
+            except Exception as exc:
+                print('TG_COMMAND_ERROR',type(exc).__name__,flush=True)
+                api._close_http()
+                self.done.put((update_id,False))
+
+    def commit_completion(self, st):
+        try:
+            update_id, success=self.done.get_nowait()
+        except _cmd_queue.Empty:
+            return False
+        if success:
+            prev=int(st.get('updates_offset',0))
+            if update_id>=prev:
+                st['updates_offset']=update_id+1
+                try:
+                    save_state(st)  # MUST fsync before ACK/re-poll
+                except BaseException:
+                    st['updates_offset']=prev
+                    self.ack.put(None)
+                    raise
+            self.ack.put(update_id+1)
+        else:
+            self.ack.put(None)  # replay update, at least once
+        return True
 
 def services_check(api,st):
     service_check(api,st,SERVICES,BOT_DIRS)
@@ -966,19 +1072,18 @@ def daily_check(api,st,now=None):
         st['daily_date']=day
 
 
+
 def main():
     from okx_telegram_io_probe import install as _mon_io_install, tick as _mon_io_tick
     _mon_io_install()
     token,chat=read_env(Path(os.environ.get('OKX_TELEGRAM_CONFIG','/etc/okxbot/telegram.env')))
     api=Telegram(token,chat)
-    original_call = api.call
-    def measured_telegram_call(method, params):
-        label = 'telegram.http.' + (method if method in ('getUpdates','sendMessage') else 'other')
-        return _mon_phase(label, original_call, method, params)
-    api.call = measured_telegram_call
+    original_call=api.call
+    def measured_telegram_call(method,params):
+        label='telegram.http.'+(method if method in ('getUpdates','sendMessage') else 'other')
+        return _mon_phase(label,original_call,method,params)
+    api.call=measured_telegram_call
     st=load_state()
-    # Telegram menu registration is isolated from the monitor's live polling
-    # connection and main loop; a slow Bot API call cannot delay alerts.
     def _menu_setup():
         menu_api=Telegram(token,chat)
         try:
@@ -989,28 +1094,43 @@ def main():
         finally:
             menu_api._close_http()
     _latency_threading.Thread(target=_menu_setup,name='tg-command-menu',daemon=True).start()
-    print('OKX Telegram monitor running',flush=True)
+    bridge=_CommandBridge(token,chat,st.get('updates_offset',0))
+    bridge.start()
+    print('OKX Telegram monitor running T1-T4',flush=True)
     from okx_telegram_phases_v4 import loop_end
+    next_cycle=time.monotonic()
     while True:
-        cycle_started = time.monotonic()
+        now=time.monotonic()
+        if now>=next_cycle:
+            cycle_started=now
+            try:
+                _mon_phase('refresh',refresh_bots)
+                _mon_phase('snapshot',begin_systemd_snapshot,SERVICES)
+                _mon_phase('ingest_events',ingest_events,api,st)
+                _mon_phase('services_check',services_check,api,st)
+                _mon_phase('safety_check',safety_check,api,st)
+                _mon_phase('save_state',save_state,st)
+                _mon_phase('alert_drain',alert_drain,api,st)
+            except Exception as exc:
+                print('Telegram monitor retry:',type(exc).__name__,flush=True)
+                try: alert_drain(api,st)
+                except Exception: pass
+            loop_end(time.monotonic()-cycle_started)
+            _mon_io_tick()
+            # Never delay a planned safety pass because commands arrive.
+            next_cycle += POLL_SECONDS
+            if next_cycle<=time.monotonic():
+                next_cycle=time.monotonic()+POLL_SECONDS
+        # Wake immediately when worker completes, never sleep(5) unconditionally.
         try:
-            _mon_phase('refresh', refresh_bots)
-            _mon_phase('snapshot', begin_systemd_snapshot, SERVICES)
-            _mon_phase('ingest_events', ingest_events, api, st)
-            _mon_phase('services_check', services_check, api, st)
-            _mon_phase('safety_check', safety_check, api, st)
-            _mon_phase('poll_commands', poll_commands, api, st)
-            # Scheduled 09:00 report disabled; /full remains manual.
-            _mon_phase('save_state', save_state, st)
-            _mon_phase('alert_drain', alert_drain, api, st)
+            update_id,success=bridge.done.get(timeout=max(0.0,next_cycle-time.monotonic()))
+        except _cmd_queue.Empty:
+            continue
+        bridge.done.put((update_id,success))
+        try:
+            bridge.commit_completion(st)
         except Exception as exc:
-            # No credentials or outbound URL in diagnostics, ever.
-            print('Telegram monitor retry:',type(exc).__name__,flush=True)
-            try: alert_drain(api,st)
-            except Exception: pass
-        loop_end(time.monotonic() - cycle_started)
-        _mon_io_tick()
-        time.sleep(POLL_SECONDS)
+            print('TG_COMMAND_ACK_ERROR',type(exc).__name__,flush=True)
 
 
 if __name__=='__main__':main()

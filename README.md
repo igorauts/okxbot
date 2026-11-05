@@ -1,5 +1,11 @@
 # OKX Grid Bot
 
+## v0.7.59 — Telegram Monitor T1–T4 (05.11.2026)
+
+Maintenance-пакет: long polling 25 с, команды в отдельном worker, запись состояния только при изменениях, системная проверка раз в 15 с. Торговый движок v0.7.57 не изменён. См. `V0759_TELEGRAM_T1_T4_RELEASE_NOTES_RU.md`.
+
+
+
 ## v0.7.58 — Telegram Financial UI maintenance (05.11.2026)
 Пакет v0.7.58 обновляет Telegram `/status`, `/full`, `/latency`, `/help` и GET-only отображение баланса. **Торговый движок v0.7.57 не меняется.** Подробности: `V0758_TELEGRAM_UI_RELEASE_NOTES_RU.md`.
 

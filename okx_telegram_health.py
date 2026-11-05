@@ -24,35 +24,43 @@ _SHOW_KEYS = ('Id', 'ActiveState', 'SubState', 'InvocationID', 'MainPID',
               'ActiveEnterTimestampMonotonic', 'Result', 'NRestarts',
               'LoadState')
 
-def begin_systemd_snapshot(services):
-    """One systemctl show for engines, observers and Reader per poll.
-    Unknown/malformed units fall back to individual show (no false healthy).
+
+_SHOW_LAST_TIME=0.0
+_SHOW_LAST_UNITS=()
+
+def begin_systemd_snapshot(services,force=False):
+    """Snapshot at most once/15 seconds; retain a verified snapshot in between.
+    No changes to 5-second engine heartbeats or Reader IPC health checks.
     """
-    _SHOW_CACHE.clear()
-    unit_names = list(dict.fromkeys(
-        [str(u).removesuffix('.service') + '.service' for u in services.values()] +
+    global _SHOW_LAST_TIME, _SHOW_LAST_UNITS
+    unit_names=list(dict.fromkeys(
+        [str(u).removesuffix('.service')+'.service' for u in services.values()] +
         [f'observer-{str(u).removesuffix(".service")}-{kind}.service'
-         for u in services.values() for kind in ('burst', 'execution')] +
+         for u in services.values() for kind in ('burst','execution')] +
         ['okx-position-reader.service']))
-    cmd = ['systemctl', 'show', '--no-pager']
-    for key in _SHOW_KEYS:
-        cmd += ['-p', key]
-    cmd += unit_names
+    now=time.monotonic()
+    if not force and _SHOW_LAST_UNITS==tuple(unit_names) and now-_SHOW_LAST_TIME<15:
+        return
+    _SHOW_CACHE.clear()
+    cmd=['systemctl','show','--no-pager']
+    for key in _SHOW_KEYS:cmd+=['-p',key]
+    cmd+=unit_names
     try:
-        result = _run(cmd, timeout=7)
-        # A missing archived unit can make systemctl exit nonzero; preserve
-        # the valid records it did return instead of falling back for all.
-        allowed = set(unit_names)
+        result=_run(cmd,timeout=7)
+        allowed=set(unit_names)
         for block in result.stdout.split('\n\n'):
-            props = dict(line.split('=', 1) for line in block.splitlines()
-                         if '=' in line)
-            unit = props.get('Id', '')
+            props=dict(line.split('=',1) for line in block.splitlines() if '=' in line)
+            unit=props.get('Id','')
             if unit in allowed:
-                value = (props if props.get('ActiveState') and
-                         props.get('LoadState') != 'not-found' else None)
-                _SHOW_CACHE[unit] = value
-                _SHOW_CACHE[unit.removesuffix('.service')] = value
-    except (OSError, subprocess.TimeoutExpired, ValueError):
+                value=(props if props.get('ActiveState') and
+                       props.get('LoadState')!='not-found' else None)
+                _SHOW_CACHE[unit]=value
+                _SHOW_CACHE[unit.removesuffix('.service')]=value
+        if _SHOW_CACHE:
+            _SHOW_LAST_TIME=now
+            _SHOW_LAST_UNITS=tuple(unit_names)
+    except (OSError,subprocess.TimeoutExpired,ValueError):
+        # Don't mark stale data healthy or promote systemctl failures to STOPPED.
         pass
 
 def _show(unit):

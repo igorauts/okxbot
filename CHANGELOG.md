@@ -1,3 +1,11 @@
+## v0.7.59 — 2026-11-05 — Telegram long polling / command workers / I/O maintenance (engine 0.7.57)
+- T1: 25s Telegram long polling в отдельном потоке, TLS reuse, bounded command queue и обработка offset только после сохранения.
+- T2: `/status`, `/full`, `/latency`, `/help` вне 5s safety loop.
+- T3: Telegram state JSON+fsync только при изменениях; durable инциденты сохраняют барьер.
+- T4: systemd snapshot раз в 15s при неизменной частоте safety/heartbeat.
+- Telegram-only LIVE install PASS 05 Nov 17:50 UTC, 7/7 engines и Reader не перезапускались; ручные команды ответили быстро. Публикация GitHub не меняет LIVE; длительная телеметрия отложена по решению оператора.
+- Торговый engine, его манифест, Reader, StatsWorker и торговая стратегия не изменились.
+
 ## v0.7.58 — 2026-11-05 — Telegram Financial UI maintenance (engine 0.7.57)
 
 - Telegram-only LIVE sync: compact `/status`, `/full` TOTAL PnL at bottom, circle indicators per bot and square for account TOTAL, `/latency` 60 min without Copy block, `/help` + command menu.
