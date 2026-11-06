@@ -127,3 +127,9 @@ python3 -B -m unittest tests.test_tp_rearm_without_quiet_wait_p0 -q
 # v0.7.57 candidate-only offline tests; NEVER run from the GitHub publisher.
 python3 -B -m unittest tests.test_v0757_idle_cancel_socket -q
 python3 -B -m unittest tests.test_v0757_latency_discovery -q
+
+# Current observer / Telegram persistent queue / deployment safety contracts.
+python3 -B -m unittest tests.test_v0761_maintenance -q
+
+# Telegram event cursor checkpoint: bounded replay + durable alerts and ACK.
+python3 -B -m unittest tests.test_b2_offsets_checkpoint -q

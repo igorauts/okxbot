@@ -59,8 +59,17 @@ class S1Contracts(unittest.TestCase):
             types.SimpleNamespace(returncode=0,stdout=(
                 'okx-grid-testbeta.service enabled enabled\n'
                 'okx-grid-archived.service disabled enabled\n'))))
-        with mock.patch.object(mod.subprocess,'run',side_effect=lambda *a,**k:next(answers)):
-            units=mod.discover_units()
+        # Isolate the sampler's hourly cache from the host. Otherwise a warm
+        # LIVE cache bypasses the mocked list-unit-files response and makes
+        # this test depend on whatever services the VPS currently runs.
+        with tempfile.TemporaryDirectory() as td:
+            cache_root=Path(td)
+            with mock.patch.object(mod,'ROOT',cache_root), \
+                 mock.patch.object(mod,'UNIT_FILE_CACHE',cache_root/'enabled_unit_files_cache_v1.json'), \
+                 mock.patch.object(mod.subprocess,'run',side_effect=lambda *a,**k:next(answers)) as run:
+                units=mod.discover_units()
+            self.assertEqual(run.call_count,2, 'Cold-cache discovery must query both systemd lists')
+            self.assertTrue((cache_root/'enabled_unit_files_cache_v1.json').exists())
         self.assertIn('okx-grid-testalpha.service',units)
         self.assertIn('okx-grid-testbeta.service',units)
         self.assertNotIn('okx-grid-archived.service',units)

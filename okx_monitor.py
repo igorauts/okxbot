@@ -22,17 +22,27 @@ def _enabled(unit):
         return False
 
 
+def _effective_unit(service,kind):
+    # The manager's status must use the same combined-unit preference as its
+    # on/off operations. A present but stopped combined unit still wins.
+    combined=unit_name(service,'combined')
+    if (Path('/etc/systemd/system',combined).is_file() or
+            _active(combined) or _enabled(combined)):
+        return combined
+    return unit_name(service,kind)
+
+
 def monitor_state(service,root,kind):
     if not supports_versionless(root,service):
         return {'managed':(), 'external':()}
-    unit=unit_name(service,kind)
+    unit=_effective_unit(service,kind)
     return {'managed':(unit,) if _enabled(unit) or _active(unit) else (), 'external':()}
 
 
 def label(service,root,kind):
     st=monitor_state(service,root,kind)
-    unit=unit_name(service,kind)
-    if unit not in st['managed']:return 'OFF'
+    if not st['managed']:return 'OFF'
+    unit=st['managed'][0]
     if _active(unit):return 'ON'
     if _active(service+'.service'):return 'ERROR (монитор не работает)'
     return 'ARMED (автозапуск)'

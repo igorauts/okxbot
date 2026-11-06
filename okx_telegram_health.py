@@ -36,7 +36,7 @@ def begin_systemd_snapshot(services,force=False):
     unit_names=list(dict.fromkeys(
         [str(u).removesuffix('.service')+'.service' for u in services.values()] +
         [f'observer-{str(u).removesuffix(".service")}-{kind}.service'
-         for u in services.values() for kind in ('burst','execution')] +
+         for u in services.values() for kind in ('burst','execution','combined')] +
         ['okx-position-reader.service']))
     now=time.monotonic()
     if not force and _SHOW_LAST_UNITS==tuple(unit_names) and now-_SHOW_LAST_TIME<15:
@@ -577,6 +577,22 @@ def _observer_enabled(unit, now, props=None):
     return enabled
 
 
+def _observer_layout(st, name, trade_unit):
+    """Combined layout is sticky once detected, including across restarts.
+
+    A removed/broken combined unit must not silently fall back to disabled
+    legacy units; legacy mode remains supported for bots not migrated yet.
+    """
+    expected=st.setdefault('observer_layout_v1', {})
+    combined=f'observer-{trade_unit.removesuffix(".service")}-combined.service'
+    info=_show(combined)
+    installed=(info is not None or
+               (Path('/etc/systemd/system')/combined).is_file())
+    if installed:
+        expected[name]='combined'
+    return ('combined' if installed or expected.get(name)=='combined' else 'legacy', info)
+
+
 def observers_check(api, st, services, roots, now=None):
     now = time.time() if now is None else now
     watches = st.setdefault(state_key('observers_health'), {})
@@ -584,51 +600,61 @@ def observers_check(api, st, services, roots, now=None):
         trade = _show(trade_unit)
         if not trade or trade.get('ActiveState') != 'active':
             continue
-        for kind in ('burst', 'execution'):
-            unit = f'observer-{trade_unit.removesuffix(".service")}-{kind}.service'
-            token = f'{name}/{kind}'
-            info = _show(unit)
-            if info is None:
+        layout, combined_info = _observer_layout(st,name,trade_unit)
+        for kind in (('combined',) if layout=='combined' else ('burst','execution')):
+            unit=f'observer-{trade_unit.removesuffix(".service")}-{kind}.service'
+            token=f'{name}/{kind}'
+            info=combined_info if kind=='combined' else _show(unit)
+            # Legacy missing service was never automatically monitored; a
+            # previously attested combined service *must* remain monitored.
+            if info is None and kind!='combined':
                 continue
-            enabled = _observer_enabled(unit, now, info)
-            if enabled is None:
-                continue  # unknown is not healthy; do not synthesize false alarm
-            if enabled not in ('enabled', 'enabled-runtime'):
-                watches.pop(token, None)  # Intentionally disabled: no alarm.
+            enabled=_observer_enabled(unit,now,info) if info else None
+            if kind=='combined' and info is None:
+                reason='combined service missing'
+                running=False
+            elif enabled is None:
+                # Do not synthesize a healthy observation on systemctl failure.
                 continue
-            running = info.get('ActiveState') == 'active'
-            summary = observer_dir(roots[name], kind) / 'summary.json'
-            try:
-                ts = summary.stat().st_mtime
-                fresh = 0 <= now - ts <= OBSERVER_STALE_SEC
-            except OSError:
-                fresh = False
-            reason = (None if running and fresh else
-                      ('service inactive' if not running else 'measurements stale >90s'))
-            # Do not reset a persistent stale-data fault when the observer crash-loops.
-            rec = _health_record(watches, token, now)
-            elapsed_bad = _observe_fault(rec, reason, now)
+            elif enabled not in ('enabled','enabled-runtime'):
+                watches.pop(token,None)  # Intentionally disabled: no alarm.
+                continue
+            else:
+                running=info.get('ActiveState')=='active'
+                stale=[]
+                for mode in (('burst','execution') if kind=='combined' else (kind,)):
+                    path=observer_dir(roots[name],mode)/'summary.json'
+                    try:
+                        age=now-path.stat().st_mtime
+                        fresh=0<=age<=OBSERVER_STALE_SEC
+                    except OSError:
+                        fresh=False
+                    if not fresh:stale.append(mode)
+                reason=(None if running and not stale else
+                        ('service inactive' if not running else
+                         'measurements stale >90s: '+','.join(stale)))
+            rec=_health_record(watches,token,now)
+            elapsed_bad=_observe_fault(rec,reason,now)
             if reason:
-                minimum = (OBSERVER_INACTIVE_CONFIRM_SEC if not running else
-                           OBSERVER_CONFIRM_SEC)
-                if (elapsed_bad is not None and elapsed_bad >= minimum and
-                        rec.get('bad_count', 0) >= 3 and
-                        rec.get('fault') is None):
-                    one(api, st, f'observer/fault/{token}/{int(now)}',
+                minimum=(OBSERVER_INACTIVE_CONFIRM_SEC if not running else
+                         OBSERVER_CONFIRM_SEC)
+                if (elapsed_bad is not None and elapsed_bad>=minimum and
+                        rec.get('bad_count',0)>=3 and rec.get('fault') is None):
+                    one(api,st,f'observer/fault/{token}/{int(now)}',
                         f'🚨 OBSERVER {kind.upper()} | {name}\n{reason}')
-                    rec['fault'] = reason
-                elif (rec.get('fault') == 'measurements stale >90s' and
-                      reason == 'service inactive' and elapsed_bad is not None and
-                      elapsed_bad >= OBSERVER_INACTIVE_CONFIRM_SEC and
-                      rec.get('bad_count', 0) >= 3):
-                    # True escalation: summary stale AND systemd has now failed.
-                    one(api, st, f'observer/fault/escalated/{token}/{int(now)}',
-                        f'🚨 OBSERVER {kind.upper()} | {name}\nservice inactive')
-                    rec['fault'] = reason
-            elif _confirmed_recovery(rec, now):
-                one(api, st, f'observer/normal/{token}/{int(now)}',
+                    rec['fault']=reason
+                elif (isinstance(rec.get('fault'),str) and
+                      rec['fault'].startswith('measurements stale') and
+                      reason in ('service inactive','combined service missing') and
+                      elapsed_bad is not None and elapsed_bad>=OBSERVER_INACTIVE_CONFIRM_SEC and
+                      rec.get('bad_count',0)>=3):
+                    one(api,st,f'observer/fault/escalated/{token}/{int(now)}',
+                        f'🚨 OBSERVER {kind.upper()} | {name}\n{reason}')
+                    rec['fault']=reason
+            elif _confirmed_recovery(rec,now):
+                one(api,st,f'observer/normal/{token}/{int(now)}',
                     f'✅ BACK TO NORMAL | {name}\nObserver {kind} работает, данные свежие')
-                rec.update({'fault': None, 'good_since': None, 'good_count': 0})
+                rec.update({'fault':None,'good_since':None,'good_count':0})
 
 
 def panic_ack_check(api, st, services, roots):

@@ -1022,8 +1022,10 @@ class _CommandBridge:
             update_id, success=self.done.get_nowait()
         except _cmd_queue.Empty:
             return False
+        prev=int(st.get('updates_offset',0))
+        failures=st.setdefault('telegram_command_failures_v1', {})
+        key=str(update_id)
         if success:
-            prev=int(st.get('updates_offset',0))
             if update_id>=prev:
                 st['updates_offset']=update_id+1
                 try:
@@ -1032,9 +1034,49 @@ class _CommandBridge:
                     st['updates_offset']=prev
                     self.ack.put(None)
                     raise
+            failures.pop(key,None)
             self.ack.put(update_id+1)
-        else:
-            self.ack.put(None)  # replay update, at least once
+            return True
+        rec=failures.get(key) if isinstance(failures.get(key),dict) else {}
+        attempts=int(rec.get('attempts',0))+1
+        failures[key]={'attempts':attempts,'at':time.time()}
+        # This is a command-specific budget. A successful getUpdates must not
+        # reset it. An exception during persistence does not acknowledge update.
+        if attempts<3:
+            try:
+                save_state(st)
+            except BaseException:
+                self.ack.put(None)
+                raise
+            print('TG_COMMAND_RETRY',update_id,attempts,flush=True)
+            self.ack.put(None)
+            return True
+        # Dead-letter is an explicit, durable failure, never a silent skip.
+        # Enqueue first (fsync), then durably commit the terminal update offset.
+        from okx_telegram_delivery import enqueue
+        audit=st.setdefault('telegram_failed_updates_v1', {})
+        audit[key]={'attempts':attempts,'failed_at':time.time()}
+        # Bound retained history, without removing newest failure.
+        while len(audit)>128:
+            audit.pop(next(iter(audit)))
+        try:
+            enqueue(st, 'telegram/command_failed/'+key,
+                    '⚠️ Telegram-команда update_id='+key+
+                    ' завершилась ошибкой 3 раза; сохранена в журнале неудачных команд. '+
+                    'Очередь разблокирована, отправьте команду повторно.')
+        except BaseException:
+            self.ack.put(None)
+            raise
+        st['updates_offset']=max(prev,update_id+1)
+        try:
+            save_state(st)
+        except BaseException:
+            st['updates_offset']=prev
+            self.ack.put(None)
+            raise
+        failures.pop(key,None)
+        self.ack.put(update_id+1)
+        print('TG_COMMAND_DEAD_LETTER',update_id,flush=True)
         return True
 
 def services_check(api,st):

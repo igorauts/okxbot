@@ -28,7 +28,7 @@ REGISTRY=Path('/root/okx/.okxbot_registry.json')
 BACKUPS=Path('/srv/okxbot-live-backups')
 READER_UNIT='okx-position-reader.service'
 TELEGRAM_UNIT='okx-telegram-monitor.service'
-WATCHDOG_UNIT='okx-position-reader-watchdog.timer'
+WATCHDOG_UNIT='okx-position-reader-watchdog.service'
 # Exactly attested current LIVE baselines: installed new-bot autoreg patch +
 # verified published v0.7.35 Telegram modules. No version-string asserts.
 BASELINE={
@@ -185,6 +185,7 @@ def atomic_install(src,dst):
 
 
 def apply(args):
+    raise RuntimeError('RETIRED legacy pinned shared installer: do not deploy old Reader/Telegram code; use a current reviewed release')
     before=preflight(args)
     if not args.confirm_live_reader_telegram_restart:
         raise RuntimeError('Explicit LIVE confirmation required')

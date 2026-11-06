@@ -1,3 +1,7 @@
+## v0.7.61 — Telegram N1/B1/B2/N2/N3 (06.11.2026)
+
+Maintenance: алерты combined observers, ограниченные повторы Telegram-команд, checkpoint курсоров журналов и BUY, корректный UI observers, защита от старого watchdog timer. Торговый движок v0.7.60 не менялся. См. `V0761_N1_B1_B2_N2_N3_RELEASE_NOTES_RU.md`.
+
 ## v0.7.60 — S1–S3 и D1: снижение фоновой нагрузки (05.11.2026)
 
 Watchdog — постоянный процесс; resource sampler — кеш systemd units на час; combined observers — один процесс на бота; drawdown — прежние расчёты каждые 5 секунд с более редкой записью current. Торговый движок v0.7.60. См. `V0760_S1_S2_S3_D1_LIVE_RELEASE_NOTES_RU.md`.

@@ -1,3 +1,10 @@
+## v0.7.61 — 2026-11-06 — Telegram N1/B1/B2/N2/N3 maintenance (engine 0.7.60)
+- Combined observer health alerts, terminal command retry/dead-letter, and combined observer UI.
+- Event and BUY cursor periodic checkpoints reduce redundant fsync; Telegram ACK/outbox remain durable.
+- Legacy watchdog timer deploy disabled/removed, S1 sampler test cache isolation, regression coverage in run_checks.
+- LIVE Telegram-only rollout PASS; observed state file writes 16→7 per 120s in two windows; trading engines/Reader unchanged.
+- GitHub publication only; no LIVE changes, no tests during publish.
+
 ## v0.7.60 — 2026-11-05 — S1–S3/D1 resource maintenance (engine 0.7.60)
 - S1: Reader Watchdog long-lived, 20s policy cycle; timer disabled, unchanged restart protections.
 - S2: VPS resource sampler dynamic unit-list cache 1h, active resource sampling unchanged.
