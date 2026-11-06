@@ -216,8 +216,8 @@ class IdleGetConnectionTest(unittest.TestCase):
 
 
 class WiringAndSafetyTest(unittest.TestCase):
-    def test_live_worker_has_market_and_stats_only_does_not(self):
-        # RAM-safety rollback contract: LIVE uses the exact original FULL oracle.
+    def test_live_worker_uses_single_incremental_authority_with_full_only_for_manual_audit(self):
+        # Migration contract: LIVE uses one durable incremental authority; FULL is operator-only.
         text=(BASE/'okx_bot.py').read_text(encoding='utf-8')
         tree=ast.parse(text)
         classes=[n for n in tree.body if isinstance(n,ast.ClassDef) and n.name=='StatsWorker']
@@ -232,23 +232,15 @@ class WiringAndSafetyTest(unittest.TestCase):
         def attr(value,name):
             return isinstance(value,ast.Attribute) and isinstance(value.value,ast.Name) \
                    and value.value.id=='self' and value.attr==name
-        for name in ('stats_cache','finance_cache'):
-            assigns=[n for n in ast.walk(init[0]) if isinstance(n,ast.Assign)
-                     and len(n.targets)==1 and attr(n.targets[0],name)]
-            self.assertEqual(len(assigns),1)
-            self.assertIsInstance(assigns[0].value,ast.Constant)
-            self.assertIsNone(assigns[0].value.value)
         self.assertEqual(len(calls(init[0],'StatsSourceCache')),0)
         self.assertEqual(len(calls(init[0],'IncrementalFinance')),0)
-        stats=calls(run[0],'print_full_stats')
-        self.assertEqual(len(stats),1)
-        self.assertEqual(len(stats[0].args),1)
-        self.assertTrue(attr(stats[0].args[0],'pnl'))
-        kw={k.arg:k.value for k in stats[0].keywords}
-        for key,name in (('market','market'),('stats_cache','stats_cache'),
-                         ('finance_cache','finance_cache')):
-            self.assertTrue(attr(kw.get(key),name))
-        self.assertIn('STATS_CACHE_MODE=ORIGINAL_FULL_LOW_RAM',text)
+        self.assertEqual(len(calls(run[0],'print_full_stats')),0)
+        self.assertEqual(len(calls(run[0],'print_verified_incremental_stats')),1)
+        self.assertIn('STATS_CACHE_MODE=INCREMENTAL_SINGLE_AUTHORITY',text)
+        self.assertIn('STATS_V2_FAIL_CLOSED:',text)
+        self.assertIn('SingleAuthorityStats(ROOT,INST',text)
+        self.assertIn('ROOT/\'state\'/\'stats_v2.sqlite\'',text)
+        self.assertNotIn('STATS_CACHE_MODE=ORIGINAL_FULL_LOW_RAM',text)
         # Oracle, exact-fill recovery, snapshot ledger parity and stale
         # stats-only independence must all remain reachable in the source.
         oracle=[n for n in tree.body if isinstance(n,ast.FunctionDef) and n.name=='print_full_stats']

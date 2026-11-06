@@ -4953,48 +4953,123 @@ class BotDrawdownSampler:
                 except Exception:
                     pass
 
+def print_verified_incremental_stats(core, *, market=None):
+    """Publish one complete verified Stats-v2 generation; never invoke FULL history.
+
+    All calls are from StatsWorker. Legacy FULL remains available for explicit
+    operator audits, not for an automatic background fallback.
+    """
+    from okx_stats_v2_contract import NotReady
+    # A genuine creation-time capital anchor is required. Do NOT infer 1x
+    # reference from only the bounded HOT fill window.
+    if not GRID_REFERENCE.exists():
+        raise NotReady('Missing original creation-time capital anchor')
+    bid=stats_capture_bid(market)
+    capture=core.compute(bid)
+    st=capture.state
+    now=capture.captured_at
+    # All financial rendering functions receive the SAME verified snapshot;
+    # precomputed last_24h avoids rescanning historical archived fills.
+    report=format_okx_report(st,capture.fills_hot,capture.stats,now=now,
+                             snapshot_archive=[],precomputed_24h=capture.last_24h)
+    detail=performance_snapshot(st,capture.fills_hot,capture.stats,now,
+                                snapshot_archive=[],precomputed_24h=capture.last_24h)
+    # Stats computation checks state after reading; publish must check again.
+    if financial_signature(st)!=financial_signature(json.loads(DATA.read_text())):
+        raise NotReady('Trading state changed before Stats-v2 publication')
+    anchor={'schema':1,'instrument':INST,
+            'signature':financial_signature(st),
+            'total_pnl_usdt':str(capture.stats['total_gain']),
+            'open_contracts':str(capture.stats['open_contracts']),
+            'bid':str(bid),'at':now}
+    payload={'schema_version':1,'complete':True,'instrument':INST,
+             'bot_version':VER,
+             'generated_at':datetime.fromtimestamp(now,timezone.utc).isoformat(),
+             'generated_at_unix':now,'performance':detail,
+             'performance_v0724':detail,'report':report,
+             'stats_v2':{'schema':1,'mode':'single_authority_incremental',
+                         'generation':capture.sidecar_generation,
+                         'frozen_new':capture.frozen_new,
+                         'pending':capture.pending,'hot_cycles':capture.hot_cycles},
+             'financial_anchor':anchor}
+    # Canonical financial payload + anchor is ONE atomic stats.json replace.
+    # Legacy external consumers read stats.json and the compatibility anchor:
+    # an interrupted publication produces timestamp mismatch (fail-closed UI),
+    # never a fabricated generation. Do not advertise 2-file atomicity.
+    atomic_json(STATS_FILE,payload)
+    atomic_json(STATS_FINANCIAL_ANCHOR,anchor)
+    print('STATS_V2_VERIFIED_PUBLISHED generation=',capture.sidecar_generation,
+          'hot_cycles=',capture.hot_cycles,'pending=',capture.pending,
+          'frozen_new=',capture.frozen_new,flush=True)
+    return True
+
+
 class StatsWorker(threading.Thread):
-    """Snapshot-based finance; bounded retries even when fills never go quiet."""
+    """One bounded incremental accounting worker, never the trading loop."""
     def __init__(self,pnl,market=None):
         super().__init__(daemon=True)
         self.pnl=pnl
         self.market=market
-        # P0 RAM relief: no permanently retained fills/archived-cycle caches.
-        # Original verified FULL finance + original FillStore are unchanged.
-        self.stats_cache=None
-        self.finance_cache=None
-        print('STATS_CACHE_MODE=ORIGINAL_FULL_LOW_RAM',flush=True)
+        print('STATS_CACHE_MODE=INCREMENTAL_SINGLE_AUTHORITY',flush=True)
 
     def run(self):
-            last_attempt=0.0
-            last_success=0.0
-            unsuccessful=False
-            while True:
-                delay=5
-                now=time.monotonic()
-                try:
-                    if unsuccessful:
-                        due=now-last_attempt>=60
-                    else:
-                        due=(not last_success or now-last_success>=STATS_INTERVAL)
-                        if not due and now-last_attempt>=STATS_FINANCIAL_CHANGE_MIN_SEC and DATA.exists() and STATS_FINANCIAL_ANCHOR.exists():
-                            current=json.loads(DATA.read_text())
-                            anchor=json.loads(STATS_FINANCIAL_ANCHOR.read_text())
-                            due=financial_signature(current)!=anchor.get('signature')
-                    if due:
-                        last_attempt=now
-                        successful=bool(print_full_stats(self.pnl,market=self.market,stats_cache=self.stats_cache,finance_cache=self.finance_cache))
-                        unsuccessful=not successful
-                        if successful:last_success=time.monotonic()
-                except RateLimitedError:
-                    unsuccessful=True
-                    delay=60
-                    print('⏳ OKX ограничил историю сделок; статистика повторится через 60с',flush=True)
-                except Exception as e:
-                    unsuccessful=True
-                    print('⚠️ Статистика недоступна:',type(e).__name__,str(e)[:180],flush=True)
-                time.sleep(delay)
-
+        from okx_stats_v2_contract import Drift, NotReady
+        from okx_stats_v2_production import SingleAuthorityStats
+        oracle={'full_stats_snapshot':full_stats_snapshot,
+                'allocated_market_fills':allocated_market_fills,
+                '_last_24h_profit':_last_24h_profit,
+                'stats_pct':stats_pct}
+        last_attempt=0.0
+        last_success=0.0
+        unsuccessful=False
+        core=None
+        while True:
+            delay=5.0
+            now=time.monotonic()
+            try:
+                if core is None:
+                    # Only the StatsWorker thread owns this sidecar. No change
+                    # to trade worker, BUY/TP/MARKET or PnL writer locks.
+                    core=SingleAuthorityStats(ROOT,INST,ROOT/'state'/'stats_v2.sqlite',
+                        oracle=oracle,fill_store=FILL_STORE,
+                        expected_filled_orders=expected_filled_orders,
+                        contract_value=CONTRACT_VALUE)
+                if unsuccessful:
+                    due=now-last_attempt>=30
+                else:
+                    due=(not last_success or now-last_success>=STATS_INTERVAL)
+                    if not due and now-last_attempt>=STATS_FINANCIAL_CHANGE_MIN_SEC and DATA.exists():
+                        current=json.loads(DATA.read_text())
+                        latest=json.loads(STATS_FILE.read_text()) if STATS_FILE.exists() else {}
+                        old=latest.get('financial_anchor',{})
+                        due=financial_signature(current)!=old.get('signature')
+                if due:
+                    last_attempt=now
+                    print_verified_incremental_stats(core,market=self.market)
+                    unsuccessful=False
+                    last_success=time.monotonic()
+            except NotReady as exc:
+                unsuccessful=True
+                # Migration backlog advances 64 components per attempt; don't
+                # wait a full minute or publish an incomplete lifetime total.
+                msg=str(exc)
+                if 'HOT cycle bound reached' in msg:
+                    last_attempt=0.0
+                    delay=1.0
+                else:
+                    delay=15.0
+                print('STATS_V2_NOT_READY:',msg[:180],flush=True)
+            except RateLimitedError:
+                unsuccessful=True
+                delay=60.0
+                print('STATS_V2_RATE_LIMITED',flush=True)
+            except Exception as exc:
+                # Derived checkpoint is suspect: do NOT replace the report,
+                # do NOT run hidden full-history fallback. Operator repair.
+                unsuccessful=True
+                delay=60.0
+                print('STATS_V2_FAIL_CLOSED:',type(exc).__name__,str(exc)[:200],flush=True)
+            time.sleep(delay)
 
 def active_tp_trace_id(st, market):
     """Best-effort WS cohort ID only; no trade authorization or state changes."""

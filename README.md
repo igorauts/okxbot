@@ -1,3 +1,7 @@
+## v0.7.62 — StatsWorker v2 (06.11.2026)
+
+Инкрементальный StatsWorker v2, контролируемый HOT/архив и сверка финансов. 8 LIVE-ботов обновлены. **Ограничение:** для нового бота требуется исходный `grid_reference.json`; автоматическая инициализация ещё не исправлена. См. `V0762_STATS_WORKER_V2_LIVE_RELEASE_NOTES_RU.md`.
+
 ## v0.7.61 — Telegram N1/B1/B2/N2/N3 (06.11.2026)
 
 Maintenance: алерты combined observers, ограниченные повторы Telegram-команд, checkpoint курсоров журналов и BUY, корректный UI observers, защита от старого watchdog timer. Торговый движок v0.7.60 не менялся. См. `V0761_N1_B1_B2_N2_N3_RELEASE_NOTES_RU.md`.

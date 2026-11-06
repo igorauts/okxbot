@@ -1,3 +1,9 @@
+## v0.7.62 — 2026-11-06 — StatsWorker v2 (engine 0.7.62)
+- Single-authority incremental finance, bounded HOT/archive, durable checkpoint, fail-closed fills.
+- LIVE 8/8 engine rollout and confirmed StatsWorker v2 publications; ZEC full parity and BEAT settled parity PASS.
+- Known issue: newly created bots require an original creation-time financial anchor; automatic bootstrap is deferred.
+- GitHub-only publication from pinned LIVE engine candidate; no tests during publishing.
+
 ## v0.7.61 — 2026-11-06 — Telegram N1/B1/B2/N2/N3 maintenance (engine 0.7.60)
 - Combined observer health alerts, terminal command retry/dead-letter, and combined observer UI.
 - Event and BUY cursor periodic checkpoints reduce redundant fsync; Telegram ACK/outbox remain durable.
