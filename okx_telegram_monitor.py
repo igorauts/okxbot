@@ -639,7 +639,10 @@ def compact_status_report():
         try:
             entries.append(_compact_bot_row(name,root,now))
         except (OSError,ValueError,KeyError,TypeError,ArithmeticError):
-            failed.append(name)
+            report=read_json(root/'state/stats.json')
+            at=_account_number(report.get('generated_at_unix'))
+            stale=(at is not None and now-float(at)>900)
+            failed.append((name,'статистика устарела' if stale else 'снимок не подтверждён'))
     total=len(BOT_DIRS)
     if not active:
         return f'<b>Активных ботов: 0/{total} · н/д UTC</b>'
@@ -658,8 +661,8 @@ def compact_status_report():
         row=(f"{entry['left']:>{leftwidth}}={entry['expr']:<{exprwidth}}  "
              f"{entry['position']:<{poswidth}}  {entry['grid']:<{gridwidth}}  {entry['bid']}")
         lines.append(entry['marker']+' <code>'+html.escape(row)+'</code>')
-    for name in failed:
-        lines.append('⚪ <code>'+html.escape(name+' — н/д (снимок не подтверждён)')+'</code>')
+    for name,reason in failed:
+        lines.append('⚪ <code>'+html.escape(name+' — н/д ('+reason+')')+'</code>')
     lines.append('')
     # Total PnL is verified bot sum; NOT account equity or OKX balance.
     acc=_account_total_pnl(active) if not failed else None
@@ -1088,6 +1091,57 @@ def _mon_phase(name, fn, *args, **kwargs):
     return measure(name, fn, *args, **kwargs)
 
 
+def stats_freshness_check(api,st,services,roots,now=None,stale_after=1800):
+    """Local-only stale finance watchdog; no OKX requests, no LIVE mutation.
+
+    A new running bot receives a grace window from the monitor's first sighting;
+    an existing previously verified report retains its actual original age.
+    Alerts are durable and deduplicated per incident across monitor restarts.
+    """
+    now=time.time() if now is None else float(now)
+    watches=st.setdefault('stats_v2_freshness_v1',{})
+    for name,where in roots.items():
+        if not systemd_active(services[name]):
+            continue
+        rec=watches.setdefault(name,{'first_seen':now,'incident':0,'alerted':False})
+        root=Path(where)
+        cfg=read_json(root/'config.json')
+        report=read_json(root/'state/stats.json')
+        gen=report.get('generated_at_unix')
+        try:gen=float(gen)
+        except (ValueError,TypeError):gen=None
+        anchor=read_json(root/'state/stats_financial_anchor.json')
+        current=report.get('financial_anchor') or {}
+        try:
+            same_anchor=(anchor==current and anchor.get('schema')==1 and
+                         anchor.get('instrument')==cfg.get('instrument') and
+                         gen is not None and abs(float(anchor['at'])-gen)<0.5)
+        except (ValueError,KeyError,TypeError,OverflowError):
+            same_anchor=False
+        valid=(report.get('complete') is True and
+               report.get('instrument')==cfg.get('instrument') and
+               (report.get('stats_v2') or {}).get('mode')=='single_authority_incremental'
+               and same_anchor and gen is not None and 0<=now-gen<stale_after)
+        if valid:
+            if rec.get('alerted'):
+                one(api,st,f'stats/recovered/{name}/{rec["incident"]}',
+                    f'✅ StatsWorker v2 RECOVERED | {name}\nПубликации финансов возобновлены')
+            rec['alerted']=False
+            continue
+        age=(now-gen if gen is not None and 0<=now-gen<10**8
+             else now-float(rec.get('first_seen',now)))
+        if age<stale_after or rec.get('alerted'):
+            continue
+        episode=int(rec.get('incident',0))+1
+        minutes=int(age//60)
+        one(api,st,f'stats/stale/{name}/{episode}',
+            f'🚨 StatsWorker v2 STALE | {name}\n'
+            f'Последняя подтверждённая финансовая публикация: {minutes} мин назад. '
+            'Цифры /status и /full могут быть устаревшими. Торговля не остановлена.')
+        rec['incident']=episode
+        rec['alerted']=True
+
+
 def safety_check(api,st):
     now=time.time()
     is_soft=SHARED_SOFT.exists()
@@ -1104,6 +1158,7 @@ def safety_check(api,st):
     _mon_phase("safety.panic_ack",panic_ack_check,api,st,SERVICES,BOT_DIRS)
     _mon_phase("safety.reader_health",position_reader_health_check,api,st)
     _mon_phase("safety.reader_bypass",reader_bypass_check,api, st, SERVICES, BOT_DIRS)
+    _mon_phase("safety.stats_freshness",stats_freshness_check,api,st,SERVICES,BOT_DIRS,now)
 
 
 def daily_check(api,st,now=None):

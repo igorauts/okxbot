@@ -55,7 +55,7 @@ def stable_state(path: Path) -> tuple[dict, tuple]:
     after = path.stat()
     identity = lambda x: (x.st_dev, x.st_ino, x.st_mtime_ns, x.st_size)
     if identity(before) != identity(after) or len(raw) != after.st_size:
-        raise Drift('State replaced while being captured')
+        raise NotReady('State replaced while being captured')
     try:
         state = json.loads(raw)
     except (ValueError, UnicodeError) as exc:

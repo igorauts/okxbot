@@ -159,6 +159,16 @@ def status_one(name, root, age_text='н/д'):
     cfg = read_json(root/'config.json')
     if not stats.get('complete') or stats.get('instrument') != cfg.get('instrument'):
         return '<b>'+html.escape(name)+'</b>\nСтатистика недоступна/не подтверждена'
+    # /full must not present old PnL as current merely because an old report
+    # still contains complete=True. Align its financial TTL with /status.
+    generated=number(stats.get('generated_at_unix'))
+    age_seconds=(Decimal(str(time.time()))-generated if generated is not None else None)
+    if age_seconds is None or not (Decimal('0')<=age_seconds<=Decimal('900')):
+        return ('<b>'+html.escape(name)+'</b>\n'
+                '⚠️ Финансовая статистика устарела или не подтверждена. PnL: н/д')
+    if verified_snapshot_bid(root,cfg,stats) is None:
+        return ('<b>'+html.escape(name)+'</b>\n'
+                '⚠️ Финансовый снимок не подтверждён. PnL: н/д')
     values = report_map(stats.get('report', ''))
     ver = str(cfg.get('version') or stats.get('bot_version') or '?').lstrip('v')
     first = ', '.join([name, 'v'+ver, age_text])
@@ -213,8 +223,6 @@ def status_one(name, root, age_text='н/д'):
     parts = ['<b>'+html.escape(first)+'</b>', '\n'.join('<code>'+html.escape(line)+'</code>' for line in main),
              '<b>'+icon+' Итоговый PnL: '+html.escape(subtotal)+' '+icon+'</b>',
              '<code>'+html.escape('Максимальная просадка бота: '+dd)+'</code>']
-    if time.time()-float(stats.get('generated_at_unix') or 0)>1200:
-        parts.append('⚠️ Статистика устарела')
     return '\n\n'.join(parts)
 
 

@@ -200,7 +200,7 @@ class DurableStager:
     def _stable_sources(self, root: Path, last_state_identity, state):
         after, new_identity = stable_state(root / 'state/bot_state.json')
         if new_identity != last_state_identity or after != state:
-            raise Drift('State changed during ingestion')
+            raise NotReady('State changed during ingestion')
 
     def ingest(self, root: Path, *, inject_crash_after_cycles=False):
         """No all-history rows in Python. Source files are only opened mode=ro.
@@ -392,14 +392,18 @@ class DurableStager:
 
     def freeze_one(self, root: Path, cid: str, *, full_oracle, allocate,
                    contract_value, bid, now_ms, component_cap=DEFAULT_COMPONENT_CAP,
-                   inject_crash_before_commit=False, pinned_views=None):
+                   inject_crash_before_commit=False, pinned_views=None,
+                   pinned_state=None):
         """Freeze one complete component or return NOT_READY (not a partial result).
 
         Source integrity is rechecked before money commit; a late fill detected
         by next ingest triggers FULL. OFFLINE ONLY; no financial publication.
         """
         root = Path(root)
-        state, sid = stable_state(root / 'state/bot_state.json')
+        if pinned_state is None:
+            state, sid = stable_state(root / 'state/bot_state.json')
+        else:
+            state, sid = pinned_state
         if state.get('instrument') != self.instrument:
             raise Drift('State instrument mismatch')
         live_ids = state_cycles(state)
@@ -436,7 +440,9 @@ class DurableStager:
             if ('fills_incomplete' in str(exc) or 'accounted_missing' in str(exc)):
                 raise NotReady(str(exc)) from exc
             raise
-        self._stable_sources(root, sid, state)
+        if pinned_state is None:
+            self._stable_sources(root, sid, state)
+        # The caller must revalidate the pinned state ONCE before batch commit.
         # Do NOT mix the two-stage raw-source capture with the sidecar staging
         # rows from a DIFFERENT generation. Caller must ingest before freezing.
         in_batch = getattr(self, '_freeze_batch_open', False)
@@ -551,6 +557,33 @@ class DurableStager:
                 self.db.execute('ROLLBACK')
                 raise
         return total
+
+    def pending_batch(self, limit):
+        """One fair bounded sweep across the queue, persistent after crash.
+
+        The cursor records the last *attempted* source rowid, including deferred
+        components. Repeated NotReady at the head cannot starve newer cycles.
+        It is stored in the sidecar transaction together with frozen money.
+        """
+        limit=int(limit)
+        if not 1<=limit<=256:
+            raise ValueError('Invalid freeze attempt budget')
+        raw=_metarow(self.db,'freeze_after_rowid','0')
+        try:
+            after=int(raw)
+        except (TypeError,ValueError) as exc:
+            raise Drift('Invalid durable pending scan cursor') from exc
+        if after<0: raise Drift('Negative durable pending scan cursor')
+        after_rows=self.db.execute(
+            'SELECT cycle_id,rowid_source FROM pending_cycles WHERE rowid_source>? '
+            'ORDER BY rowid_source LIMIT ?', (after,limit)).fetchall()
+        if len(after_rows)<limit:
+            before_rows=self.db.execute(
+                'SELECT cycle_id,rowid_source FROM pending_cycles WHERE rowid_source<=? '
+                'ORDER BY rowid_source LIMIT ?',
+                (after,limit-len(after_rows))).fetchall()
+            after_rows.extend(before_rows)
+        return after_rows
 
     def pending_ids(self, limit=1000):
         return [row[0] for row in self.db.execute(

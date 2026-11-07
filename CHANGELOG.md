@@ -1,3 +1,11 @@
+## v0.7.63 — 2026-11-07 UTC — Stats-v2 reliability (engine 0.7.63)
+- Reliable financial-anchor bootstrap; HOT-fills NotReady and state-capture races correctly distinguished from persistent Drift.
+- Bounded deferred component processing and durable recovery of derived Stats-v2 sidecar with fail-closed safeguards; no FULL oracle on LIVE.
+- Telegram incident/outbox recovery hardening; actual incident network delivery not yet independently evidenced in LIVE.
+- LIVE rollout 8/8: guarded GET-only audits and independently confirmed fresh Stats-v2 financial publications. BTC last. Reader and monitor active.
+- BLUR: 18 deferred shared MARKET components, six link targets all present in active state, zero unresolved targets, no stall; preserved in HOT finances until safe freeze.
+- GitHub-only publisher, code bytes from SHA-pinned candidate; no tests or LIVE changes during publishing.
+
 ## v0.7.62 — 2026-11-06 — StatsWorker v2 (engine 0.7.62)
 - Single-authority incremental finance, bounded HOT/archive, durable checkpoint, fail-closed fills.
 - LIVE 8/8 engine rollout and confirmed StatsWorker v2 publications; ZEC full parity and BEAT settled parity PASS.

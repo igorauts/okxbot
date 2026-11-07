@@ -17,7 +17,18 @@ def allowed_package_member(name):
         return False
     if len(parts)==1:return True
     if len(parts)==2:return parts[0] in ('tests','historical')
-    return len(parts)==3 and parts[:2]==('deploy','reader')
+    if len(parts)==3 and parts[:2]==('deploy','reader'):
+        return True
+    # Imported, BYTE-PINNED offline regression fixtures only. These are not
+    # deployed into a trading-bot runtime; reject arbitrary nested ZIP paths.
+    if parts==('tests','fixtures','okx_bot_original_full_v0760.py.gz'):
+        return True
+    if (len(parts)==5 and parts[:2]==('tests','stats_v2_original')
+        and parts[2] in ('stats_v2_release_work','stats_v2_prod_candidate')
+        and parts[3]=='tests' and parts[4].startswith('test_')
+        and parts[4].endswith('.py')):
+        return True
+    return False
 
 
 def verify_member_types(z):

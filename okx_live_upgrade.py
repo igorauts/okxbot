@@ -127,7 +127,18 @@ def allowed_package_member(name):
         return True
     if len(parts) == 2:
         return parts[0] in ('tests', 'historical')
-    return len(parts) == 3 and parts[:2] == ('deploy', 'reader')
+    if len(parts) == 3 and parts[:2] == ('deploy', 'reader'):
+        return True
+    # Explicit historical oracle fixture and original offline tests. This
+    # nested layout is test-only, never copied into a trading instance.
+    if parts == ('tests','fixtures','okx_bot_original_full_v0760.py.gz'):
+        return True
+    if (len(parts) == 5 and parts[:2] == ('tests','stats_v2_original')
+        and parts[2] in ('stats_v2_release_work','stats_v2_prod_candidate')
+        and parts[3] == 'tests' and parts[4].startswith('test_')
+        and parts[4].endswith('.py')):
+        return True
+    return False
 
 
 def stage_check():

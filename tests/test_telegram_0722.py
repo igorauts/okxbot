@@ -162,7 +162,7 @@ with tempfile.TemporaryDirectory() as directory:
     (micro/'config.json').write_text(json.dumps(micro_cfg))
     (micro/'state/bot_state.json').write_text(json.dumps({'instrument':'DOOD-USDT-SWAP',
         'cycles':{'1':{'state':'TP_WAIT','filledBuy':'1000','filledTP':'0','buyPx':'0.002580'}}}))
-    sample=1999999900.0
+    sample=time.time()  # Fresh sample under the new strict /full financial TTL
     micro_stats={'complete':True,'instrument':'DOOD-USDT-SWAP',
         'generated_at_unix':sample, 'report':"""Текущий BID: $0.00
 ИТОГОВЫЙ PnL: -$1.04
@@ -176,15 +176,15 @@ with tempfile.TemporaryDirectory() as directory:
     anchor['at']=sample-600
     (micro/'state/stats_financial_anchor.json').write_text(json.dumps(anchor))
     text=views.status_one('micro_bot',micro,'1h 45min')
-    assert 'Текущий bid: н/д' in text and '−100.00%' not in text, text
+    assert 'PnL: н/д' in text and '−100.00%' not in text, text
     anchor['at']=sample;anchor['bid']='0'
     (micro/'state/stats_financial_anchor.json').write_text(json.dumps(anchor))
     text=views.status_one('micro_bot',micro,'1h 45min')
-    assert 'Текущий bid: н/д' in text and '−100.00%' not in text, text
+    assert 'PnL: н/д' in text and '−100.00%' not in text, text
     anchor['bid']='0.002304';anchor['instrument']='NEAR-USDT-SWAP'
     (micro/'state/stats_financial_anchor.json').write_text(json.dumps(anchor))
     text=views.status_one('micro_bot',micro,'1h 45min')
-    assert 'Текущий bid: н/д' in text and '−100.00%' not in text, text
+    assert 'PnL: н/д' in text and '−100.00%' not in text, text
     anchor['instrument']='DOOD-USDT-SWAP';anchor['bid']='0.002304'
     (micro/'state/stats_financial_anchor.json').write_text(json.dumps(anchor))
     assert views.verified_snapshot_bid(micro,micro_cfg,micro_stats)==views.number('0.002304')

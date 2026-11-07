@@ -10,9 +10,12 @@ class TestStatsNoRetainedCache(unittest.TestCase):
         worker=next(x for x in tree.body if isinstance(x,ast.ClassDef) and x.name=='StatsWorker')
         ns={'threading':threading}
         exec(compile(ast.Module(body=[worker],type_ignores=[]),'offline-stats-worker','exec'),ns)
-        obj=ns['StatsWorker'](object(),market=object())
-        self.assertIsNone(obj.stats_cache)
-        self.assertIsNone(obj.finance_cache)
+        pnl=object();market=object()
+        obj=ns['StatsWorker'](pnl,market=market)
+        self.assertFalse(hasattr(obj,'stats_cache'))
+        self.assertFalse(hasattr(obj,'finance_cache'))
+        self.assertIs(obj.pnl,pnl)
+        self.assertIs(obj.market,market)
     def test_orig_full_is_present_and_trade_loop_unchanged_guarded_by_builder(self):
         tree=ast.parse((ROOT/'okx_bot.py').read_text())
         fn=next(x for x in tree.body if isinstance(x,ast.FunctionDef) and x.name=='print_full_stats')

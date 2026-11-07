@@ -34,6 +34,8 @@ class IncrementalResult:
     hot_cycles: int
     source_rows: dict
     sidecar_generation: int
+    deferred: int
+    deferred_reasons: dict
 
 
 class SingleAuthorityStats:
@@ -45,12 +47,14 @@ class SingleAuthorityStats:
     """
     def __init__(self, root: Path, instrument: str, sidecar: Path, *, oracle,
                  fill_store, expected_filled_orders, contract_value,
-                 hot_cycle_cap=2048, hot_order_cap=4096, freeze_budget=64):
+                 hot_cycle_cap=2048, hot_order_cap=4096, freeze_budget=64,
+                 pnl_ledger=None):
         self.root=Path(root)
         self.instrument=instrument
         self.cv=money(contract_value)
         self.oracle=oracle
         self.fill_store=fill_store
+        self.pnl_ledger=pnl_ledger
         self.expected_filled_orders=expected_filled_orders
         self.hot_cycle_cap=hot_cycle_cap
         self.hot_order_cap=hot_order_cap
@@ -159,23 +163,66 @@ class SingleAuthorityStats:
         if abs(total-expect)>Decimal('0.00000001'):
             raise Drift('HOT ledger does not reconcile with HOT finance')
 
+    @staticmethod
+    def _defer_reason(message):
+        for name,needle in (
+            ('fills_incomplete','fills_incomplete'),
+            ('accounted_missing','accounted_missing'),
+            ('accounted_missing','Missing ledger row'),
+            ('component_present','Component still present'),
+            ('unarchived_sibling','Unarchived'),
+            ('nonterminal','Nonterminal'),
+            ('shared_component','Shared MARKET component'),
+            ('missing_identity','Missing PnL identity'),
+        ):
+            if needle in message:return name
+        return 'other_not_ready'
+
     def _freeze_bounded(self, bid, now_ms):
         completed=0
         deferred=0
-        # Borrow one bounded read snapshot; sidecar + totals commit together.
+        reasons={}
+        # One pinned state and one source read snapshot for the entire budget.
+        # Invalidated state rolls back all frozen money AND the durable cursor.
         with self.stager.finance_snapshots(self.root) as views, self.stager.atomic_freeze_batch():
-            for cid in self.stager.pending_ids(limit=self.freeze_budget):
-                if self.stager.db.execute('SELECT 1 FROM pending_cycles WHERE cycle_id=?',(cid,)).fetchone() is None:
+            state,sid=stable_state(self.root/'state/bot_state.json')
+            if state.get('instrument')!=self.instrument:
+                raise Drift('State instrument mismatch during freeze')
+            pinned=(state,sid)
+            for cid,rowid in self.stager.pending_batch(self.freeze_budget):
+                if self.stager.db.execute(
+                    'SELECT 1 FROM pending_cycles WHERE cycle_id=?',(cid,)).fetchone() is None:
                     continue
                 try:
                     self.stager.freeze_one(self.root,cid,
                         full_oracle=self.oracle['full_stats_snapshot'],
                         allocate=self.oracle['allocated_market_fills'],
-                        contract_value=self.cv,bid=bid,now_ms=now_ms,pinned_views=views)
+                        contract_value=self.cv,bid=bid,now_ms=now_ms,
+                        pinned_views=views,pinned_state=pinned)
                     completed+=1
-                except NotReady:
+                except NotReady as exc:
                     deferred+=1
-        return completed,deferred
+                    reason=self._defer_reason(str(exc))
+                    reasons[reason]=reasons.get(reason,0)+1
+                # Advance only within the same atomic checkpoint as money.
+                _metaval=str(rowid)
+                self.stager.db.execute(
+                    'INSERT INTO meta VALUES (?,?) '
+                    'ON CONFLICT(key) DO UPDATE SET val=excluded.val',
+                    ('freeze_after_rowid',_metaval))
+            self.stager._stable_sources(self.root,sid,state)
+            # Count consecutive attempts without any progress, durable across
+            # crashes. A stable deferred queue must never go unnoticed.
+            old=int(_metarow(self.stager.db,'freeze_no_progress','0'))
+            stalled=(min(old+1,1000000) if deferred and completed==0 else 0)
+            self.stager.db.execute(
+                'INSERT INTO meta VALUES (?,?) '
+                'ON CONFLICT(key) DO UPDATE SET val=excluded.val',
+                ('freeze_no_progress',str(stalled)))
+        self.freeze_stalled=stalled
+        self.last_freeze_deferred=deferred
+        self.last_freeze_reasons=reasons
+        return completed,deferred,reasons
 
     def compute(self, bid, *, now=None, allow_fill_recovery=True):
         """One finance attempt. On failure DO NOT publish a report.
@@ -190,7 +237,7 @@ class SingleAuthorityStats:
         bid=money(bid)
         if bid<=0:raise Drift('Invalid financial BID')
         ingested=self.stager.ingest(self.root)
-        frozen,deferred=self._freeze_bounded(bid,now_ms)
+        frozen,deferred,deferred_reasons=self._freeze_bounded(bid,now_ms)
         state,sid,cycles=self._state_and_pending()
         hot_state,extra=self._hot_scope(state,cycles)
         fills=self._hot_fills(cycles)
@@ -200,7 +247,19 @@ class SingleAuthorityStats:
             if allow_fill_recovery:
                 self._recover_hot_fills(hot_state)
             raise NotReady('HOT fills not complete; next pin required')
-        self._check_hot_ledger(cycles,hot,self.stager._cursor('accounted'))
+        # Only on a proven missing HOT journal row: invoke the original,
+        # idempotent ledger writer over bounded HOT. Ordinary publications do
+        # NOT rescan or rewrite any ledger records.
+        try:
+            self._check_hot_ledger(cycles,hot,self.stager._cursor('accounted'))
+        except NotReady as exc:
+            if (str(exc)!='HOT PnL ledger row not committed'
+                    or self.pnl_ledger is None):
+                raise
+            inserted=self.pnl_ledger.ingest_history(hot_state,fills)
+            # The persisted accounted cursor predates any new ledger rows.
+            # Even when another PnL worker won the race, re-pin next time.
+            raise NotReady('HOT PnL ledger repair attempted; next pin required') from exc
         byorder={}
         for f in fills:
             byorder.setdefault(str(f['ordId']),[]).append(f)
@@ -232,4 +291,5 @@ class SingleAuthorityStats:
             stats=composed,last_24h=last_24,state=state,fills_hot=fills,
             captured_at=captured,bid=bid,frozen_new=frozen,
             pending=self.stager.pending_count(),hot_cycles=len(cycles),
-            source_rows=ingested['new'],sidecar_generation=self.stager.generation())
+            source_rows=ingested['new'],sidecar_generation=self.stager.generation(),
+            deferred=deferred,deferred_reasons=deferred_reasons)

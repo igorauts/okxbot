@@ -1,3 +1,7 @@
+## v0.7.63 — Stats-v2 reliability (LIVE, 07.11.2026 UTC)
+
+Проверенный LIVE-релиз: 8/8 торговых движков v0.7.63, подтверждённые новые финансовые публикации, Reader/Telegram активны. Исправлены bootstrap anchor, bounded pending/rebuild, обработка гонок состояния и инцидентная телеметрия. Результаты и ограничения см. `V0763_STATS_V2_RELIABILITY_LIVE_RELEASE_NOTES_RU.md`. Прежний `V0763_STATS_V2_RELIABILITY_OFFLINE_NOTES.md` — исторический отчёт о кандидате до LIVE.
+
 ## v0.7.62 — StatsWorker v2 (06.11.2026)
 
 Инкрементальный StatsWorker v2, контролируемый HOT/архив и сверка финансов. 8 LIVE-ботов обновлены. **Ограничение:** для нового бота требуется исходный `grid_reference.json`; автоматическая инициализация ещё не исправлена. См. `V0762_STATS_WORKER_V2_LIVE_RELEASE_NOTES_RU.md`.

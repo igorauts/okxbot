@@ -4963,7 +4963,13 @@ def print_verified_incremental_stats(core, *, market=None):
     # A genuine creation-time capital anchor is required. Do NOT infer 1x
     # reference from only the bounded HOT fill window.
     if not GRID_REFERENCE.exists():
-        raise NotReady('Missing original creation-time capital anchor')
+        # Restore the exact legacy CFG-anchored creation path. No synthetic
+        # price, no current BID and no fabricated time for legacy/no-CFG bots.
+        if not globals().get('CFG', {}).get('created_at'):
+            raise NotReady('Missing original creation-time capital anchor')
+        _first_anchor([])
+        if not GRID_REFERENCE.is_file():
+            raise NotReady('Creation-time capital anchor was not persisted')
     bid=stats_capture_bid(market)
     capture=core.compute(bid)
     st=capture.state
@@ -4990,7 +4996,9 @@ def print_verified_incremental_stats(core, *, market=None):
              'stats_v2':{'schema':1,'mode':'single_authority_incremental',
                          'generation':capture.sidecar_generation,
                          'frozen_new':capture.frozen_new,
-                         'pending':capture.pending,'hot_cycles':capture.hot_cycles},
+                         'pending':capture.pending,'hot_cycles':capture.hot_cycles,
+                         'deferred':getattr(capture,'deferred',0),
+                         'deferred_reasons':getattr(capture,'deferred_reasons',{})},
              'financial_anchor':anchor}
     # Canonical financial payload + anchor is ONE atomic stats.json replace.
     # Legacy external consumers read stats.json and the compatibility anchor:
@@ -5000,7 +5008,8 @@ def print_verified_incremental_stats(core, *, market=None):
     atomic_json(STATS_FINANCIAL_ANCHOR,anchor)
     print('STATS_V2_VERIFIED_PUBLISHED generation=',capture.sidecar_generation,
           'hot_cycles=',capture.hot_cycles,'pending=',capture.pending,
-          'frozen_new=',capture.frozen_new,flush=True)
+          'frozen_new=',capture.frozen_new,'deferred=',getattr(capture,'deferred',0),
+          'deferred_reasons=',getattr(capture,'deferred_reasons',{}),flush=True)
     return True
 
 
@@ -5023,18 +5032,36 @@ class StatsWorker(threading.Thread):
         last_success=0.0
         unsuccessful=False
         core=None
+        stats_incident=None
+        stats_stall_alerted=False
+        recovery_record=None
+        recovery_resource_alerted=False
         while True:
             delay=5.0
             now=time.monotonic()
             try:
                 if core is None:
+                    # Finish any crash-interrupted sidecar quarantine before
+                    # opening/recreating the canonical SQLite database.
+                    from okx_stats_v2_recovery import resume_interrupted
+                    recovery_record=resume_interrupted(ROOT,write_json=atomic_json)
                     # Only the StatsWorker thread owns this sidecar. No change
                     # to trade worker, BUY/TP/MARKET or PnL writer locks.
                     core=SingleAuthorityStats(ROOT,INST,ROOT/'state'/'stats_v2.sqlite',
                         oracle=oracle,fill_store=FILL_STORE,
                         expected_filled_orders=expected_filled_orders,
-                        contract_value=CONTRACT_VALUE)
-                if unsuccessful:
+                        contract_value=CONTRACT_VALUE,pnl_ledger=self.pnl)
+                # A sidecar rebuild cannot wait the normal 10-minute report
+                # cadence: drain bounded 64-component batches, without FULL.
+                # Fresh HOT-inclusive reports may succeed while pending>0.
+                rebuilding=(isinstance(recovery_record,dict)
+                    and recovery_record.get('phase')=='QUARANTINED')
+                if rebuilding and core.stager.pending_count()>0:
+                    # Half-second cooldown bounds CPU while avoiding the
+                    # normal ten-minute cadence for recovery's 64-cycle batches.
+                    due=now-last_attempt>=0.5
+                    delay=0.5
+                elif unsuccessful:
                     due=now-last_attempt>=30
                 else:
                     due=(not last_success or now-last_success>=STATS_INTERVAL)
@@ -5045,7 +5072,48 @@ class StatsWorker(threading.Thread):
                         due=financial_signature(current)!=old.get('signature')
                 if due:
                     last_attempt=now
+                    if rebuilding:
+                        from okx_stats_v2_recovery import (
+                            MAX_REBUILD_WALL_SECONDS, sufficient_headroom)
+                        reason=None
+                        if time.time()-float(recovery_record['started_at_unix']) > MAX_REBUILD_WALL_SECONDS:
+                            reason='Sidecar rebuild time budget exhausted: manual review required'
+                        elif not sufficient_headroom():
+                            reason='Sidecar rebuild paused: low available RAM'
+                        if reason:
+                            if not recovery_resource_alerted:
+                                try: log('STATS_V2_REBUILD_BLOCKED',reason=reason)
+                                except Exception: pass
+                                recovery_resource_alerted=True
+                            raise NotReady(reason)
+                        recovery_resource_alerted=False
                     print_verified_incremental_stats(core,market=self.market)
+                    # An HOT-inclusive financial publication is valid, but
+                    # is NOT proof that the old sidecar has been fully rebuilt.
+                    # Declare recovery complete only after all pending archives
+                    # have been frozen and financial publication succeeded.
+                    if rebuilding and core.stager.pending_count()==0:
+                        from okx_stats_v2_recovery import finish_rebuild
+                        if finish_rebuild(ROOT,write_json=atomic_json):
+                            try: log('STATS_V2_REBUILD_COMPLETED',reason='incremental_verified')
+                            except Exception: pass
+                        recovery_record=None
+                    # A deferred head-of-line may stall without stopping
+                    # successful HOT-inclusive publications. Alarm on durable
+                    # no-progress attempts in BOTH success and NotReady paths.
+                    attempts=getattr(core,'freeze_stalled',0)
+                    if attempts>=20 and not stats_stall_alerted:
+                        try: log('STATS_V2_STALLED',reason='Pending freeze no-progress threshold')
+                        except Exception: pass
+                        stats_stall_alerted=True
+                    elif attempts==0 and stats_stall_alerted:
+                        try: log('STATS_V2_QUEUE_RECOVERED')
+                        except Exception: pass
+                        stats_stall_alerted=False
+                    if stats_incident is not None:
+                        try: log('STATS_V2_RECOVERED',reason=stats_incident)
+                        except Exception: pass
+                        stats_incident=None
                     unsuccessful=False
                     last_success=time.monotonic()
             except NotReady as exc:
@@ -5055,20 +5123,53 @@ class StatsWorker(threading.Thread):
                 msg=str(exc)
                 if 'HOT cycle bound reached' in msg:
                     last_attempt=0.0
-                    delay=1.0
+                    delay=0.5 if rebuilding else 1.0
                 else:
                     delay=15.0
+                if core is not None and getattr(core,'freeze_stalled',0)>=20 and not stats_stall_alerted:
+                    try: log('STATS_V2_STALLED',reason='Pending freeze no-progress threshold')
+                    except Exception: pass
+                    stats_stall_alerted=True
                 print('STATS_V2_NOT_READY:',msg[:180],flush=True)
             except RateLimitedError:
                 unsuccessful=True
                 delay=60.0
                 print('STATS_V2_RATE_LIMITED',flush=True)
             except Exception as exc:
-                # Derived checkpoint is suspect: do NOT replace the report,
-                # do NOT run hidden full-history fallback. Operator repair.
+                # Distinguish true financial drift from a transient state race.
+                # Never overwrite last verified report after a failed attempt.
                 unsuccessful=True
                 delay=60.0
-                print('STATS_V2_FAIL_CLOSED:',type(exc).__name__,str(exc)[:200],flush=True)
+                label='STATS_V2_DRIFT' if isinstance(exc,Drift) else 'STATS_V2_FAULT'
+                reason=(type(exc).__name__+': '+str(exc))[:180]
+                if stats_incident!=reason:
+                    try: log(label,reason=reason)
+                    except Exception: pass
+                    stats_incident=reason
+                print('STATS_V2_FAIL_CLOSED:',reason,flush=True)
+                # Recovery is ONLY for a proven append to an already frozen
+                # order. Other Drift types remain fail-closed for investigation.
+                if (isinstance(exc,Drift) and 'LATE_FILL_FROZEN_ORDER' in str(exc)
+                    and core is not None):
+                    from okx_stats_v2_recovery import eligible, quarantine_sidecar
+                    try:
+                        if eligible(ROOT,str(exc)):
+                            core.close()
+                            core=None
+                            backup=quarantine_sidecar(ROOT,write_json=atomic_json)
+                            log('STATS_V2_REBUILD_STARTED',reason='late_frozen_fill',
+                                quarantine=backup.name)
+                            # New derived sidecar replays bounded 64-cycle
+                            # batches on subsequent ticks; do not run FULL.
+                            last_attempt=0.0
+                            delay=5.0
+                    except Exception as rebuild_exc:
+                        core=None  # old SQLite handle may have been closed
+                        try: log('STATS_V2_REBUILD_BLOCKED',
+                            reason=(type(rebuild_exc).__name__+': '+str(rebuild_exc))[:160])
+                        except Exception:pass
+                        print('STATS_V2_REBUILD_BLOCKED:',type(rebuild_exc).__name__,
+                              str(rebuild_exc)[:160],flush=True)
             time.sleep(delay)
 
 def active_tp_trace_id(st, market):
