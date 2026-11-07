@@ -211,10 +211,16 @@ class SingleAuthorityStats:
                     'ON CONFLICT(key) DO UPDATE SET val=excluded.val',
                     ('freeze_after_rowid',_metaval))
             self.stager._stable_sources(self.root,sid,state)
-            # Count consecutive attempts without any progress, durable across
-            # crashes. A stable deferred queue must never go unnoticed.
+            # Terminal cycles legitimately waiting for their linked archive
+            # membership are NOT failed financial progress. Alarm only for
+            # actionable NotReady categories; retain durable count otherwise.
+            # No change to monetary freezing or source-of-truth ledgers.
+            harmless={'shared_component','component_present',
+                      'unarchived_sibling','nonterminal'}
+            actionable={name:n for name,n in reasons.items()
+                        if name not in harmless and n}
             old=int(_metarow(self.stager.db,'freeze_no_progress','0'))
-            stalled=(min(old+1,1000000) if deferred and completed==0 else 0)
+            stalled=(min(old+1,1000000) if actionable and completed==0 else 0)
             self.stager.db.execute(
                 'INSERT INTO meta VALUES (?,?) '
                 'ON CONFLICT(key) DO UPDATE SET val=excluded.val',

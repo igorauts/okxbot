@@ -55,7 +55,9 @@ def main():
         env=os.environ.copy()
         env['PYTHONDONTWRITEBYTECODE']='1'
         env['PYTHONPATH']=os.pathsep.join([str(release),str(release/'tests'),str(production),str(production/'tests')])
-        # Unmodified original tests; separate processes avoid test-module collisions.
+        # Historical original tests, with a narrowly revised engine-unchanged AST
+        # assertion because eager archive is an approved engine change. All
+        # historical financial tests and counts remain executed.
         # The counts are part of the pinned offline-suite contract. A missing
         # file or silently undiscovered test must never appear as a green run.
         for name,folder,expected_count in [('PHASE',release,164),('PRODUCTION',production,32)]:

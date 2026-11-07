@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "current_version": "0.7.63",
+  "current_version": "0.7.64",
   "engines": {
     "0.7.28": {
       "file": "okx_bot.py",
@@ -661,6 +661,37 @@
         "okx_version.py"
       ],
       "sha256": "abb005fdf857d724b7d6090f061cdc67f2a13f51213f2f7fa9b4a8f393fa417f"
+    },
+    "0.7.64": {
+      "file": "okx_bot.py",
+      "dependencies": [
+        "okx_accounting.py",
+        "okx_api.py",
+        "okx_cleanup_transport.py",
+        "okx_contracts.py",
+        "okx_emergency_gate.py",
+        "okx_fill_singleflight.py",
+        "okx_idle_reconcile.py",
+        "okx_latency.py",
+        "okx_latency_rollup.py",
+        "okx_position_reader_client.py",
+        "okx_position_reader_core.py",
+        "okx_positions_fifo.py",
+        "okx_positions_priority.py",
+        "okx_state.py",
+        "okx_stats_v2_checkpoint.py",
+        "okx_stats_v2_contract.py",
+        "okx_stats_v2_money.py",
+        "okx_stats_v2_phase3.py",
+        "okx_stats_v2_phase4.py",
+        "okx_stats_v2_production.py",
+        "okx_stats_v2_recovery.py",
+        "okx_strategy.py",
+        "okx_terminal_accounting.py",
+        "okx_tp_telemetry.py",
+        "okx_version.py"
+      ],
+      "sha256": "f256fe3182aa0eb46690a800728544274db474ca0f057b7df3fd922b25a12227"
     }
   }
 }

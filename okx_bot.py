@@ -1005,6 +1005,138 @@ def compact_archived(st,pnl):
     return len(eligible)
 
 
+
+# A terminal cycle may remain in the price-keyed trading grid forever when
+# price does not revisit its level. The independent first-observed timestamp
+# avoids modifying any financial/trading cycle payload or order identity.
+TERMINAL_ARCHIVE_GRACE_SEC = 15 * 60
+
+
+def eager_archive_terminals(st, pnl, pending, *, now=None):
+    """Move provably settled terminal grid entries into the existing archive.
+
+    Called only at the 30-second boundary after complete REST reconciliation.
+    No exchange I/O. Mutate/persist one durable state transition BEFORE the
+    existing SQLite archive compaction. A crash between these steps is safe.
+    """
+    import math
+    now = time.time() if now is None else float(now)
+    if not math.isfinite(now) or now <= 0:
+        raise RuntimeError('Invalid terminal archive observation time')
+    original = st.get('terminal_seen')
+    if original is not None and not isinstance(original, dict):
+        raise RuntimeError('Invalid terminal_seen structure; refusing archive')
+    seen = dict(original or {})
+    cycles = st['cycles']
+    if not isinstance(cycles, dict):
+        raise RuntimeError('Invalid cycle state; refusing archive')
+    terminal = {'CLOSED', 'EXITED'}  # CANCELED is deliberately excluded.
+    terminal_ids = {str(c['cycleId']) for c in cycles.values()
+                    if c.get('state') in terminal and c.get('cycleId')}
+    changed = False
+    # Also removes entries replaced through place() or superseded by cleanup.
+    for cid in list(seen):
+        if cid not in terminal_ids:
+            del seen[cid]
+            changed = True
+
+    protected = set()
+    collect = st.get('escape_collection')
+    if collect:
+        if not isinstance(collect, dict):
+            return 0  # Unknown live collection: never archive its parents.
+        for attr in ('cycles', 'initialCycleIds'):
+            entries = collect.get(attr, [])
+            if not isinstance(entries, (list, tuple)):
+                return 0
+            protected.update(str(cid) for cid in entries)
+    groups = st.get('aggregate_exits', [])
+    if not isinstance(groups, list):
+        return 0
+    for group in groups:
+        if not isinstance(group, dict):
+            return 0
+        if group.get('phase') in ('FILLED', 'CANCELED', 'REJECTED'):
+            continue
+        plan = group.get('plan')
+        if not isinstance(plan, list):
+            return 0
+        for member in plan:
+            if not isinstance(member, dict) or not member.get('cycleId'):
+                return 0
+            protected.add(str(member['cycleId']))
+
+    # An exchange-listed order must not lose its local identity merely because
+    # a terminal cycle was previously observed. The caller already has the
+    # authoritative complete orders-pending snapshot.
+    live_order_ids = set()
+    for order in pending:
+        if not isinstance(order, dict):
+            return 0
+        for key in ('ordId', 'clOrdId'):
+            if order.get(key):
+                live_order_ids.add(str(order[key]))
+
+    moved = 0
+    for level, cycle in list(cycles.items()):
+        if cycle.get('state') not in terminal:
+            continue
+        cid = str(cycle.get('cycleId') or '')
+        if not cid:
+            continue
+        first = seen.get(cid)
+        if first is None:
+            seen[cid] = now
+            changed = True
+            continue
+        if not isinstance(first, (int, float)) or not math.isfinite(first) or first <= 0:
+            raise RuntimeError('Invalid terminal_seen timestamp; refusing archive')
+        if now - first < TERMINAL_ARCHIVE_GRACE_SEC:
+            continue
+        if cid in protected or cycle.get('partial_cleanup') or cycle.get('tpFailureManualReview'):
+            continue
+        # Only validated completed SELL chains. Any still PLACING/ACTIVE or
+        # ambiguous phase protects the cycle, including an attached partial TP.
+        records = cycle.get('tpOrders')
+        if not isinstance(records, list) or any(
+                not isinstance(r, dict) or r.get('phase') not in ('FILLED', 'CANCELED')
+                for r in records):
+            continue
+        try:
+            filled_buy = D(cycle.get('filledBuy', '0'))
+            filled_tp = D(cycle.get('filledTP', '0'))
+            if not (filled_buy > 0 and filled_buy == filled_tp):
+                continue
+        except (ArithmeticError, TypeError, ValueError):
+            continue
+        if not pnl.recorded(cycle):
+            continue
+        # Include the legacy top-level attached TP identities, even when the
+        # corresponding SELL leg was not materialized in tpOrders.  Otherwise
+        # verify_existing() would lose the cycle while a named exchange order
+        # may still be pending after archival.
+        ids = {str(cycle.get(k)) for k in ('ordId', 'clOrdId', 'tpOrdId', 'tpClOrdId')
+               if cycle.get(k)}
+        for leg in records:
+            ids.update(str(leg[k]) for k in ('ordId', 'clOrdId') if leg.get(k))
+        if ids & live_order_ids:
+            continue
+        st.setdefault('archived_cycles', []).append({'level': level, **cycle})
+        del cycles[level]
+        seen.pop(cid, None)
+        moved += 1
+        changed = True
+
+    if changed:
+        if seen:
+            st['terminal_seen'] = seen
+        else:
+            st.pop('terminal_seen', None)
+        # One durable save for new observations, removals and all moves.
+        save(st)
+    return moved
+
+
 def newid(prefix):
     return 'OX4'+prefix+str(int(time.time()*1000))+secrets.token_hex(4)
 
@@ -2781,6 +2913,7 @@ def place(st,px):
         if previous['state'] not in ('CLOSED','CANCELED','EXITED'):
             die('Level already occupied: '+k)
         st.setdefault('archived_cycles',[]).append({'level':k,**previous})
+        st.get('terminal_seen',{}).pop(str(previous['cycleId']),None)
         # Archive old level with the next PLACING intent in one durable save.
     cl=newid('B'); tcl=newid('T')
     stamp=time.time()
@@ -3669,6 +3802,7 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                         latency_ms('drawdown_submit',dd_submit_start)
                 if started-last_archive_compact>=30:
                     last_archive_compact=started
+                    eager_archive_terminals(st,pnl,pending)
                     if st.get('archived_cycles'):
                         compact_archived(st,pnl)
             if mode in ('HARD','PANIC'):
@@ -5103,7 +5237,10 @@ class StatsWorker(threading.Thread):
                     # no-progress attempts in BOTH success and NotReady paths.
                     attempts=getattr(core,'freeze_stalled',0)
                     if attempts>=20 and not stats_stall_alerted:
-                        try: log('STATS_V2_STALLED',reason='Pending freeze no-progress threshold')
+                        try: log('STATS_V2_STALLED',
+                                 reason='Pending freeze no-progress threshold',
+                                 message='Actionable defer reasons: '+str(getattr(core,'last_freeze_reasons',{})),
+                                 deferred_reasons=getattr(core,'last_freeze_reasons',{}))
                         except Exception: pass
                         stats_stall_alerted=True
                     elif attempts==0 and stats_stall_alerted:
@@ -5127,7 +5264,10 @@ class StatsWorker(threading.Thread):
                 else:
                     delay=15.0
                 if core is not None and getattr(core,'freeze_stalled',0)>=20 and not stats_stall_alerted:
-                    try: log('STATS_V2_STALLED',reason='Pending freeze no-progress threshold')
+                    try: log('STATS_V2_STALLED',
+                                 reason='Pending freeze no-progress threshold',
+                                 message='Actionable defer reasons: '+str(getattr(core,'last_freeze_reasons',{})),
+                                 deferred_reasons=getattr(core,'last_freeze_reasons',{}))
                     except Exception: pass
                     stats_stall_alerted=True
                 print('STATS_V2_NOT_READY:',msg[:180],flush=True)

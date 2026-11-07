@@ -75,13 +75,24 @@ class EnginePatchTest(unittest.TestCase):
             self.fn(bad)
         self.assertFalse(self.write_order)
     def test_nonfinancial_bot_engine_unchanged(self):
+        # The eager archival release deliberately changes ONE engine tick,
+        # ONE existing place() cleanup, and adds ONE isolated helper. Preserve
+        # the original byte-differential contract for EVERY other trade path.
         old=(SRC/'reference/okx_bot.py').read_text()
         new=(DIR/'okx_bot.py').read_text()
         a=old.index('class StatsWorker(threading.Thread):')
         b=old.index('\ndef active_tp_trace_id(',a)
         c=new.index('def print_verified_incremental_stats(')
         d=new.index('\ndef active_tp_trace_id(',c)
-        self.assertEqual(old[:a],new[:c])
+        start=new.index('# A terminal cycle may remain in the price-keyed trading grid')
+        stop=new.index('def newid(prefix):',start)
+        new=new[:start-1]+new[stop:]
+        # The rest of the engine must be byte-identical to the pinned oracle.
+        new=new.replace("        st.get('terminal_seen',{}).pop(str(previous['cycleId']),None)\n",'')
+        new=new.replace('                    eager_archive_terminals(st,pnl,pending)\n','')
+        c=new.index('def print_verified_incremental_stats(')
+        d=new.index('\ndef active_tp_trace_id(',c)
+        self.assertEqual(old[:a].rstrip(),new[:c].rstrip())
         self.assertEqual(old[b:],new[d:])
 
 if __name__=='__main__':unittest.main()

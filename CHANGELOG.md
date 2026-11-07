@@ -1,3 +1,11 @@
+## v0.7.64 — 2026-11-07 UTC — Eager archive / legitimate pending (engine 0.7.64)
+- Durable `terminal_seen` and 900-second guarded eager archive for safely settled CLOSED/EXITED cycles in the existing fully reconciled 30-second tick; existing compaction, no monetary freeze-rule changes.
+- Keep active TP, manual cleanup, unresolved fills/ledger, escape, incomplete aggregate/partial exits and exchange-pending order identities out of eager archive (including legacy attached TP IDs).
+- Legitimate `shared_component`, `component_present`, `unarchived_sibling`, `nonterminal` waits excluded from false Stats-v2 STALLED counter; actual faults remain visible.
+- Offline full `run_checks.sh`: 724 tests PASS including finance parity 164+32; tests executed before LIVE/publishing only.
+- Guarded LIVE rollout: DOOD canary then BLUR; BLUR 18 pending→0 after terminal archive and six linked CLOSED cycles left active grid; all 8 engines v0.7.64, fresh Stats-v2 financial reports, BTC last.
+- GitHub-only release from SHA-pinned RC2; no trading/Reader/Telegram restarts, no OKX API or tests during publication.
+
 ## v0.7.63 — 2026-11-07 UTC — Stats-v2 reliability (engine 0.7.63)
 - Reliable financial-anchor bootstrap; HOT-fills NotReady and state-capture races correctly distinguished from persistent Drift.
 - Bounded deferred component processing and durable recovery of derived Stats-v2 sidecar with fail-closed safeguards; no FULL oracle on LIVE.

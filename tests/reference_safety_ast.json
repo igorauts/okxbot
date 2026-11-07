@@ -82,7 +82,7 @@
   "partial_cleanup_action": "d1c1aff102dbd4709aeb990d34a4040735412d76fb997ea34b04c1d58258fdfa",
   "partial_cleanup_due": "2ba02ce9a585421d248383315186c1fd22788fff36a10af9f8dd831b00d0ab95",
   "persist_crossed_virtual_tps": "1a6da5a75d2900e775335c028075327b5d778b42b6699ba4d2d1d9ad4459f75b",
-  "place": "f10f659283e6c1ba74a5ad77d6070070089d6cb39e4aeb0309dc269337410747",
+  "place": "046d00f9bb86ca45644f6c2e9c2018f56083f43b80b524fa992f2cb4cac5cc4b",
   "place_panic_sell": "b151c41e3217fb5222e00670ad64c9f6281f1c6b8449fdb3811152680fa9d79b",
   "place_virtual_tp": "377cc229f7896ff09fbccf2ad31d08d2d3b9824270139eb3d310ea2dbe82f8e4",
   "plan_buy_buffer_cleanup": "138fb3a16ac4cfba145c3510cd7bbb55c4090d0a5714ce2fb50baab5a9cc39c5",

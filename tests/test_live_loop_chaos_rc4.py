@@ -105,6 +105,7 @@ class Harness:
             'log':lambda *a,**k:self.logs.append((a,k)),
             'pnl_submit_start':None,
             'compact_archived':lambda *a:None,
+            'eager_archive_terminals':lambda *a:0,  # isolated archival effect
             'controlled_shutdown':lambda *a,**k:True,
             'tp_failure_buy_hold':lambda *a:[],
             'active_buy':lambda *a:[],

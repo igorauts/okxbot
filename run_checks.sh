@@ -140,5 +140,9 @@ python3 -B -m unittest tests.test_stats_v2_recovery_crash -q
 python3 -B -m unittest tests.test_stats_v2_telegram_delivery -q
 python3 -B -m unittest tests.test_stats_v2_hostile_late_fill -q
 
-# Byte-preserved original phase+production StatsWorker v2 suites (offline, pinned oracle).
+# Pinned original FULL oracle and finance regression suites. One legacy
+# engine-unchanged assertion is revised to prove only approved archive edits.
 python3 -B tests/run_stats_v2_original_suites.py
+
+# Eager terminal archival + legitimate STALLED suppression (offline).
+python3 -B -m unittest tests.test_v0764_eager_archive -q

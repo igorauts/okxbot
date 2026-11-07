@@ -1,3 +1,7 @@
+## v0.7.64 — Eager terminal archive (LIVE, 07.11.2026 UTC)
+
+Проверенный LIVE-релиз 8/8 торговых движков. После 900 секунд безопасно переносит закрытые терминальные циклы из рабочей сетки в архив; законные ожидания shared-компонентов больше не вызывают ложный `STATS_V2_STALLED`. На BLUR подтверждены `pending=18→0`, перенос шести терминальных циклов и непрерывная финансовая публикация. Торговая стратегия и денежные правила freeze не изменены. См. `V0764_EAGER_TERMINAL_ARCHIVE_LIVE_RELEASE_NOTES_RU.md`. Отдельный `V0764_EAGER_TERMINAL_ARCHIVE_OFFLINE_NOTES_RU.md` сохранён как исторический отчёт до LIVE.
+
 ## v0.7.63 — Stats-v2 reliability (LIVE, 07.11.2026 UTC)
 
 Проверенный LIVE-релиз: 8/8 торговых движков v0.7.63, подтверждённые новые финансовые публикации, Reader/Telegram активны. Исправлены bootstrap anchor, bounded pending/rebuild, обработка гонок состояния и инцидентная телеметрия. Результаты и ограничения см. `V0763_STATS_V2_RELIABILITY_LIVE_RELEASE_NOTES_RU.md`. Прежний `V0763_STATS_V2_RELIABILITY_OFFLINE_NOTES.md` — исторический отчёт о кандидате до LIVE.
