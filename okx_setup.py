@@ -8,6 +8,7 @@ import hmac
 import json
 import os
 import shutil
+import re
 import sys
 import time
 import urllib.parse
@@ -17,10 +18,51 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP
 from pathlib import Path
 
 from okx_version import ENGINE_VERSION as VER
+from okx_version import RELEASE_VERSION as MANAGER_RELEASE_VERSION
 from okx_contracts import validate_spec
 BASE=Path(__file__).resolve().parent
-from okx_setup_presets import ASSETS
 
+
+
+
+def ticker_24h_range(ticker):
+    """Informational rolling-24h trading high/low from same OKX BID snapshot.
+
+    Invalid or absent fields are NOT used as guidance; core BID check remains
+    authoritative. No new API calls and no impact on strategy validation.
+    """
+    try:
+        low, high = D(ticker['low24h']), D(ticker['high24h'])
+    except (ValueError, KeyError, TypeError):
+        return None, None
+    if low <= 0 or high <= 0 or low > high:
+        return None, None
+    return low, high
+
+
+def suggest_bot_name(coin, existing=()):
+    """Suggest btc0766-like names from the *current manager* release version.
+
+    Do not hardcode version digits, preserve manual editing, and avoid names
+    already registered in the manager (case-insensitive).
+    """
+    version = str(MANAGER_RELEASE_VERSION)
+    if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
+        raise ValueError('Некорректная версия менеджера для имени бота')
+    suffix = ''.join(version.split('.'))
+    base = str(coin).strip().lower()
+    if not re.fullmatch(r'[a-z0-9]{1,32}', base):
+        raise ValueError('Некорректный тикер для имени бота')
+    taken = {str(name).casefold() for name in existing}
+    for n in range(1, 10001):
+        index = '' if n == 1 else f'-{n}'
+        available = 20 - len(suffix) - len(index)
+        if available < 1:
+            break
+        proposal = base[:available] + suffix + index
+        if 3 <= len(proposal) <= 20 and proposal.casefold() not in taken:
+            return proposal
+    raise ValueError('Не удалось подобрать свободное имя бота')
 
 def D(s):
     try:
@@ -141,6 +183,7 @@ def load_contract(coin,env):
     tickers=okx_req('/api/v5/market/ticker',params={'instId':inst})
     if len(tickers)!=1:raise RuntimeError('Текущая цена отсутствует')
     price=D(tickers[0]['bidPx'])
+    day_low_24h,day_high_24h=ticker_24h_range(tickers[0])
     if price<=0:raise RuntimeError('Неверный BID')
     # For SWAP, OKX fee lookup must be scoped to the instrument family.
     family=spec.get('instFamily') or f'{coin}-USDT'
@@ -176,7 +219,7 @@ def load_contract(coin,env):
         'ct':ct,'lot':lot,'min_contracts':minimum,'min_qty':min_qty,
         'maker':maker,'taker':taker,'fee_level':fee.get('level','—'),
         'break_even':break_even,'min_tp':min_tp,'inst_family':family,
-        'spec':spec}
+        'spec':spec,'day_low_24h':day_low_24h,'day_high_24h':day_high_24h}
 
 
 def percentage(distance, price):
@@ -306,12 +349,17 @@ def lines_for(key, ctx, input_value=''):
     if key=='upper':
         x1=to_tick_up(price*Decimal('1.10'),tick)
         x2=to_tick_up(price*Decimal('1.15'),tick)
+        day_low=ctx.get('day_low_24h')
+        day_high=ctx.get('day_high_24h')
+        day_line=(f'24ч минимум / максимум OKX: ${as_string(day_low)} – ${as_string(day_high)}'
+                  if day_low is not None and day_high is not None
+                  else '24ч диапазон: нет корректных данных OKX')
         return [
             'Укажите верхнюю границу сетки.', '',
             f'Текущая цена: ${price}',
+            day_line,
             f'Ориентир +10–15%: ${x1}–${x2}', '',
-            'Можно указать границу НИЖЕ текущей цены.',
-            'Тогда новые BUY появятся лишь после снижения BID.',
+            'Ниже BID — новые BUY только после снижения.',
             '0 — без ограничения.', '',
             f'Например: {x2}', '',
             'Верхняя граница (USDT):']
@@ -336,7 +384,8 @@ def name_input(stdscr,title,existing, initial=''):
             'Как назовём бота?', '',
             'По этому имени можно будет смотреть статистику,',
             'запускать и останавливать бота.', '',
-            'Например: SOL Grid 1', '',
+            f'Предложенное имя: {initial or "—"}',
+            'Enter — принять или измените имя вручную.', '',
             'Название бота:'],
             foot='Enter — сохранить имя    Esc — назад',error=error)
         put(stdscr,y,value+'█')
@@ -359,7 +408,7 @@ def report(ctx):
     lo,position,cap=capital(reference,ctx['step'],int(ctx['grids']),ctx['qty'])
     profit=tp_estimated_net(ctx,ctx['tp'],ctx['qty'])
     return [
-        f'Актив:                         {next((k for k,v in ASSETS.items() if v==c), c)}',
+        f'Актив:                         {c}' + (f' — {contract_full_name(ctx["spec"])}' if contract_full_name(ctx["spec"]) else ''),
         f'Контракт:                      {ctx["instrument"]}',
         f'Имя бота:                      {ctx.get("name","—")}',
         f'Текущий BID:                   ${price}', '',
@@ -505,85 +554,242 @@ def numeric_input(stdscr,title,lines,validate,initial=''):
             error='Введите только число.'
 
 
+
+
+def available_usdt_swaps():
+    """GET once per wizard: show only contracts allowed by engine validator."""
+    rows = okx_req('/api/v5/public/instruments', params={'instType': 'SWAP'})
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError('OKX не вернул список SWAP-контрактов')
+    valid = {}
+    for spec in rows:
+        if not isinstance(spec, dict):
+            continue
+        inst = spec.get('instId')
+        try:
+            coin = validate_spec(inst, spec)
+        except (ValueError, TypeError, KeyError):
+            continue
+        if coin in valid:
+            raise RuntimeError('OKX вернул дубликат торговой пары: ' + coin)
+        valid[coin] = spec
+    if not valid:
+        raise RuntimeError('Нет доступных LIVE USDT linear SWAP-контрактов')
+    return dict(sorted(valid.items()))
+
+
+def normalize_ticker(raw):
+    """Accept B, BTC, BTCUSDT, BTC-USDT, BTC-USDT-SWAP; reject other markets."""
+    value = str(raw).strip().upper().replace(' ', '')
+    for suffix in ('-USDT-SWAP', '-USDT', 'USDT'):
+        if value.endswith(suffix):
+            value = value[:-len(suffix)]
+            break
+    if not re.fullmatch(r'[A-Z0-9]{1,32}', value):
+        raise ValueError('Введите 1–32 латинские буквы/цифры базового тикера')
+    return value
+
+
+def find_ticker_matches(catalog, text):
+    needle = normalize_ticker(text)
+    return [name for name in catalog if name.startswith(needle)]
+
+
+def contract_full_name(spec):
+    """OKX instruments usually lacks an asset's human-readable name."""
+    for field in ('name', 'displayName', 'instName'):
+        name = spec.get(field)
+        if (isinstance(name, str) and 2 <= len(name) <= 72
+                and all(ch.isprintable() for ch in name)):
+            return name.strip()
+    return ''
+
+
+def ticker_text_input(stdscr, catalog, initial='', notice=''):
+    value = str(initial)
+    error = notice
+    while True:
+        preview = []
+        if value:
+            try:
+                candidates = find_ticker_matches(catalog, value)
+                preview = [f'Совпадений: {len(candidates)}',
+                           '  ' + ', '.join(candidates[:6]) +
+                           (' …' if len(candidates) > 6 else '')] if candidates else ['Совпадений: 0']
+            except ValueError:
+                preview = ['Проверьте формат тикера']
+        y = screen(stdscr, 'OKX GRID BOT — поиск USDT-SWAP', [
+            f'Доступных контрактов: {len(catalog)} (LIVE / linear / USDT)',
+            'Введите тикер или первые 1–4+ символа.',
+            'Поддерживается: BTC, BTCUSDT, BTC-USDT-SWAP',
+            '', *preview, '', 'Тикер:'],
+            foot='Enter — найти    Esc — отмена', error=error)
+        put(stdscr, y, value + '█')
+        stdscr.refresh()
+        ch = stdscr.get_wch()
+        if ch == '\x1b':
+            return None
+        if ch in ('\n', '\r', curses.KEY_ENTER):
+            try:
+                needle = normalize_ticker(value)
+            except ValueError as exc:
+                error = str(exc)
+                continue
+            if not any(name.startswith(needle) for name in catalog):
+                error = 'В OKX нет LIVE USDT-SWAP с таким префиксом'
+                continue
+            return needle
+        if ch in ('\b', '\x7f', curses.KEY_BACKSPACE, 127):
+            value = value[:-1]
+            error = ''
+        elif isinstance(ch, str) and len(ch) == 1 and ch.isascii() and ch.isprintable():
+            if len(value) < 48 and (ch.isalnum() or ch in '- '):
+                value += ch.upper()
+                error = ''
+            else:
+                error = 'Только латинские буквы, цифры и дефис'
+
+
+def choose_ticker(stdscr, catalog):
+    """Exact match wins. Other prefixes get a paged, deliberate selection."""
+    previous = ''
+    while True:
+        text = ticker_text_input(stdscr, catalog, initial=previous)
+        if text is None:
+            return None
+        previous = text
+        matches = find_ticker_matches(catalog, text)
+        if text in catalog:
+            return text
+        if len(matches) == 1:
+            return matches[0]
+        page = 0
+        while True:
+            # Keep all choices + footer visible on a regular SSH terminal.
+            size = max(3, min(10, stdscr.getmaxyx()[0] - 13))
+            start = page * size
+            visible = matches[start:start + size]
+            choices = [f'{c}-USDT-SWAP' for c in visible]
+            actions = []
+            if start + size < len(matches):
+                actions.append(('Следующая страница', 'next'))
+            if page:
+                actions.append(('Предыдущая страница', 'prev'))
+            actions.extend([('Уточнить поиск', 'edit'), ('Назад', 'back')])
+            labels = choices + [x[0] for x in actions]
+            selected = menu(stdscr, f'OKX GRID BOT — поиск «{text}»', labels,
+                            [f'Найдено {len(matches)}; варианты {start+1}–{start+len(visible)}'])
+            if selected is None:
+                break
+            if selected < len(visible):
+                return visible[selected]
+            action = actions[selected-len(visible)][1]
+            if action == 'next':
+                page += 1
+            elif action == 'prev':
+                page -= 1
+            else:
+                break
+
+
+def contract_preview(ctx):
+    coin = ctx['coin']
+    name = contract_full_name(ctx['spec'])
+    return [
+        f'Базовый актив: {coin}',
+        f'Название: {name or "— (OKX не указал)"}',
+        f'Пара: {ctx["instrument"]}  |  LIVE  |  USDT linear SWAP',
+        f'BID: ${as_string(ctx["price"])}  (новый снимок OKX)', '',
+        f'Шаг цены: ${as_string(ctx["tick"])}',
+        f'Размер контракта: {as_string(ctx["ct"])} {coin}',
+        f'Шаг лота: {as_string(ctx["lot"])} контр.',
+        f'Мин. ордер: {as_string(ctx["min_contracts"])} контр. = {as_string(ctx["min_qty"])} {coin}',
+        f'Мин. номинал: ~${ctx["min_qty"]*ctx["price"]:.2f}',
+        f'VIP: {ctx["fee_level"]}  |  maker: {ctx["maker"]}  |  taker: {ctx["taker"]}',
+        f'Безубыток: ${ctx["break_even"]}  |  мин. TP: ${ctx["min_tp"]}',
+    ]
+
 def wizard(stdscr,env,existing_names=()):
     curses.curs_set(0)
     setup_colors()
     while True:
-        idx=menu(stdscr,'OKX GRID BOT — выберите пару',list(ASSETS))
-        if idx is None:return None
-        coin=list(ASSETS.values())[idx]
+        try:
+            catalog = available_usdt_swaps()
+        except Exception as exc:
+            retry = menu(stdscr, 'OKX GRID BOT — список контрактов',
+                ['Повторить запрос', 'Отмена'],
+                ['Не удалось загрузить LIVE USDT linear SWAP из OKX.', str(exc)[:120]])
+            if retry == 0:continue
+            return None
         while True:
-            try:ctx=load_contract(coin,env)
-            except Exception as exc:
-                retry=menu(stdscr,f'OKX GRID BOT — {coin}',
-                    ['Повторить запрос','Назад к выбору'],
-                    ['Не удалось получить спецификацию, BID или VIP комиссии.',
-                     str(exc)[:160]])
-                if retry==0:continue
-                break
-            contract_lines=[
-                f'Контракт: {ctx["instrument"]}',
-                f'Текущая цена:                ${ctx["price"]}', '',
-                f'Минимальный ордер:           {ctx["min_qty"]} {coin}',
-                f'Стоимость минимального:     ${ctx["min_qty"]*ctx["price"]:.2f}',
-                f'Шаг цены:                    ${ctx["tick"]}', '',
-                f'Расстояние безубытка:       ${ctx["break_even"]}',
-                '(BUY maker + TP maker)',
-            ]
-            go=menu(stdscr,f'OKX GRID BOT — {coin}',
-                ['Продолжить','Назад к выбору'],contract_lines)
-            if go!=0:break
-            steps=['step','grids','qty','tp','buys','real_tp','upper','name']
+            coin = choose_ticker(stdscr, catalog)
+            if coin is None:return None
             while True:
-                j=0
-                while j>=0:
-                    if j<len(steps):
-                        key=steps[j]
-                        # Back navigation and explicit edit both preserve typed values.
-                        previous=ctx.get(key)
-                        initial=(as_string(previous) if previous is not None and key!='name'
-                                 else '')
-                        if key=='name':
-                            val=name_input(stdscr,f'OKX GRID BOT — {coin}',existing_names,
-                                           initial=ctx.get('name',''))
-                        else:
-                            val=numeric_input(stdscr,f'OKX GRID BOT — {coin}',
-                                              lambda v,k=key:lines_for(k,ctx,v),
-                                              lambda s,k=key:validate_numeric(k,s,ctx),
-                                              initial=initial)
-                        if val is None:
-                            j-=1
-                        else:
-                            ctx[key]=val
-                            j+=1
-                        continue
-                    # The chosen upper boundary can raise the minimum safe TP.
-                    upper=ctx['upper']
-                    worst=max(ctx['price'],upper)
-                    req_tp=max(ctx['tick'],to_tick_up(
-                        fee_break_even(worst,max(Decimal(0),ctx['maker']))
-                        *Decimal('1.2'),ctx['tick']))
-                    if ctx['tp']<req_tp:
-                        screen(stdscr,f'OKX GRID BOT — {coin}',[
-                            f'TP ${ctx["tp"]} недостаточен для цены ${worst}.',
-                            f'Минимум с запасом: ${req_tp}.',
-                            'Нужно вернуться и увеличить TAKE PROFIT.'],
-                            foot='Нажмите любую клавишу')
-                        stdscr.get_wch()
-                        ctx['min_tp']=req_tp
-                        j=3
-                        continue
+                try:ctx=load_contract(coin,env)
+                except Exception as exc:
+                    retry=menu(stdscr,f'OKX GRID BOT — {coin}',
+                        ['Повторить запрос','Изменить тикер','Отмена'],
+                        ['Не удалось получить спецификацию, BID или VIP комиссии.',
+                         str(exc)[:160]])
+                    if retry==0:continue
+                    if retry==2:return None
                     break
-                if j<0:
-                    break
-                confirm=menu(stdscr,'OKX GRID BOT — СОЗДАНИЕ БОТА',
-                    ['Создать бота','Изменить настройки','Отмена'],report(ctx))
-                if confirm==0:return ctx
-                if confirm==1:
-                    # Keep the SAME contract/spec/BID and all chosen values.
-                    continue
-                return None
-            break
+                go=menu(stdscr, f'OKX GRID BOT — {coin}',
+                    ['Подтвердить и продолжить', 'Изменить тикер', 'Отмена'],
+                    contract_preview(ctx))
+                if go == 2:return None
+                if go != 0:break
+                steps=['step','grids','qty','tp','buys','real_tp','upper','name']
+                while True:
+                    j=0
+                    while j>=0:
+                        if j<len(steps):
+                            key=steps[j]
+                            # Back navigation and explicit edit both preserve typed values.
+                            previous=ctx.get(key)
+                            initial=(as_string(previous) if previous is not None and key!='name'
+                                     else '')
+                            if key=='name':
+                                val=name_input(stdscr,f'OKX GRID BOT — {coin}',existing_names,
+                                               initial=ctx.get('name') or suggest_bot_name(coin,existing_names))
+                            else:
+                                val=numeric_input(stdscr,f'OKX GRID BOT — {coin}',
+                                                  lambda v,k=key:lines_for(k,ctx,v),
+                                                  lambda s,k=key:validate_numeric(k,s,ctx),
+                                                  initial=initial)
+                            if val is None:
+                                j-=1
+                            else:
+                                ctx[key]=val
+                                j+=1
+                            continue
+                        # The chosen upper boundary can raise the minimum safe TP.
+                        upper=ctx['upper']
+                        worst=max(ctx['price'],upper)
+                        req_tp=max(ctx['tick'],to_tick_up(
+                            fee_break_even(worst,max(Decimal(0),ctx['maker']))
+                            *Decimal('1.2'),ctx['tick']))
+                        if ctx['tp']<req_tp:
+                            screen(stdscr,f'OKX GRID BOT — {coin}',[
+                                f'TP ${ctx["tp"]} недостаточен для цены ${worst}.',
+                                f'Минимум с запасом: ${req_tp}.',
+                                'Нужно вернуться и увеличить TAKE PROFIT.'],
+                                foot='Нажмите любую клавишу')
+                            stdscr.get_wch()
+                            ctx['min_tp']=req_tp
+                            j=3
+                            continue
+                        break
+                    if j<0:
+                        break
+                    confirm=menu(stdscr,'OKX GRID BOT — СОЗДАНИЕ БОТА',
+                        ['Создать бота','Изменить настройки','Отмена'],report(ctx))
+                    if confirm==0:return ctx
+                    if confirm==1:
+                        # Keep the SAME contract/spec/BID and all chosen values.
+                        continue
+                    return None
+                break
     return None
 
 
