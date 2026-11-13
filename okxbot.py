@@ -20,6 +20,7 @@ import os
 import re
 from collections import deque
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -219,6 +220,60 @@ def provision_latest_engine(created,source=SOURCE):
         if os.path.exists(tmp):os.unlink(tmp)
     return name,version
 
+
+
+def bootstrap_fresh_cycles_archive(instance):
+    """Initialize the archive source ONLY for a newly created, unstarted bot.
+
+    This must never be used by an existing bot startup, StatsWorker, clone
+    recovery, audit, or registration: a missing established ledger is DRIFT.
+    No exchange calls, trading state writes, or history reconstruction.
+    """
+    instance=Path(instance)
+    state=instance/'state'
+    config=instance/'config.json'
+    target=state/'cycles.sqlite'
+    if instance.is_symlink() or not instance.is_dir():
+        raise RuntimeError('Refusing archive bootstrap outside a fresh instance')
+    if state.is_symlink() or not state.is_dir() or config.is_symlink() or not config.is_file():
+        raise RuntimeError('New bot state/config is missing or unsafe')
+    cfg=json.loads(config.read_text(encoding='utf-8'))
+    if (not isinstance(cfg,dict) or cfg.get('live_trading') is not False or
+            cfg.get('version') != ENGINE_VERSION or not cfg.get('created_at')):
+        raise RuntimeError('Archive bootstrap requires a newly configured non-LIVE bot')
+    # The creation code has just made state/. ANY contents (including previous
+    # ledgers, a failed bootstrap, a symlink, or the source DB itself) prohibit
+    # implicit recovery or overwriting.
+    if any(state.iterdir()):
+        raise RuntimeError('Archive bootstrap refused: state is not empty')
+    flags=os.O_WRONLY|os.O_CREAT|os.O_EXCL|getattr(os,'O_NOFOLLOW',0)
+    fd=os.open(target,flags,0o600)
+    os.close(fd)
+    # mode=rw must NOT create/recreate a database if the inode disappeared.
+    try:
+        with contextlib.closing(sqlite3.connect(target.as_uri()+'?mode=rw',uri=True,timeout=5)) as db:
+            db.execute('PRAGMA journal_mode=WAL')
+            db.execute('PRAGMA synchronous=FULL')
+            with db:
+                db.execute('CREATE TABLE cycles (id TEXT PRIMARY KEY, data TEXT NOT NULL)')
+            from okx_stats_v2_contract import SCHEMAS
+            cols=tuple(row[1] for row in db.execute('PRAGMA table_info(cycles)'))
+            count=db.execute('SELECT COUNT(*) FROM cycles').fetchone()[0]
+            integrity=db.execute('PRAGMA quick_check').fetchone()[0]
+            if cols != SCHEMAS['cycles'] or count != 0 or integrity != 'ok':
+                raise RuntimeError('New cycles archive schema/integrity mismatch')
+        if target.is_symlink() or not target.is_file():
+            raise RuntimeError('New cycles archive identity changed')
+        os.chmod(target,0o600)
+        # Durable creation before any possible service registration / START.
+        dfd=os.open(state,os.O_RDONLY|getattr(os,'O_DIRECTORY',0))
+        try:os.fsync(dfd)
+        finally:os.close(dfd)
+    except BaseException:
+        # Never register/start this incompletely initialized instance.
+        # Leave evidence on disk for operator diagnosis; never auto-repair.
+        raise
+    return target
 
 def unit_text(path, engine, name):
     # Only paths created by our wizard are allowed: ASCII and no whitespace.
@@ -462,6 +517,7 @@ def cmd_new(env_file):
         run(['systemctl', 'daemon-reload'])
         # Auto-arm BOTH read-only observers; never start the trading bot.
         provision_observers(created, service, SOURCE, SYSTEMD_DIR)
+        bootstrap_fresh_cycles_archive(created)
         entries[name] = {'slug':slug, 'path':str(created),'service':service}
         save_registry(entries)
     except Exception:
@@ -515,6 +571,10 @@ def cmd_start(name):
     if service_running(unit):
         print(f'Бот «{name}» уже работает.')
         return
+    if account_soft_active():
+        print('⚠️ ACCOUNT SOFT STOP: глобальная блокировка активна. '
+              'Служба может запуститься, но новые BUY останутся заблокированы '
+              'до снятия блокировки через менеджер.', flush=True)
     conflict = scan_other_live_same_instrument(path,cfg.get('instrument'))
     if conflict:
         raise RuntimeError(f'{conflict} уже торгует {cfg.get("instrument")}. '
@@ -1132,6 +1192,7 @@ def cmd_clone(source_name, new_name):
     run(['systemctl','daemon-reload'])
     # Auto-arm BOTH read-only observers before registering the clone.
     provision_observers(dest, service, SOURCE, SYSTEMD_DIR)
+    bootstrap_fresh_cycles_archive(dest)
     entries[new_name]={'slug':slug,'path':str(dest),'service':service}
     save_registry(entries)
     print(f'Клон создан, торговля выключена. Запуск: okxbot start "{new_name}"')
@@ -1780,9 +1841,19 @@ def interactive_main(env_file):
         def _live_label(name):
             entry=live[name]
             if not service_running(unit_name(entry)):
+                try:
+                    root=bot_path(entry)
+                    cfg=json.loads((root/'config.json').read_text(encoding='utf-8'))
+                    if (cfg.get('live_trading') is False and
+                            not (root/'state/bot_state.json').exists()):
+                        return '⚪ НОВЫЙ / ОСТАНОВЛЕН'
+                except (OSError,ValueError,RuntimeError,TypeError):
+                    pass
                 return '🔴 ERROR'
+            if account_soft_active():
+                return '🟡 ACCOUNT SOFT'
             mode=control_desired(entry)
-            if mode in ('PAUSE','SOFT') or account_soft_active():
+            if mode in ('PAUSE','SOFT'):
                 return '🟡 '+mode
             return '🟢 RUN'
         titles=[f'{_live_label(n)} {n} — {_display_description(live[n])}' for n in names]
