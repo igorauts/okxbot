@@ -4,6 +4,7 @@ Never imports a trading engine, reads API credentials, mutates bot state or call
 """
 import html
 import json
+from contextlib import closing
 import math
 import re
 import statistics
@@ -395,73 +396,79 @@ def _readonly_connect(path):
     return sqlite3.connect(Path(path).resolve().as_uri()+'?mode=ro',uri=True, timeout=2)
 
 
-def market_ledger(root, event):
+def market_ledger(root, event, *, reason_sink=None):
     """Return verified group net + estimated LIMIT net, or None if incomplete.
 
     Read-only SQLite. No partial fees or fabricated profits. Same-sell-order
     single-leg accounted cycles only; multi-leg cycles defer for audit.
     """
+    def fail(reason):
+        # Fixed diagnostic reason only. Never expose order IDs or database values.
+        if reason_sink is not None:
+            reason_sink.append(reason)
+        return None
+
     root=Path(root)
     oid=str(event.get('ordId') or '')
     if not oid or event.get('state')!='FILLED':
-        return None
+        return fail('not_filled_or_missing_sell_order')
     state=read_json(state_file(root))
     cfg=read_json(root/'config.json')
     groups=[g for g in state.get('aggregate_exits',[]) if str(g.get('ordId'))==oid]
     if len(groups)!=1 or groups[0].get('phase')!='FILLED':
-        return None
+        return fail('aggregate_group_missing_or_incomplete')
     group=groups[0]
     plan=group.get('plan',[])
     if not isinstance(plan,list) or not plan:
-        return None
+        return fail('aggregate_plan_missing')
     qty=number(group.get('sz'))
     cv=number(cfg.get('contract_value'))
     rate=number(cfg.get('maker_fee_at_setup'))
     if not qty or not cv or rate is None or rate<0 or rate>=1:
-        return None
+        return fail('contract_or_fee_configuration_invalid')
     rows=[]
     try:
-        with _readonly_connect(pnl_db(root)) as db:
+        with closing(_readonly_connect(pnl_db(root))) as db:
             for raw, in db.execute('SELECT data FROM accounted'):
                 data=json.loads(raw)
                 if oid in list(map(str,data.get('sell_ids',[]))):
                     rows.append(data)
     except (OSError,ValueError,Exception):
-        return None
+        return fail('pnl_sqlite_read_failed')
     if len(rows)!=len(plan):
-        return None
+        return fail('accounted_cycle_count_mismatch')
     if any(list(map(str,r.get('sell_ids',[])))!=[oid] or r.get('kind')!='CLOSED' for r in rows):
-        return None
+        return fail('accounted_cycle_sell_identity_or_state_mismatch')
     if sum((number(r.get('qty_contracts')) or Decimal(0) for r in rows),Decimal(0))!=qty:
-        return None
+        return fail('accounted_cycle_contract_quantity_mismatch')
     # Sum each BUY order's real fee ONCE, verified by stored exchange fills.
     buy_fees=Decimal(0)
     try:
-        with _readonly_connect(fills_db(root)) as db:
+        with closing(_readonly_connect(fills_db(root))) as db:
             for result in rows:
                 buyid=str(result.get('buy_id') or '')
                 if not buyid:
-                    return None
+                    return fail('accounted_cycle_missing_buy_identity')
                 matched=[json.loads(raw) for raw, in db.execute('SELECT data FROM fills WHERE order_id=?',(buyid,))]
                 if sum((number(f.get('fillSz')) or Decimal(0) for f in matched),Decimal(0)) != number(result.get('qty_contracts')):
-                    return None
+                    return fail('buy_fill_quantity_not_confirmed')
                 if any(f.get('side')!='buy' or f.get('feeCcy')!='USDT' or number(f.get('fee')) is None for f in matched):
-                    return None
+                    return fail('buy_fill_fee_not_confirmed')
                 buy_fees += sum((number(f['fee']) for f in matched),Decimal(0))
     except (OSError,ValueError,Exception):
-        return None
+        return fail('fills_sqlite_read_failed')
     if any(number(r.get('net')) is None or number(r.get('planned_gross')) is None
            or number(r.get('qty_base')) is None or number(r.get('buy_px')) is None
            for r in rows):
-        return None
+        return fail('accounted_financial_fields_missing')
     actual=sum((number(r['net']) for r in rows),Decimal(0))
     # Use persisted exchange-fill accounting, not the event's unverified avgPx.
     sell_values=[(number(r.get('sell_px')),number(r.get('qty_base'))) for r in rows]
     if any(px is None or px<=0 or size is None or size<=0 for px,size in sell_values):
-        return None
+        return fail('accounted_sell_price_or_quantity_invalid')
     actual_base=sum((size for _,size in sell_values),Decimal(0))
     if actual_base!=qty*cv:
-        return None
+        return fail('accounted_base_quantity_mismatch')
     avg_price=sum((px*size for px,size in sell_values),Decimal(0))/actual_base
     planned_gross=sum((number(r['planned_gross']) for r in rows),Decimal(0))
     # Original LIMIT TP price must come from each persisted cycle, NOT from
@@ -474,7 +481,7 @@ def market_ledger(root, event):
         if buy_id:
             if buy_id in by_buy:
                 # Duplicate identity -> ambiguous accounting, fail closed.
-                return None
+                return fail('duplicate_buy_cycle_identity')
             by_buy[buy_id]=c
     # The engine compacts completed cycles into the cycles SQLite ledger. A Market
     # group may be finalized before Telegram reads it, leaving some parent
@@ -483,31 +490,31 @@ def market_ledger(root, event):
     if missing:
         archive=cycles_db(root)
         if not archive.is_file():
-            return None
+            return fail('archived_cycles_database_missing')
         try:
-            with _readonly_connect(archive) as db:
+            with closing(_readonly_connect(archive)) as db:
                 for (raw,) in db.execute('SELECT data FROM cycles'):
                     c=json.loads(raw)
                     buyid=str(c.get('ordId') or '')
                     if buyid in missing:
-                        if buyid in by_buy: return None
+                        if buyid in by_buy: return fail('duplicate_buy_cycle_in_archive')
                         by_buy[buyid]=c
                         missing.remove(buyid)
                         if not missing: break
         except (OSError,ValueError,TypeError,Exception):
-            return None
-        if missing: return None
+            return fail('archived_cycles_database_read_failed')
+        if missing: return fail('buy_cycle_not_found_in_archive')
     expected_gross=Decimal(0)
     expected_sell_fee=Decimal(0)
     for result in rows:
         cycle=by_buy.get(str(result.get('buy_id')))
         if not cycle:
-            return None
+            return fail('accounted_buy_cycle_missing')
         tp=number(cycle.get('tpPx'))
         size=number(result.get('qty_base'))
         buy_vwap=number(result.get('buy_px'))
         if tp is None or tp<=0 or size is None or size<=0 or buy_vwap is None or buy_vwap<=0:
-            return None
+            return fail('original_tp_buy_vwap_unverified')
         expected_gross+=(tp-buy_vwap)*size
         expected_sell_fee+=tp*size*rate
     plan_net=expected_gross+buy_fees-expected_sell_fee
@@ -520,8 +527,9 @@ def signed_usd6(value):
 
 
 # Market SELL UI — financial figures come only from verified fill accounting.
-def market_message(name, root, event, timing):
-    v=market_ledger(root,event)
+def market_message(name, root, event, timing, *, reason_sink=None):
+    v=(market_ledger(root,event) if reason_sink is None else
+       market_ledger(root,event,reason_sink=reason_sink))
     if v is None:
         return None
     cfg=read_json(Path(root)/'config.json')

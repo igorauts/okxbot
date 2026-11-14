@@ -9,6 +9,7 @@ import hashlib
 import html
 import json
 import sqlite3
+from contextlib import closing
 import time
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -50,7 +51,7 @@ def _read_db(path, sql, args):
     if not path.is_file():
         return []
     # SQLite URI mode=ro: no database creation or journal-mode mutations.
-    with sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=2) as db:
+    with closing(sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True, timeout=2)) as db:
         return [json.loads(v) for (v,) in db.execute(sql, args)]
 
 

@@ -6,6 +6,7 @@ reads exchange secrets, or writes bot state. Only Telegram monitor own cursor ch
 """
 import html
 import json
+from contextlib import closing
 import re
 import subprocess
 import time
@@ -235,6 +236,17 @@ def market_process(api,st,names):
                 '🚨 Market SELL не завершён | '+name+' | '+str(terminal.get('state')))
             del items[key]
             continue
+        now=time.time()
+        # Never lose a FILLED market intent. Limit repeated read-only SQLite
+        # work while accounting is not ready; the queue remains durable.
+        done=item.get('terminal_at')
+        if done and now-done>86400:
+            one(api,st,'market/accounting_stale/'+key,
+                '🚨 Market SELL | '+name+' | net PnL не подтверждён за 24ч')
+            del items[key]
+            continue
+        if now < float(item.get('_tg_accounting_next_retry',0)):
+            continue
         root=names[name]
         times={}
         value=item.get('tp_to_intent_ms')
@@ -253,7 +265,7 @@ def market_process(api,st,names):
         try:
             import sqlite3
             db=fills_db(root)
-            with sqlite3.connect(db.resolve().as_uri()+'?mode=ro',uri=True,timeout=2) as con:
+            with closing(sqlite3.connect(db.resolve().as_uri()+'?mode=ro',uri=True,timeout=2)) as con:
                 rows=[json.loads(x[0]) for x in con.execute('SELECT data FROM fills WHERE order_id=?',(oid,))]
             if intent and rows:
                 first=min((float(f.get('fillTime') or f.get('ts')) / 1000.0 for f in rows))
@@ -261,18 +273,29 @@ def market_process(api,st,names):
                     times['fill']=(first-intent)*1000
         except (OSError,ValueError,TypeError,KeyError,Exception):
             pass
-        text=market_message(name,root,terminal,times)
+        reasons=[]
+        text=market_message(name,root,terminal,times,reason_sink=reasons)
         if text:
             one(api,st,'market/filled/'+key,text,html_mode=True)
             del items[key]
-        elif done and time.time()-done>30:
-            one(api,st,'market/accounting_wait/'+key,
-                '⚠️ Market SELL | '+name+' | FILLED, ожидаем подтверждённый net PnL')
-        if done and time.time()-done>86400:
-            # Preserve an alert if reliable accounting never materializes.
-            one(api,st,'market/accounting_stale/'+key,
-                '🚨 Market SELL | '+name+' | net PnL не подтверждён за 24ч')
-            del items[key]
+        else:
+            attempts=min(1000000,int(item.get('_tg_accounting_attempts',0))+1)
+            item['_tg_accounting_attempts']=attempts
+            # 60s, 120s, 240s, ... maximum 15 minutes. No hidden
+            # shortcut to unverified PnL; next retry survives restarts.
+            backoff=min(900,60*(2**min(4,attempts-1)))
+            item['_tg_accounting_next_retry']=now+backoff
+            reason=reasons[0] if reasons else 'market_message_unavailable'
+            previous=item.get('_tg_accounting_last_reason')
+            item['_tg_accounting_last_reason']=reason
+            # Log only on reason change or once every 15 min; no identifiers.
+            if reason!=previous or now-float(item.get('_tg_accounting_last_log',0))>=900:
+                print('TG_MARKET_ACCOUNTING_WAIT bot='+name+
+                      ' reason='+reason+' retry_sec='+str(backoff),flush=True)
+                item['_tg_accounting_last_log']=now
+            if done and now-done>30:
+                one(api,st,'market/accounting_wait/'+key,
+                    '⚠️ Market SELL | '+name+' | FILLED, ожидаем подтверждённый net PnL')
 
 
 def partial_scan(api,st,names):

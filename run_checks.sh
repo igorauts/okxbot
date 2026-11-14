@@ -1,5 +1,18 @@
 #!/bin/sh
 set -eu
+# Contract: offline regression tests must never have root write access to
+# /var/lib/okxbot or the live bot directories. Never execute them as root.
+if [ "$(id -u)" -eq 0 ]; then
+    # Root is allowed ONLY in a disposable isolated test container: NEVER on
+    # the LIVE systemd VPS, or while LIVE Telegram/trading state is mounted.
+    if [ "${OKX_DISPOSABLE_TEST_CONTAINER:-}" != 'CONFIRMED_ISOLATED' ] || \
+       [ "$(cat /proc/1/comm)" = 'systemd' ] || \
+       [ -e /root/okx ] || [ -e /etc/okxbot/telegram.env ] || \
+       [ -e /var/lib/okxbot/telegram_monitor_state.json ]; then
+        echo 'FAIL_CLOSED: tests require unprivileged execution or a disposable container without LIVE paths' >&2
+        exit 89
+    fi
+fi
 cd "$(dirname "$0")"
 python3 -B tests/test_offline.py
 python3 -B tests/test_emergency_hold.py
@@ -7,6 +20,8 @@ python3 -B tests/test_telegram_0722.py
 python3 -B tests/test_v0723.py
 python3 -B tests/test_v0723_final_ui.py
 python3 -B -m unittest tests.test_manager_next_maintenance -q
+# Telegram-only FD/market/ACK regression tests.
+python3 -B -m unittest tests.test_telegram_fd_market_ack_vnext -q
 python3 -B tests/test_v0723_fifo_alert.py
 python3 -B tests/test_v07231_telegram_start.py
 python3 -B tests/test_v0724.py

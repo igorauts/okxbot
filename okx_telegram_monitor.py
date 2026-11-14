@@ -100,6 +100,11 @@ def refresh_bots(*,force=False):
     now=time.monotonic()
     if not force and now-_DISCOVERY_LAST<15:return
     discovered=discover_bots()
+    # Unknown discovery (incl. EMFILE) is not proof that bots vanished. Keep
+    # previously verified entries and do not silently produce a false 0/0.
+    if not discovered:
+        print('TG_DISCOVERY_EMPTY retained='+str(len(BOT_DIRS)),flush=True)
+        return
     bots={};services={}
     for key,(root,unit) in discovered.items():
         if _confirmed_archived(key,root):continue
@@ -644,6 +649,8 @@ def compact_status_report():
             stale=(at is not None and now-float(at)>900)
             failed.append((name,'статистика устарела' if stale else 'снимок не подтверждён'))
     total=len(BOT_DIRS)
+    if not BOT_DIRS:
+        return '<b>⚠️ /status: монитор не может подтвердить обнаружение ботов; 0/0 недостоверно.</b>'
     if not active:
         return f'<b>Активных ботов: 0/{total} · н/д UTC</b>'
     stamps=[entry['stamp'] for entry in entries]
@@ -699,6 +706,8 @@ def _account_total_line(active):
 
 def status_report(requested=None, *, include_account=False):
     refresh_bots(force=True)
+    if not BOT_DIRS:
+        return '⚠️ /full: монитор не может подтвердить обнаружение ботов.'
     if requested:
         for name in BOT_DIRS:
             if name.casefold()==requested.casefold():
@@ -958,6 +967,8 @@ class _CommandBridge:
         self.token=token;self.chat=chat
         self.offset=int(offset)
         self.inbox=_cmd_queue.Queue(maxsize=1)
+        self.prepare=_cmd_queue.Queue(maxsize=1)
+        self.permit=_cmd_queue.Queue(maxsize=1)
         self.done=_cmd_queue.Queue(maxsize=1)
         self.ack=_cmd_queue.Queue(maxsize=1)
         self._cmd_thread=_cmd_threading.Thread(target=self._command_loop,
@@ -978,7 +989,6 @@ class _CommandBridge:
                 updates=api.call('getUpdates',{'offset':self.offset,'timeout':25,'limit':20})
                 if not isinstance(updates,list):
                     raise RuntimeError('Invalid Telegram getUpdates result')
-                error_count=0
                 for message in updates:
                     if not isinstance(message,dict) or type(message.get('update_id')) is not int:
                         raise RuntimeError('Invalid Telegram update: no update_id')
@@ -992,13 +1002,16 @@ class _CommandBridge:
                         self.offset=acknowledged
                     else:
                         raise RuntimeError('Command not durably acknowledged')
+                # Reset backoff only after processing all updates successfully.
+                error_count=0
             except Exception as exc:
                 # getUpdates is retriable; sendMessage is never automatically
                 # retried by Telegram.call() on an uncertain HTTP outcome.
                 api._close_http()
                 error_count=min(error_count+1,10)
-                print('TG_LONGPOLL_RETRY',type(exc).__name__,flush=True)
-                time.sleep(min(10, 1 if error_count==1 else 2**min(error_count-1,4)))
+                print('TG_LONGPOLL_RETRY type='+type(exc).__name__+
+                      ' errno='+str(getattr(exc,'errno',None)),flush=True)
+                time.sleep(min(60, 2**min(error_count-1,6)))
 
     def _command_loop(self):
         api=Telegram(self.token,self.chat)
@@ -1012,6 +1025,12 @@ class _CommandBridge:
                     print('TG_LATENCY_FLUSH_ERROR',type(exc).__name__,flush=True)
                 continue
             update_id=message['update_id']
+            # Trade-off: command replies are AT MOST ONCE. Persist the update
+            # offset first, or never dispatch. Alerts use their own outbox.
+            self.prepare.put(update_id)
+            if not self.permit.get():
+                self.done.put((update_id,False))
+                continue
             try:
                 _dispatch_command(api,message)
                 self.done.put((update_id,True))
@@ -1020,12 +1039,37 @@ class _CommandBridge:
                 api._close_http()
                 self.done.put((update_id,False))
 
+    def prepare_dispatch(self, st, update_id):
+        prev=int(st.get('updates_offset',0))
+        if update_id<prev:
+            self.permit.put(False)
+            return False
+        st['updates_offset']=update_id+1
+        try:
+            save_state(st)  # durable fsync before any sendMessage
+        except BaseException:
+            st['updates_offset']=prev
+            self.permit.put(False)
+            raise
+        self.permit.put(True)
+        return True
+
     def commit_completion(self, st):
         try:
             update_id, success=self.done.get_nowait()
         except _cmd_queue.Empty:
             return False
         prev=int(st.get('updates_offset',0))
+        if update_id<prev:
+            # Already durably committed, including uncertain delivery.
+            # Never re-send automatically after a failed Telegram send.
+            if not success:
+                print('TG_COMMAND_DELIVERY_UNCERTAIN_PREACKED',flush=True)
+            self.ack.put(update_id+1)
+            return True
+        # Pre-ACK failed: no user-visible reply was sent. Preserve the
+        # existing durable three-failure dead-letter budget for undelivered
+        # commands, without any duplicate sendMessage.
         failures=st.setdefault('telegram_command_failures_v1', {})
         key=str(update_id)
         if success:
@@ -1170,6 +1214,37 @@ def daily_check(api,st,now=None):
 
 
 
+
+def _fd_health_check(api, st, now=None):
+    """Bounded file descriptor warning, no secret/path disclosure."""
+    import resource
+    now=time.time() if now is None else float(now)
+    soft,_hard=resource.getrlimit(resource.RLIMIT_NOFILE)
+    if soft<=0 or soft==resource.RLIM_INFINITY:
+        return
+    try:
+        count=len(os.listdir('/proc/self/fd'))
+    except OSError as exc:
+        print('TG_FD_READ_ERROR errno='+str(exc.errno),flush=True)
+        return
+    if now-float(st.get('_tg_fd_last_log',0))>=60:
+        print('TG_FD_USAGE count='+str(count)+' limit='+str(soft),flush=True)
+        st['_tg_fd_last_log']=now
+    high=count>=soft//2
+    if high and not st.get('_tg_fd_alerted'):
+        # Set BEFORE durable enqueue so the persisted outbox and episode
+        # flag become atomic. Roll back on failed persistence.
+        st['_tg_fd_alerted']=True
+        try:
+            one(api,st,'telegram/fd_pressure/'+str(int(now)),
+                '⚠️ Telegram monitor: открытых FD '+str(count)+'/'+str(soft)+
+                ' (>=50% лимита). Проверить монитор, торговля не остановлена.')
+        except BaseException:
+            st['_tg_fd_alerted']=False
+            raise
+    elif not high and count<=soft*0.4:
+        st['_tg_fd_alerted']=False
+
 def main():
     from okx_telegram_io_probe import install as _mon_io_install, tick as _mon_io_tick
     _mon_io_install()
@@ -1200,16 +1275,26 @@ def main():
         now=time.monotonic()
         if now>=next_cycle:
             cycle_started=now
+            phase='refresh'
             try:
                 _mon_phase('refresh',refresh_bots)
+                phase='snapshot'
                 _mon_phase('snapshot',begin_systemd_snapshot,SERVICES)
+                phase='ingest_events'
                 _mon_phase('ingest_events',ingest_events,api,st)
+                phase='services_check'
                 _mon_phase('services_check',services_check,api,st)
+                phase='safety_check'
                 _mon_phase('safety_check',safety_check,api,st)
+                _fd_health_check(api,st)
+                phase='save_state'
                 _mon_phase('save_state',save_state,st)
+                phase='alert_drain'
                 _mon_phase('alert_drain',alert_drain,api,st)
             except Exception as exc:
-                print('Telegram monitor retry:',type(exc).__name__,flush=True)
+                print('TG_MONITOR_CYCLE_ERROR phase='+phase+
+                      ' type='+type(exc).__name__+
+                      ' errno='+str(getattr(exc,'errno',None)),flush=True)
                 try: alert_drain(api,st)
                 except Exception: pass
             loop_end(time.monotonic()-cycle_started)
@@ -1218,16 +1303,23 @@ def main():
             next_cycle += POLL_SECONDS
             if next_cycle<=time.monotonic():
                 next_cycle=time.monotonic()+POLL_SECONDS
-        # Wake immediately when worker completes, never sleep(5) unconditionally.
+        # Keep the monitor safety loop alive while command pre-ACK runs.
         try:
-            update_id,success=bridge.done.get(timeout=max(0.0,next_cycle-time.monotonic()))
+            update_id=bridge.prepare.get(timeout=min(
+                0.05,max(0.0,next_cycle-time.monotonic())))
         except _cmd_queue.Empty:
-            continue
-        bridge.done.put((update_id,success))
+            pass
+        else:
+            try:
+                bridge.prepare_dispatch(st,update_id)
+            except Exception as exc:
+                print('TG_COMMAND_PREACK_ERROR type='+type(exc).__name__+
+                      ' errno='+str(getattr(exc,'errno',None)),flush=True)
         try:
             bridge.commit_completion(st)
         except Exception as exc:
-            print('TG_COMMAND_ACK_ERROR',type(exc).__name__,flush=True)
+            print('TG_COMMAND_ACK_ERROR type='+type(exc).__name__+
+                  ' errno='+str(getattr(exc,'errno',None)),flush=True)
 
 
 if __name__=='__main__':main()
