@@ -483,6 +483,91 @@ def reader_registration_ready(name, entry, cfg, *, timeout_sec=12):
     print('WARNING: Reader unavailable; existing bot may use gated direct GET')
     return False
 
+def verify_fresh_contract(ctx):
+    """GET-only last gate before creating a bot. Reject changing instruments."""
+    spec=ctx.get('spec')
+    old_rule=wizard.contract_rule_type(spec)
+    inst=ctx.get('instrument')
+    if not isinstance(inst,str) or inst!=ctx.get('coin','')+'-USDT-SWAP':
+        raise RuntimeError('Fresh contract instrument identity mismatch')
+    fresh=wizard.okx_req('/api/v5/public/instruments',
+                         params={'instType':'SWAP','instId':inst})
+    if not isinstance(fresh,list) or len(fresh)!=1:
+        raise RuntimeError('Fresh OKX instrument unavailable')
+    if wizard.validate_spec(inst,fresh[0])!=ctx['coin']:
+        raise RuntimeError('Fresh OKX instrument invalid')
+    if wizard.contract_rule_type(fresh[0])!=old_rule:
+        raise RuntimeError('OKX changed ruleType since confirmation; restart wizard')
+    for key in ('instId','tickSz','lotSz','minSz','ctVal','state','ctType','settleCcy'):
+        if str(fresh[0].get(key,''))!=str(spec.get(key,'')):
+            raise RuntimeError('OKX contract changed since confirmation: '+key)
+    return True
+
+
+def cleanup_unregistered_creation(name, root, service, unit, original_error):
+    """Undo only units created by a failed new/clone attempt; preserve secrets.
+
+    If ownership, activity, or registration becomes uncertain, leave everything
+    for manual review (fail closed). NEVER touch any already-running service.
+    """
+    root=Path(root)
+    unit=Path(unit)
+    if (not isinstance(name,str) or not SERVICE_RE.fullmatch(service)
+            or root != BASE/service.removeprefix('okx-grid-')
+            or unit != SYSTEMD_DIR/(service+'.service')
+            or root.is_symlink() or not root.is_dir()):
+        raise RuntimeError('Cleanup ownership invalid; operator recovery required')
+    current=load_registry()
+    if (name in current or any(e.get('service')==service or
+                              e.get('path')==str(root) for e in current.values())):
+        raise RuntimeError('Cleanup blocked: bot has become registered')
+    config_file=root/'config.json'
+    if config_file.is_symlink():
+        raise RuntimeError('Cleanup blocked: symlinked bot config')
+    if config_file.is_file():
+        cfg=json.loads(config_file.read_text(encoding='utf-8'))
+        if cfg.get('live_trading') is not False:
+            raise RuntimeError('Cleanup blocked: bot might have traded')
+    # The newly created directory can fail before config.json was written.
+    # Caller proved the path was absent before this operation; quarantine it.
+    elif config_file.exists():
+        raise RuntimeError('Cleanup blocked: unsafe config inode')
+    if (root/'state/bot_state.json').exists():
+        raise RuntimeError('Cleanup blocked: bot state already exists')
+    # Check activity for every unit before changing ANY of them.
+    combined=SYSTEMD_DIR/('observer-'+service+'-combined.service')
+    targets=(unit,combined)
+    for target in targets:
+        p=subprocess.run(['systemctl','show',target.name,'--no-pager',
+                          '-p','ActiveState','-p','MainPID'],
+                         capture_output=True,text=True,timeout=8,check=True)
+        props=dict(x.split('=',1) for x in p.stdout.splitlines() if '=' in x)
+        if props.get('ActiveState') not in ('inactive','failed') or props.get('MainPID')!='0':
+            raise RuntimeError('Cleanup blocked: systemd unit not inactive: '+target.name)
+        if target.is_symlink():
+            raise RuntimeError('Cleanup blocked: symlinked systemd unit')
+        if target.is_file():
+            body=target.read_text(encoding='utf-8')
+            if (str(root) not in body or service not in body):
+                raise RuntimeError('Cleanup blocked: unit identity mismatch: '+target.name)
+    for target in targets:
+        if target.is_file():
+            run(['systemctl','disable',target.name])
+            target.unlink()
+    run(['systemctl','daemon-reload'])
+    # Preserve the whole incomplete instance (including secrets) under root-only quarantine.
+    vault=BASE/'.failed_provisioning'
+    if vault.is_symlink():raise RuntimeError('Unsafe failure quarantine')
+    vault.mkdir(mode=0o700,exist_ok=True)
+    os.chmod(vault,0o700)
+    destination=vault/(root.name+'-'+datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')+'-'+str(os.getpid()))
+    if destination.exists() or destination.is_symlink():
+        raise RuntimeError('Quarantine collision; manual recovery required')
+    root.rename(destination)
+    print('INCOMPLETE_INSTALL_QUARANTINED='+str(destination),file=sys.stderr)
+    print('REASON='+type(original_error).__name__,file=sys.stderr)
+    return destination
+
 @registration_guard
 def cmd_new(env_file):
     latest_engine()  # Fail closed BEFORE a wizard can write a new bot.
@@ -505,11 +590,15 @@ def cmd_new(env_file):
     service = f'okx-grid-{slug}'
     if (SYSTEMD_DIR / f'{service}.service').exists():
         raise RuntimeError('Уже есть systemd-служба с этим именем')
-    # No trading: create isolated config/state, install packages, install disabled unit.
-    created = wizard.persist(ctx, path, raw)
-    selected_engine, selected_version = provision_latest_engine(created)
+    # GET-only freshness check BEFORE any writes.
+    verify_fresh_contract(ctx)
+    if path.exists() or path.is_symlink():
+        raise RuntimeError('New bot path already exists; no overwrite')
+    created = path
     unit = SYSTEMD_DIR / f'{service}.service'
     try:
+        created = wizard.persist(ctx, path, raw)
+        selected_engine, selected_version = provision_latest_engine(created)
         run([sys.executable, '-m', 'venv', str(created / '.venv')])
         run([str(created / '.venv/bin/pip'), 'install', '-r', str(created / 'requirements.txt')])
         unit.write_text(unit_text(created, selected_engine, name))
@@ -520,9 +609,9 @@ def cmd_new(env_file):
         bootstrap_fresh_cycles_archive(created)
         entries[name] = {'slug':slug, 'path':str(created),'service':service}
         save_registry(entries)
-    except Exception:
-        # Do not delete the new directory: contains a secret .env, no accidental loss.
-        print(f'Создана папка {created}, но установка не завершилась. Торговля выключена.',file=sys.stderr)
+    except Exception as exc:
+        if created.is_dir() and not created.is_symlink():
+            cleanup_unregistered_creation(name,created,service,unit,exc)
         raise
     print(f'\nБот «{name}» создан. Торговля пока выключена.')
     print(f'Управление: okxbot start "{name}" | okxbot stats "{name}" | okxbot stop "{name}"')
@@ -1173,28 +1262,41 @@ def cmd_clone(source_name, new_name):
     if input(f'Введите точно CLONE {new_name}: ').strip()!=f'CLONE {new_name}':
         print('Отменено.')
         return
+    # Clone has no explicit PRE-MARKET opt-in screen; fail closed on it.
+    fresh_spec=wizard.okx_req('/api/v5/public/instruments',
+                              params={'instType':'SWAP','instId':cfg['instrument']})
+    if (not isinstance(fresh_spec,list) or len(fresh_spec)!=1
+            or wizard.validate_spec(cfg['instrument'],fresh_spec[0])!=cfg['instrument'].split('-')[0]
+            or wizard.contract_rule_type(fresh_spec[0])!='normal'):
+        raise RuntimeError('Clone requires a fresh normal USDT-SWAP contract')
     _, clone_env_raw = validated_newbot_env(BASE / '.okxbot_account.env')
-    dest.mkdir(mode=0o700)
-    (dest/'state').mkdir(mode=0o700)
-    (dest/'logs').mkdir(mode=0o700)
-    for f in (selected_engine,'requirements.txt'):
-        shutil.copy2(SOURCE/f,dest/f)
-    for dependency in latest_dependencies(selected_engine,selected_version):
-        shutil.copy2(SOURCE/dependency,dest/dependency)
-    (dest/'.env').write_text(clone_env_raw, encoding='utf-8')
-    os.chmod(dest/'.env',0o600)
-    fd=os.open(dest/'config.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
-    with os.fdopen(fd,'w') as f:json.dump(cfg,f,indent=2,ensure_ascii=False)
-    run([sys.executable,'-m','venv',str(dest/'.venv')])
-    run([str(dest/'.venv/bin/pip'),'install','-r',str(dest/'requirements.txt')])
     service=f'okx-grid-{slug}'
-    (SYSTEMD_DIR/f'{service}.service').write_text(unit_text(dest,selected_engine,new_name))
-    run(['systemctl','daemon-reload'])
-    # Auto-arm BOTH read-only observers before registering the clone.
-    provision_observers(dest, service, SOURCE, SYSTEMD_DIR)
-    bootstrap_fresh_cycles_archive(dest)
-    entries[new_name]={'slug':slug,'path':str(dest),'service':service}
-    save_registry(entries)
+    unit=SYSTEMD_DIR/f'{service}.service'
+    try:
+        dest.mkdir(mode=0o700)
+        (dest/'state').mkdir(mode=0o700)
+        (dest/'logs').mkdir(mode=0o700)
+        for f in (selected_engine,'requirements.txt'):
+            shutil.copy2(SOURCE/f,dest/f)
+        for dependency in latest_dependencies(selected_engine,selected_version):
+            shutil.copy2(SOURCE/dependency,dest/dependency)
+        (dest/'.env').write_text(clone_env_raw, encoding='utf-8')
+        os.chmod(dest/'.env',0o600)
+        fd=os.open(dest/'config.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+        with os.fdopen(fd,'w') as f:json.dump(cfg,f,indent=2,ensure_ascii=False)
+        run([sys.executable,'-m','venv',str(dest/'.venv')])
+        run([str(dest/'.venv/bin/pip'),'install','-r',str(dest/'requirements.txt')])
+        (SYSTEMD_DIR/f'{service}.service').write_text(unit_text(dest,selected_engine,new_name))
+        run(['systemctl','daemon-reload'])
+        # Auto-arm BOTH read-only observers before registering the clone.
+        provision_observers(dest, service, SOURCE, SYSTEMD_DIR)
+        bootstrap_fresh_cycles_archive(dest)
+        entries[new_name]={'slug':slug,'path':str(dest),'service':service}
+        save_registry(entries)
+    except Exception as exc:
+        if dest.is_dir() and not dest.is_symlink():
+            cleanup_unregistered_creation(new_name,dest,service,unit,exc)
+        raise
     print(f'Клон создан, торговля выключена. Запуск: okxbot start "{new_name}"')
 
 

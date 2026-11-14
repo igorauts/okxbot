@@ -175,6 +175,7 @@ def load_contract(coin,env):
     instruments=okx_req('/api/v5/public/instruments',params={'instType':'SWAP','instId':inst})
     if len(instruments)!=1:raise RuntimeError('Спецификация контракта отсутствует')
     spec=instruments[0]
+    contract_rule_type(spec)  # unknown rule types fail closed
     try: validate_spec(inst, spec)
     except ValueError as exc: raise RuntimeError(str(exc)) from exc
     tick,ct,lot,minimum=[D(spec[k]) for k in ('tickSz','ctVal','lotSz','minSz')]
@@ -556,8 +557,29 @@ def numeric_input(stdscr,title,lines,validate,initial=''):
 
 
 
+def contract_rule_type(spec):
+    """Fail closed when OKX does not classify its USDT-SWAP instrument."""
+    if not isinstance(spec, dict):
+        raise ValueError('Некорректная спецификация OKX')
+    value = spec.get('ruleType')
+    if value == 'normal':
+        return 'normal'
+    if value == 'pre_market':
+        return 'pre_market'
+    raise ValueError('OKX ruleType неизвестен: контракт недоступен для создания')
+
+
+def confirm_pre_market(stdscr, coin):
+    """An explicit risk acknowledgement is required after a fresh API GET."""
+    answer = menu(stdscr, '⚠ ПРЕ-МАРКЕТ — ' + coin,
+        ['ПОНИМАЮ РИСК — продолжить', 'Изменить тикер', 'Отмена'],
+        ['Это PRE-MARKET perpetual OKX, а не обычная торговая пара.',
+         'Возможны низкая ликвидность, резкие движения и делистинг.',
+         'Подтверждение относится только к этому созданию.'])
+    return answer
+
 def available_usdt_swaps():
-    """GET once per wizard: show only contracts allowed by engine validator."""
+    """One public OKX snapshot; show only recognized rule types and engine-valid contracts."""
     rows = okx_req('/api/v5/public/instruments', params={'instType': 'SWAP'})
     if not isinstance(rows, list) or not rows:
         raise RuntimeError('OKX не вернул список SWAP-контрактов')
@@ -568,13 +590,14 @@ def available_usdt_swaps():
         inst = spec.get('instId')
         try:
             coin = validate_spec(inst, spec)
+            contract_rule_type(spec)
         except (ValueError, TypeError, KeyError):
             continue
         if coin in valid:
             raise RuntimeError('OKX вернул дубликат торговой пары: ' + coin)
         valid[coin] = spec
-    if not valid:
-        raise RuntimeError('Нет доступных LIVE USDT linear SWAP-контрактов')
+    if not any(contract_rule_type(spec) == 'normal' for spec in valid.values()):
+        raise RuntimeError('Нет доступных обычных LIVE USDT-SWAP')
     return dict(sorted(valid.items()))
 
 
@@ -608,97 +631,108 @@ def contract_full_name(spec):
 def ticker_text_input(stdscr, catalog, initial='', notice=''):
     value = str(initial)
     error = notice
+    normal = {c:s for c,s in catalog.items() if contract_rule_type(s)=='normal'}
     while True:
-        preview = []
+        preview=[]
         if value:
             try:
-                candidates = find_ticker_matches(catalog, value)
-                preview = [f'Совпадений: {len(candidates)}',
-                           '  ' + ', '.join(candidates[:6]) +
-                           (' …' if len(candidates) > 6 else '')] if candidates else ['Совпадений: 0']
+                names=find_ticker_matches(normal,value)
+                special=find_ticker_matches(catalog,value)
+                pre_count=len(special)-len(names)
+                preview=[f'Обычных совпадений: {len(names)}',
+                         '  '+', '.join(names[:6])+(' …' if len(names)>6 else ''),
+                         f'PRE-MARKET отдельно: {pre_count}']
             except ValueError:
-                preview = ['Проверьте формат тикера']
-        y = screen(stdscr, 'OKX GRID BOT — поиск USDT-SWAP', [
-            f'Доступных контрактов: {len(catalog)} (LIVE / linear / USDT)',
-            'Введите тикер или первые 1–4+ символа.',
+                preview=['Проверьте формат тикера']
+        y=screen(stdscr,'OKX GRID BOT — поиск USDT-SWAP',[
+            f'Обычных контрактов: {len(normal)} (LIVE / linear / USDT)',
+            'Введите тикер или первые символы.',
             'Поддерживается: BTC, BTCUSDT, BTC-USDT-SWAP',
-            '', *preview, '', 'Тикер:'],
-            foot='Enter — найти    Esc — отмена', error=error)
-        put(stdscr, y, value + '█')
+            '',*preview,'','Тикер:'],
+            foot='Enter — найти    Esc — отмена',error=error)
+        put(stdscr,y,value+'█')
         stdscr.refresh()
-        ch = stdscr.get_wch()
-        if ch == '\x1b':
-            return None
-        if ch in ('\n', '\r', curses.KEY_ENTER):
-            try:
-                needle = normalize_ticker(value)
+        ch=stdscr.get_wch()
+        if ch=='\x1b':return None
+        if ch in ('\n','\r',curses.KEY_ENTER):
+            try:needle=normalize_ticker(value)
             except ValueError as exc:
-                error = str(exc)
-                continue
-            if not any(name.startswith(needle) for name in catalog):
-                error = 'В OKX нет LIVE USDT-SWAP с таким префиксом'
-                continue
+                error=str(exc);continue
+            if not any(c.startswith(needle) for c in catalog):
+                error='В OKX нет подходящих LIVE USDT-SWAP';continue
             return needle
-        if ch in ('\b', '\x7f', curses.KEY_BACKSPACE, 127):
-            value = value[:-1]
-            error = ''
-        elif isinstance(ch, str) and len(ch) == 1 and ch.isascii() and ch.isprintable():
-            if len(value) < 48 and (ch.isalnum() or ch in '- '):
-                value += ch.upper()
-                error = ''
-            else:
-                error = 'Только латинские буквы, цифры и дефис'
+        if ch in ('\b','\x7f',curses.KEY_BACKSPACE,127):
+            value=value[:-1];error=''
+        elif isinstance(ch,str) and len(ch)==1 and ch.isascii() and ch.isprintable():
+            if len(value)<48 and (ch.isalnum() or ch in '- '):
+                value+=ch.upper();error=''
+            else:error='Только латинские буквы, цифры и дефис'
 
 
 def choose_ticker(stdscr, catalog):
-    """Exact match wins. Other prefixes get a paged, deliberate selection."""
-    previous = ''
+    """Normal exact match wins; pre-market requires an additional explicit menu."""
+    previous=''
+    normal={c:s for c,s in catalog.items() if contract_rule_type(s)=='normal'}
+    pre={c:s for c,s in catalog.items() if contract_rule_type(s)=='pre_market'}
     while True:
-        text = ticker_text_input(stdscr, catalog, initial=previous)
-        if text is None:
-            return None
-        previous = text
-        matches = find_ticker_matches(catalog, text)
-        if text in catalog:
-            return text
-        if len(matches) == 1:
-            return matches[0]
-        page = 0
+        text=ticker_text_input(stdscr,catalog,initial=previous)
+        if text is None:return None
+        previous=text
+        matches=find_ticker_matches(normal,text)
+        pre_matches=find_ticker_matches(pre,text)
+        if text in normal:return text
+        if len(matches)==1:return matches[0]
+        page=0
+        pre_only=False
         while True:
-            # Keep all choices + footer visible on a regular SSH terminal.
-            size = max(3, min(10, stdscr.getmaxyx()[0] - 13))
-            start = page * size
-            visible = matches[start:start + size]
-            choices = [f'{c}-USDT-SWAP' for c in visible]
-            actions = []
-            if start + size < len(matches):
-                actions.append(('Следующая страница', 'next'))
-            if page:
-                actions.append(('Предыдущая страница', 'prev'))
-            actions.extend([('Уточнить поиск', 'edit'), ('Назад', 'back')])
-            labels = choices + [x[0] for x in actions]
-            selected = menu(stdscr, f'OKX GRID BOT — поиск «{text}»', labels,
-                            [f'Найдено {len(matches)}; варианты {start+1}–{start+len(visible)}'])
-            if selected is None:
-                break
-            if selected < len(visible):
-                return visible[selected]
-            action = actions[selected-len(visible)][1]
-            if action == 'next':
-                page += 1
-            elif action == 'prev':
-                page -= 1
-            else:
-                break
+            source=pre_matches if pre_only else matches
+            if not source and not pre_only:
+                if not pre_matches:break
+                pre_only=True
+                source=pre_matches
+            size=max(3,min(10,stdscr.getmaxyx()[0]-14))
+            start=page*size
+            visible=source[start:start+size]
+            choices=[('⚠ PRE-MARKET ' if pre_only else '')+c+'-USDT-SWAP'
+                     for c in visible]
+            actions=[]
+            if start+size<len(source):actions.append(('Следующая страница','next'))
+            if page:actions.append(('Предыдущая страница','prev'))
+            if pre_matches and not pre_only:
+                actions.append((f'⚠ PRE-MARKET — показать {len(pre_matches)}','pre'))
+            if pre_only:actions.append(('К обычным контрактам','normal'))
+            actions.extend([('Уточнить поиск','edit'),('Назад','back')])
+            answer=menu(stdscr,'OKX GRID BOT — поиск «'+text+'»',
+                        choices+[x[0] for x in actions],
+                        [f'Варианты {start+1}–{start+len(visible)} из {len(source)}',
+                         '⚠ PRE-MARKET — отдельная торговая категория' if pre_only else 'Обычные контракты'])
+            if answer is None:break
+            if answer<len(visible):
+                picked=visible[answer]
+                if not pre_only:return picked
+                if menu(stdscr,'⚠ PRE-MARKET — '+picked,
+                        ['Я понимаю риск — открыть карточку','Вернуться'],
+                        ['Тонкий стакан и повышенный риск делистинга.'])==0:
+                    return picked
+                continue
+            action=actions[answer-len(visible)][1]
+            if action=='next':page+=1
+            elif action=='prev':page-=1
+            elif action=='pre':pre_only=True;page=0
+            elif action=='normal':pre_only=False;page=0
+            else:break
 
 
 def contract_preview(ctx):
-    coin = ctx['coin']
-    name = contract_full_name(ctx['spec'])
-    return [
-        f'Базовый актив: {coin}',
-        f'Название: {name or "— (OKX не указал)"}',
+    coin=ctx['coin']
+    rule=contract_rule_type(ctx['spec'])
+    name=contract_full_name(ctx['spec'])
+    rows=[f'Базовый актив: {coin}']
+    if name:rows.append('Название: '+name)
+    rows.extend([
         f'Пара: {ctx["instrument"]}  |  LIVE  |  USDT linear SWAP',
+        ('⚠ PRE-MARKET — ПОВЫШЕННЫЙ РИСК' if rule=='pre_market'
+         else 'Тип торгов: NORMAL'),
         f'BID: ${as_string(ctx["price"])}  (новый снимок OKX)', '',
         f'Шаг цены: ${as_string(ctx["tick"])}',
         f'Размер контракта: {as_string(ctx["ct"])} {coin}',
@@ -707,7 +741,8 @@ def contract_preview(ctx):
         f'Мин. номинал: ~${ctx["min_qty"]*ctx["price"]:.2f}',
         f'VIP: {ctx["fee_level"]}  |  maker: {ctx["maker"]}  |  taker: {ctx["taker"]}',
         f'Безубыток: ${ctx["break_even"]}  |  мин. TP: ${ctx["min_tp"]}',
-    ]
+    ])
+    return rows
 
 def wizard(stdscr,env,existing_names=()):
     curses.curs_set(0)
@@ -734,6 +769,12 @@ def wizard(stdscr,env,existing_names=()):
                     if retry==0:continue
                     if retry==2:return None
                     break
+                # Require a fresh, explicit acknowledgement for PRE-MARKET.
+                rule=contract_rule_type(ctx['spec'])
+                if rule=='pre_market':
+                    answer=confirm_pre_market(stdscr,coin)
+                    if answer==2:return None
+                    if answer!=0:break
                 go=menu(stdscr, f'OKX GRID BOT — {coin}',
                     ['Подтвердить и продолжить', 'Изменить тикер', 'Отмена'],
                     contract_preview(ctx))

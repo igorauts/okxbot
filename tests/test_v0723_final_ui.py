@@ -30,11 +30,11 @@ assert 'Оценка без комиссий' not in '\n'.join(okx_setup.lines_f
 # Walk the actual wizard twice: second pass must use existing inputs unchanged;
 # contract gets fetched EXACTLY ONCE; no exchange calls from keystrokes.
 contract=dict(ctx)
-contract.update(spec={'groupId':'4'},min_contracts=D('.01'),taker=D('.0005'),
+contract.update(spec={'groupId':'4','ruleType':'normal'},min_contracts=D('.01'),taker=D('.0005'),
                 fee_level='4',break_even=D('.51'))
 values={'step':'2','grids':'100','qty':'.01','tp':'2','buys':'2',
         'real_tp':'2','upper':'0'}
-menus=iter([0,0,1,0])
+menus=iter([0,1,0])
 inputs=[]
 def fake_number(scr,title,body,validate,initial=''):
     key=next(k for k in values if k in title.lower()) if False else None
@@ -52,6 +52,8 @@ def fake_number(scr,title,body,validate,initial=''):
 with patch.object(okx_setup.curses,'curs_set'), \
      patch.object(okx_setup,'setup_colors'), \
      patch.object(okx_setup,'menu',side_effect=lambda *a,**kw:next(menus)), \
+     patch.object(okx_setup,'available_usdt_swaps',return_value={'ZEC':{'ruleType':'normal'}}), \
+     patch.object(okx_setup,'choose_ticker',return_value='ZEC'), \
      patch.object(okx_setup,'load_contract',return_value=dict(contract)) as load, \
      patch.object(okx_setup,'numeric_input',side_effect=fake_number), \
      patch.object(okx_setup,'name_input',side_effect=lambda *a,**kw:'zectest'):

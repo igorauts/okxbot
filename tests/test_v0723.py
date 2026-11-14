@@ -45,7 +45,7 @@ assert okx_setup.signed_usd(D('0.014984'))=='+$0.014984'
 assert okx_setup.signed_usd(D('-99.00'),2)=='−$99.00'
 assert 'Оценка без комиссий' not in '\n'.join(okx_setup.lines_for('qty',ctx,'1000'))
 assert 'План net' not in '\n'.join(okx_setup.lines_for('tp',ctx,'.000010'))
-ctx_summary=dict(ctx,upper=D(0),tp=D('.000010'),buys=D(10),real_tp=D(10),name='doodtest',instrument='DOOD-USDT-SWAP')
+ctx_summary=dict(ctx,upper=D(0),tp=D('.000010'),buys=D(10),real_tp=D(10),name='doodtest',instrument='DOOD-USDT-SWAP',spec={'ruleType':'normal'})
 sumtxt='\n'.join(okx_setup.report(ctx_summary))
 assert 'GRID STEP:' in sumtxt and '0.4340%' in sumtxt
 assert 'TAKE PROFIT:' in sumtxt and 'Размер BUY:' in sumtxt
