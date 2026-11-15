@@ -40,7 +40,22 @@ class GuardTests(unittest.TestCase):
             root=Path(td);(root/'.env').write_text('OKX_DEMO=0\n');(root/'.env').chmod(0o600)
             st={'cycles':{'x':{'state':'BUY_LIVE','tpOrders':[{'phase':'ACTIVE'}]}},
                 'aggregate_exits':[{'phase':'FILLED'}]}
-            self.assertTrue(U.stop_safety_readonly(root,st))
+            # Exercise stop eligibility and required quota/FIFO reads without touching LIVE gate files.
+            with patch.object(U, 'read_gate_snapshot', return_value=None) as read_gate:
+                self.assertTrue(U.stop_safety_readonly(root,st))
+            calls = read_gate.call_args_list
+            self.assertEqual(len(calls), 4)
+            for first, second in ((calls[0], calls[1]), (calls[2], calls[3])):
+                p, field = first.args
+                q, fifo_field = second.args
+                self.assertEqual(field, 'calls')
+                self.assertEqual(fifo_field, 'waiters')
+                self.assertEqual(first.kwargs, {'allow_missing': True})
+                self.assertEqual(second.kwargs, {'allow_missing': True})
+                self.assertEqual(p.parent, Path('/root/okx'))
+                self.assertTrue(p.name.startswith('.account_') and p.suffix == '.json')
+                self.assertEqual(q.parent, p.parent)
+                self.assertTrue(q.name.startswith(p.name + '.fifo-') and q.name.endswith('.json'))
             st['cycles']['x']['state']='PLACING'
             with self.assertRaisesRegex(RuntimeError,'BUY intent'):
                 U.stop_safety_readonly(root,st)

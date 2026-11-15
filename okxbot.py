@@ -27,6 +27,7 @@ import tempfile
 from pathlib import Path
 from okx_archive_reader import state_file
 from okx_version import RELEASE_VERSION, ENGINE_VERSION, STATE_SCHEMA, validate_version_ids
+from okx_source_attestation import verify_bundle, verify_instance
 
 import okx_setup as wizard
 from okx_observers import provision_observers
@@ -149,6 +150,7 @@ def bot_path(entry):
 def latest_engine(source=SOURCE):
     """Engine manifest tracks ENGINE_VERSION, never maintenance package version."""
     source=Path(source)
+    verify_bundle(source)  # Immutable release pins before any new-bot actions.
     path=source/'okx_bot.py'
     if not path.is_file() or path.is_symlink():
         raise RuntimeError('Нет установленного торгового движка okx_bot.py')
@@ -178,6 +180,7 @@ def engine_file(path):
 
 def latest_dependencies(engine_name,version,source=SOURCE):
     """Manifest-driven future dependencies; no manager changes per release."""
+    verify_bundle(source)
     path=Path(source)/'engine_manifest.json'
     if not path.is_file():
         raise RuntimeError('Engine manifest missing')
@@ -208,6 +211,7 @@ def provision_latest_engine(created,source=SOURCE):
     shutil.copy2(Path(source)/name,created/name)
     for dependency in latest_dependencies(name,version,source):
         shutil.copy2(Path(source)/dependency,created/dependency)
+    verify_instance(created, source)  # No partial/mixed source installs.
     cfg['version']=version
     fd,tmp=tempfile.mkstemp(prefix='.config-engine-',dir=created)
     try:
@@ -1216,12 +1220,14 @@ def cmd_stop(name):
     return cmd_control(name,'SOFT')
 
 
+@registration_guard
 def cmd_clone(source_name, new_name):
     """Make a NEW isolated bot from a completed instance's parameters.
 
     Do NOT copy state, statistics, logs, private order history or LIVE flag.
     Market price must be obtained fresh if capital reference is unbounded.
     """
+    latest_engine()  # Fail closed before clone reads REST or writes.
     old,entry=find_entry(source_name)
     if not instance_terminal(entry):
         raise RuntimeError('Клонируются только окончательно завершённые боты.')
@@ -1280,6 +1286,7 @@ def cmd_clone(source_name, new_name):
             shutil.copy2(SOURCE/f,dest/f)
         for dependency in latest_dependencies(selected_engine,selected_version):
             shutil.copy2(SOURCE/dependency,dest/dependency)
+        verify_instance(dest, SOURCE)  # Before secrets/config/service writes.
         (dest/'.env').write_text(clone_env_raw, encoding='utf-8')
         os.chmod(dest/'.env',0o600)
         fd=os.open(dest/'config.json',os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)

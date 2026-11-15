@@ -31,6 +31,10 @@ for invalid in [(ENGINE_VERSION+'.1',ENGINE_VERSION),
 # Maintenance tag simulation, with a REAL provisional instance package.
 with tempfile.TemporaryDirectory() as d:
     folder=Path(d);(folder/'config.json').write_text(json.dumps({'version':ENGINE_VERSION+'.1','instrument':'BTC-USDT-SWAP'}))
+    # wizard.persist() places this file before provision_latest_engine().
+    # Use the actual pinned package file; do not stub or bypass attestation.
+    shutil.copy2(ROOT/'requirements.txt', folder/'requirements.txt')
+    assert (folder/'requirements.txt').read_bytes() == (ROOT/'requirements.txt').read_bytes()
     with patch.object(okxbot,'RELEASE_VERSION',RELEASE_VERSION):
         engine,version=okxbot.provision_latest_engine(folder)
         assert engine=='okx_bot.py' and version==ENGINE_VERSION

@@ -167,8 +167,13 @@ class RealCreationPathFaults(unittest.TestCase):
             base=Path(td)/'bots';base.mkdir()
             units=Path(td)/'units';units.mkdir()
             src=Path(td)/'source';src.mkdir()
-            (src/'okx_bot.py').write_text('# engine\n')
-            (src/'requirements.txt').write_text('')
+            # The production manager now fails closed on any source that
+            # lacks the pinned SHA256 bundle. Use the ACTUAL tested release
+            # files here; never stub or skip source verification.
+            package = Path(m.__file__).resolve().parent
+            source_bundle = json.loads((package/'okx_source_bundle.json').read_text())
+            for filename in [*source_bundle['files'], 'okx_source_bundle.json']:
+                (src/filename).write_bytes((package/filename).read_bytes())
             oldroot=base/'oldbot';oldroot.mkdir()
             cfg={'instrument':'BTC-USDT-SWAP','tick_size':'1','upper_price':'110',
                  'grid_step':'1','max_grids':10,'active_buy_orders':1,
@@ -191,8 +196,6 @@ class RealCreationPathFaults(unittest.TestCase):
                 stack.enter_context(patch.object(m,'instance_terminal',return_value=True))
                 stack.enter_context(patch.object(m,'load_registry',return_value={}))
                 stack.enter_context(patch.object(m,'bot_path',return_value=oldroot))
-                stack.enter_context(patch.object(m,'latest_engine',return_value=('okx_bot.py','engine')))
-                stack.enter_context(patch.object(m,'latest_dependencies',return_value=[]))
                 stack.enter_context(patch.object(m,'validated_newbot_env',return_value=({},'FAKE_CREDS=placeholder')))
                 stack.enter_context(patch.object(m.wizard,'okx_req',return_value=[spec('BTC')]))
                 stack.enter_context(patch.object(m.wizard,'validate_spec',return_value='BTC'))
@@ -215,5 +218,26 @@ class RealCreationPathFaults(unittest.TestCase):
             dirs=list((base/'.failed_provisioning').iterdir())
             self.assertEqual(len(dirs),1)
             self.assertEqual((dirs[0]/'.env').read_text(),'FAKE_CREDS=placeholder')
+
+class SourceBundleFailClosed(unittest.TestCase):
+    """Protect the security contract: missing/tampered source is rejected."""
+    def test_missing_bundle_must_fail(self):
+        from okx_source_attestation import verify_bundle
+        with tempfile.TemporaryDirectory() as td:
+            with self.assertRaisesRegex(RuntimeError, 'SOURCE_BUNDLE_MANIFEST_MISSING'):
+                verify_bundle(Path(td))
+
+    def test_tampered_dependency_must_fail(self):
+        from okx_source_attestation import verify_bundle
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            package = Path(m.__file__).resolve().parent
+            bundle = json.loads((package/'okx_source_bundle.json').read_text())
+            for filename in [*bundle['files'], 'okx_source_bundle.json']:
+                (root/filename).write_bytes((package/filename).read_bytes())
+            with (root/'okx_bot.py').open('ab') as f:
+                f.write(b'\n# intentionally corrupted source\n')
+            with self.assertRaisesRegex(RuntimeError, 'SOURCE_PIN_MISMATCH'):
+                verify_bundle(root)
 
 if __name__=='__main__':unittest.main()

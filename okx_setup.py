@@ -20,6 +20,7 @@ from pathlib import Path
 from okx_version import ENGINE_VERSION as VER
 from okx_version import RELEASE_VERSION as MANAGER_RELEASE_VERSION
 from okx_contracts import validate_spec
+from okx_source_attestation import verify_bundle
 BASE=Path(__file__).resolve().parent
 
 
@@ -836,6 +837,7 @@ def wizard(stdscr,env,existing_names=()):
 
 
 def persist(ctx,out,env_raw):
+    verify_bundle(BASE)  # Standalone wizard cannot bypass the source pin.
     out=Path(out).expanduser().resolve()
     if out.exists() and any(out.iterdir()):
         raise RuntimeError(f'Каталог не пуст — ничего не перезаписываем: {out}')

@@ -1006,13 +1006,48 @@ def _preacked_delivery_notice(st, update_id):
 
 
 def recover_orphaned_preack(st):
-    """Call only on startup or before a different, new command is prepared."""
-    rec=st.get(_PREACK_INFLIGHT_KEY)
-    if rec is None:return False
-    if not isinstance(rec,dict) or type(rec.get('update_id')) is not int:
-        raise ValueError('Invalid durable pre-ACK receipt')
+    """Quarantine a malformed *receipt*, but never trust a bad Telegram offset.
+
+    At-most-once dispatch is preserved: no Telegram command is replayed.
+    Both the alert and quarantine record must persist before recovery returns.
+    An offset regression (well-formed receipt id >= saved offset) is a safety
+    invariant failure and remains fail-closed rather than risking a replay.
+    """
+    if _PREACK_INFLIGHT_KEY not in st:return False
+    offset=st.get('updates_offset')
+    if type(offset) is not int or offset<0:
+        raise ValueError('Invalid durable Telegram update offset')
+    rec=st[_PREACK_INFLIGHT_KEY]
+    if (not isinstance(rec,dict) or type(rec.get('update_id')) is not int
+            or rec['update_id']<0):
+        import hashlib
+        import json
+        # Stable, opaque key avoids dumping potentially corrupt state into
+        # the alert. Same malformed record cannot generate duplicate alerts.
+        raw=json.dumps({'receipt':rec,'offset':offset},sort_keys=True,
+                       ensure_ascii=True,separators=(',',':'))
+        fingerprint=hashlib.sha256(raw.encode('utf-8')).hexdigest()
+        quarantine=st.setdefault('telegram_preacked_quarantine_v0771',[])
+        if not isinstance(quarantine,list) or len(quarantine)>=32:
+            raise ValueError('Pre-ACK quarantine unavailable or full')
+        from okx_telegram_delivery import enqueue
+        enqueue(st,'telegram/command_receipt_corrupt/'+fingerprint,
+            '⚠️ Telegram: повреждена служебная запись о незавершённой '
+            'команде. Доставка ответа неизвестна, повтор команды отключён. '
+            'Проверьте вручную, если ответа не было.')
+        quarantine.append({'fingerprint':fingerprint,'offset':offset,
+                           'quarantined_at':time.time()})
+        st.pop(_PREACK_INFLIGHT_KEY,None)
+        try:
+            save_state(st)
+        except BaseException:
+            st[_PREACK_INFLIGHT_KEY]=rec
+            quarantine.pop()
+            raise
+        print('TG_COMMAND_PREACK_RECEIPT_QUARANTINED sha='+fingerprint[:16],flush=True)
+        return True
     update_id=rec['update_id']
-    if update_id>=int(st.get('updates_offset',0)):
+    if update_id>=offset:
         raise ValueError('Pre-ACK receipt without durable advanced offset')
     _preacked_delivery_notice(st,update_id)
     st.pop(_PREACK_INFLIGHT_KEY,None)
