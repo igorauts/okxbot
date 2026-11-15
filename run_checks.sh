@@ -151,6 +151,7 @@ python3 -B -m unittest tests.test_v0761_maintenance -q
 python3 -B -m unittest tests.test_b2_offsets_checkpoint -q
 
 # StatsWorker v2 reliability and fail-closed regression (offline, no OKX).
+python3 -B -m unittest tests.test_stats_v2_hot_scale -q
 python3 -B -m unittest tests.test_stats_v2_reliability -q
 python3 -B -m unittest tests.test_stats_v2_recovery_crash -q
 python3 -B -m unittest tests.test_stats_v2_telegram_delivery -q

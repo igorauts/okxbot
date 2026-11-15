@@ -130,15 +130,75 @@ class SingleAuthorityStats:
                         raise NotReady('HOT fill row bound reached')
         return data
 
-    def _recover_hot_fills(self, hot_state):
-        """Only if HOT incomplete; original existing validation/API governor.
+    def _trace_hot_gap(self, hot, cycles):
+        """Bounded 5-minute diagnostic; never discloses order IDs or PnL.
 
-        Fills written here are authoritative local FillStore, NOT the sidecar.
-        The next cycle re-pins source ledgers before any report is emitted.
+        The oracle returns only the first four mismatches, not the full count.
+        No writes to financial source, no API, no extra read transaction.
+        """
+        now=time.monotonic()
+        last=getattr(self,'_hot_gap_log_at',0.0)
+        if last and now-last<300:
+            return
+        self._hot_gap_log_at=now
+        cursor=self.stager._cursor('fills') or {}
+        sample=hot.get('missing') or ()
+        report={
+            'hot_cycles':len(cycles),
+            'missing_sample':min(len(sample),4),
+            'sample_is_truncated':len(sample)>=4,
+            'fill_orders_expected':hot.get('fill_orders_expected'),
+            'fill_orders_seen':hot.get('fill_orders_seen'),
+            'pinned_fill_rowid':cursor.get('rowid'),
+            'pending_cycles':self.stager.pending_count(),
+        }
+        print('STATS_V2_HOT_GAP',json.dumps(report,sort_keys=True,
+            separators=(',',':')),flush=True)
+
+    def _recover_hot_fills(self, hot_state, *, missing_sample=()):
+        """Repair incomplete HOT using authoritative fills, never estimate money.
+
+        The financial oracle returns up to four mismatches from the PINNED
+        snapshot.  If all four are already exact in a NEW read-only local WAL
+        snapshot, prioritize a bounded re-pin rather than an unnecessary OKX
+        recovery request.  A two-attempt ceiling guarantees that a persistent
+        missing order cannot be starved by continuous new fills.  We never
+        publish the newer rows against the older pinned source identity.
+
+        For a real gap, retain the ORIGINAL FillStore/API recovery governor.
         """
         expected=self.expected_filled_orders(hot_state,include_archive=False)
         if len(expected)>self.hot_order_cap:
             raise NotReady('HOT recovery order bound reached')
+        # The oracle reports only the first four mismatches.  Do not treat the
+        # sample as proof that the complete HOT set is present or valid.
+        sample=list(missing_sample)
+        if sample and len(sample)<=4 and all(
+                isinstance(item,(tuple,list)) and len(item)==3
+                and str(item[0]) in expected for item in sample):
+            reader=getattr(self.fill_store,'get_rows',None)
+            if callable(reader) and getattr(self,'_local_hot_repin_streak',0)<2:
+                ids={str(item[0]) for item in sample}
+                rows=reader(sorted(ids))  # read-only NEW WAL snapshot, no API
+                have={oid:Decimal(0) for oid in ids}
+                seen=set()
+                for row in rows:
+                    oid=str(row.get('ordId') or '')
+                    bill=str(row.get('billId') or '')
+                    if oid not in ids or not bill:
+                        raise Drift('Invalid local HOT fill identity')
+                    if (oid,bill) in seen:
+                        raise Drift('Duplicate local HOT fill identity')
+                    seen.add((oid,bill))
+                    have[oid]+=money(row['fillSz'])
+                # Fresh WAL can legitimately move beyond an older pinned
+                # state.  Only EXACT equality authorizes the fast re-pin;
+                # overfill is left to the original financial reconciliation.
+                if all(have[oid]==money(expected[oid]) for oid in ids):
+                    self._local_hot_repin_streak=getattr(
+                        self,'_local_hot_repin_streak',0)+1
+                    raise NotReady('HOT local fills arrived; immediate re-pin required')
+        self._local_hot_repin_streak=0
         self.fill_store.ensure_expected(expected)
 
     def _check_hot_ledger(self, cycles, hot, cursor):
@@ -153,12 +213,20 @@ class SingleAuthorityStats:
         if keys:
             with TableSnapshot(self.root/'state/pnl.sqlite','accounted') as db:
                 db.validate_prior(cursor)
-                for key in sorted(set(keys)):
-                    row=db.db.execute('SELECT data FROM accounted WHERE id=? AND rowid<=?',
-                                       (key,cursor['rowid'])).fetchone()
-                    if row is None:raise NotReady('HOT PnL ledger row not committed')
-                    rec=json.loads(row[0])
-                    total+=money(rec['net'])
+                # One bounded SQL batch per 200 terminal HOT cycles instead of
+                # one SQLite round-trip per key.  Exact pinned rowid and the
+                # original fail-closed per-key presence check are preserved.
+                unique_keys=sorted(set(keys))
+                for start in range(0,len(unique_keys),200):
+                    subset=unique_keys[start:start+200]
+                    sql=('SELECT id,data FROM accounted WHERE id IN ('+
+                         ','.join('?'*len(subset))+') AND rowid<=?')
+                    rows={str(k):json.loads(raw) for k,raw in
+                          db.db.execute(sql,subset+[cursor['rowid']])}
+                    for key in subset:
+                        if key not in rows:
+                            raise NotReady('HOT PnL ledger row not committed')
+                        total+=money(rows[key]['net'])
         expect=money(hot['grid_gain'])+money(hot['partial_exit_net'])
         if abs(total-expect)>Decimal('0.00000001'):
             raise Drift('HOT ledger does not reconcile with HOT finance')
@@ -230,7 +298,8 @@ class SingleAuthorityStats:
         self.last_freeze_reasons=reasons
         return completed,deferred,reasons
 
-    def compute(self, bid, *, now=None, allow_fill_recovery=True):
+    def compute(self, bid, *, now=None, allow_fill_recovery=True,
+                _local_repin_used=False):
         """One finance attempt. On failure DO NOT publish a report.
 
         Missing HOT fills may be recovered by the original FillStore before
@@ -250,9 +319,22 @@ class SingleAuthorityStats:
         hot=self.oracle['full_stats_snapshot'](hot_state,fills,bid,self.cv,
                     include_durable_archive=False,snapshot_archive=[])
         if not hot.get('complete'):
+            self._trace_hot_gap(hot,cycles)
             if allow_fill_recovery:
-                self._recover_hot_fills(hot_state)
+                try:
+                    self._recover_hot_fills(
+                        hot_state,missing_sample=hot.get('missing',()))
+                except NotReady as exc:
+                    if (str(exc)=='HOT local fills arrived; immediate re-pin required'
+                            and not _local_repin_used):
+                        # Exactly ONE additional source-pinned computation on
+                        # this StatsWorker call. No publication from an older
+                        # cursor and no recursive retry loop under heavy churn.
+                        return self.compute(bid,now=captured,
+                            allow_fill_recovery=True,_local_repin_used=True)
+                    raise
             raise NotReady('HOT fills not complete; next pin required')
+        self._local_hot_repin_streak=0
         # Only on a proven missing HOT journal row: invoke the original,
         # idempotent ledger writer over bounded HOT. Ordinary publications do
         # NOT rescan or rewrite any ledger records.
