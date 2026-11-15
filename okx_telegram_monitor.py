@@ -38,6 +38,8 @@ SYSTEMD_DIR = Path(os.environ.get('OKXBOT_SYSTEMD_DIR','/etc/systemd/system'))
 BOT_DIRS = {}
 SERVICES = {}
 _DISCOVERY_LAST = 0.0
+_DISCOVERY_PARTIAL_ERROR = False
+_DISCOVERY_LAST_WARN = 0.0
 
 
 def _inside_base(path):
@@ -48,20 +50,32 @@ def _inside_base(path):
 
 
 def discover_bots():
-    """All registry bots + unregistered grid systemd units. Never reads .env."""
+    """Registry and service files; flag partial enumeration as uncertain.
+
+    Never treat an unreadable registry/unit as proof that a bot disappeared.
+    """
+    global _DISCOVERY_PARTIAL_ERROR
+    _DISCOVERY_PARTIAL_ERROR=False
     found={}
     try:
         records=json.loads(REGISTRY.read_text()) if REGISTRY.is_file() else {}
-        if isinstance(records,dict):
-            for display,entry in records.items():
-                if not isinstance(entry,dict):continue
-                root=entry.get('path','')
-                unit=str(entry.get('service',''))
-                if (_inside_base(root) and re.fullmatch(r'okx-grid-[a-z0-9-]+',unit)):
-                    key=Path(root).name
-                    found[key]=(str(Path(root).resolve()),unit)
-    except (OSError,ValueError,TypeError):pass
-    for file in SYSTEMD_DIR.glob('okx-grid-*.service'):
+        if not isinstance(records,dict):
+            raise ValueError('Registry must be an object')
+        for _display,entry in records.items():
+            if not isinstance(entry,dict):continue
+            root=entry.get('path','')
+            unit=str(entry.get('service',''))
+            if (_inside_base(root) and re.fullmatch(r'okx-grid-[a-z0-9-]+',unit)):
+                key=Path(root).name
+                found[key]=(str(Path(root).resolve()),unit)
+    except (OSError,ValueError,TypeError):
+        _DISCOVERY_PARTIAL_ERROR=True
+    try:
+        files=list(SYSTEMD_DIR.glob('okx-grid-*.service'))
+    except (OSError,ValueError):
+        files=[]
+        _DISCOVERY_PARTIAL_ERROR=True
+    for file in files:
         try:
             unit=file.stem
             if not re.fullmatch(r'okx-grid-[a-z0-9-]+',unit):continue
@@ -70,7 +84,8 @@ def discover_bots():
             if not m or not _inside_base(m.group(1).strip()):continue
             root=Path(m.group(1).strip()).resolve()
             found.setdefault(root.name,(str(root),unit))
-        except (OSError,ValueError):continue
+        except (OSError,ValueError):
+            _DISCOVERY_PARTIAL_ERROR=True
     return dict(sorted(found.items()))
 
 
@@ -96,21 +111,35 @@ def _confirmed_archived(name, root):
 
 
 def refresh_bots(*,force=False):
-    global _DISCOVERY_LAST, BOT_DIRS, SERVICES
+    global _DISCOVERY_LAST, BOT_DIRS, SERVICES, _DISCOVERY_LAST_WARN
     now=time.monotonic()
     if not force and now-_DISCOVERY_LAST<15:return
     discovered=discover_bots()
-    # Unknown discovery (incl. EMFILE) is not proof that bots vanished. Keep
-    # previously verified entries and do not silently produce a false 0/0.
+    uncertain=_DISCOVERY_PARTIAL_ERROR
     if not discovered:
-        print('TG_DISCOVERY_EMPTY retained='+str(len(BOT_DIRS)),flush=True)
-        return
+        if uncertain or BOT_DIRS:
+            if now-_DISCOVERY_LAST_WARN>=300 or _DISCOVERY_LAST_WARN==0:
+                print('TG_DISCOVERY_EMPTY retained='+str(len(BOT_DIRS)),flush=True)
+                _DISCOVERY_LAST_WARN=now
+            return
     bots={};services={}
     for key,(root,unit) in discovered.items():
         if _confirmed_archived(key,root):continue
         bots[key]=root;services[key]=unit
-    # Replace rather than clear/update dictionaries shared with report worker.
-    BOT_DIRS=bots;SERVICES=services
+    if uncertain:
+        # Partial read may omit active bots. Retain previously verified entries,
+        # except those now independently confirmed terminal/archived.
+        for key,root in BOT_DIRS.items():
+            if key not in bots and not _confirmed_archived(key,root):
+                bots[key]=root
+                services[key]=SERVICES[key]
+        if now-_DISCOVERY_LAST_WARN>=300 or _DISCOVERY_LAST_WARN==0:
+            print('TG_DISCOVERY_PARTIAL retained='+str(len(BOT_DIRS))+ ' discovered='+str(len(discovered)),flush=True)
+            _DISCOVERY_LAST_WARN=now
+    else:
+        _DISCOVERY_LAST_WARN=0.0
+    # Replace rather than mutate dictionaries used by the command/report worker.
+    BOT_DIRS=dict(sorted(bots.items()));SERVICES=dict(sorted(services.items()))
     _DISCOVERY_LAST=now
 
 
@@ -962,6 +991,36 @@ def _dispatch_command(api, msg):
 import queue as _cmd_queue
 import threading as _cmd_threading
 
+# A pre-ACKed command may have been dispatched when sendMessage failed or
+# the monitor crashed. Keep a durable receipt and never replay the command.
+_PREACK_INFLIGHT_KEY='telegram_preacked_inflight_v0770'
+
+
+def _preacked_delivery_notice(st, update_id):
+    from okx_telegram_delivery import enqueue
+    key='telegram/command_delivery_uncertain/'+str(update_id)
+    return enqueue(st,key,
+        '⚠️ Telegram: результат доставки ответа на команду не подтверждён '
+        '(update_id='+str(update_id)+'). Автоповтора нет; при необходимости '
+        'отправьте команду ещё раз.')
+
+
+def recover_orphaned_preack(st):
+    """Call only on startup or before a different, new command is prepared."""
+    rec=st.get(_PREACK_INFLIGHT_KEY)
+    if rec is None:return False
+    if not isinstance(rec,dict) or type(rec.get('update_id')) is not int:
+        raise ValueError('Invalid durable pre-ACK receipt')
+    update_id=rec['update_id']
+    if update_id>=int(st.get('updates_offset',0)):
+        raise ValueError('Pre-ACK receipt without durable advanced offset')
+    _preacked_delivery_notice(st,update_id)
+    st.pop(_PREACK_INFLIGHT_KEY,None)
+    save_state(st)
+    print('TG_COMMAND_ORPHANED_PREACK_NOTICE update_id='+str(update_id),flush=True)
+    return True
+
+
 class _CommandBridge:
     def __init__(self, token, chat, offset):
         self.token=token;self.chat=chat
@@ -1044,11 +1103,22 @@ class _CommandBridge:
         if update_id<prev:
             self.permit.put(False)
             return False
-        st['updates_offset']=update_id+1
+        # Resolve any old receipt *before* overwriting it with a new command.
+        # This cannot run concurrently with the previous command: the poller
+        # is strictly one-in-flight until commit_completion gives an ACK.
         try:
-            save_state(st)  # durable fsync before any sendMessage
+            recover_orphaned_preack(st)
+        except BaseException:
+            self.permit.put(False)
+            raise
+        receipt={'update_id':update_id,'at':time.time()}
+        st['updates_offset']=update_id+1
+        st[_PREACK_INFLIGHT_KEY]=receipt
+        try:
+            save_state(st)  # one atomic fsync for offset and in-flight receipt
         except BaseException:
             st['updates_offset']=prev
+            st.pop(_PREACK_INFLIGHT_KEY,None)
             self.permit.put(False)
             raise
         self.permit.put(True)
@@ -1061,10 +1131,30 @@ class _CommandBridge:
             return False
         prev=int(st.get('updates_offset',0))
         if update_id<prev:
-            # Already durably committed, including uncertain delivery.
-            # Never re-send automatically after a failed Telegram send.
+            # At-most-once command dispatch: never retry a command reply.
+            # A failure after durable pre-ACK is instead a unique outbox alert.
+            rec=st.get(_PREACK_INFLIGHT_KEY)
+            if rec is not None:
+                if not isinstance(rec,dict) or rec.get('update_id')!=update_id:
+                    self.ack.put(None)
+                    raise RuntimeError('In-flight command identity mismatch')
+                try:
+                    if not success:
+                        _preacked_delivery_notice(st,update_id)
+                    st.pop(_PREACK_INFLIGHT_KEY,None)
+                    save_state(st)
+                except BaseException:
+                    # The persisted receipt ensures another startup can
+                    # notify. A failed fsync must not trigger resend.
+                    st[_PREACK_INFLIGHT_KEY]=rec
+                    self.ack.put(None)
+                    raise
+            elif not success:
+                # Compatibility with in-memory command bridge states written
+                # before the durable receipt was introduced.
+                _preacked_delivery_notice(st,update_id)
             if not success:
-                print('TG_COMMAND_DELIVERY_UNCERTAIN_PREACKED',flush=True)
+                print('TG_COMMAND_DELIVERY_UNCERTAIN_PREACKED update_id='+str(update_id),flush=True)
             self.ack.put(update_id+1)
             return True
         # Pre-ACK failed: no user-visible reply was sent. Preserve the
@@ -1266,6 +1356,7 @@ def main():
         finally:
             menu_api._close_http()
     _latency_threading.Thread(target=_menu_setup,name='tg-command-menu',daemon=True).start()
+    recover_orphaned_preack(st)  # durable alert for interrupted pre-ACK command
     bridge=_CommandBridge(token,chat,st.get('updates_offset',0))
     bridge.start()
     print('OKX Telegram monitor running T1-T4',flush=True)

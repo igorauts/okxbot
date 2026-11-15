@@ -20,6 +20,8 @@ python3 -B tests/test_telegram_0722.py
 python3 -B tests/test_v0723.py
 python3 -B tests/test_v0723_final_ui.py
 python3 -B -m unittest tests.test_manager_next_maintenance -q
+# v0.7.70: durable pre-ACK, multi-leg market parity and full source SHA audit.
+python3 -B -m unittest tests.test_v0770_telegram_contract tests.test_v0770_manifest -q
 # Telegram-only FD/market/ACK regression tests.
 python3 -B -m unittest tests.test_telegram_fd_market_ack_vnext -q
 python3 -B tests/test_v0723_fifo_alert.py

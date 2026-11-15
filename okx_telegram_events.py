@@ -241,8 +241,15 @@ def market_process(api,st,names):
         # work while accounting is not ready; the queue remains durable.
         done=item.get('terminal_at')
         if done and now-done>86400:
-            one(api,st,'market/accounting_stale/'+key,
-                '🚨 Market SELL | '+name+' | net PnL не подтверждён за 24ч')
+            multi=str(item.get('_tg_accounting_last_reason') or '').startswith('multi_leg_')
+            if multi:
+                one(api,st,'market/accounting_multileg_unverified_24h/'+key,
+                    'ℹ️ Market SELL | '+name+' | multi-leg финансовый результат '
+                    'не удалось полностью проверить за 24ч. Это НЕ доказанная '
+                    'ошибка PnL; проверьте финансовый отчёт бота.')
+            else:
+                one(api,st,'market/accounting_stale/'+key,
+                    '🚨 Market SELL | '+name+' | net PnL не подтверждён за 24ч')
             del items[key]
             continue
         if now < float(item.get('_tg_accounting_next_retry',0)):
@@ -294,8 +301,14 @@ def market_process(api,st,names):
                       ' reason='+reason+' retry_sec='+str(backoff),flush=True)
                 item['_tg_accounting_last_log']=now
             if done and now-done>30:
-                one(api,st,'market/accounting_wait/'+key,
-                    '⚠️ Market SELL | '+name+' | FILLED, ожидаем подтверждённый net PnL')
+                if reason.startswith('multi_leg_'):
+                    one(api,st,'market/accounting_multileg_pending/'+key,
+                        'ℹ️ Market SELL | '+name+' | частичный LIMIT TP + MARKET: '
+                        'локальная проверка net PnL пока не завершена. '
+                        'Это не подтверждённая ошибка торговли.')
+                else:
+                    one(api,st,'market/accounting_wait/'+key,
+                        '⚠️ Market SELL | '+name+' | FILLED, ожидаем подтверждённый net PnL')
 
 
 def partial_scan(api,st,names):

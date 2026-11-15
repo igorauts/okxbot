@@ -400,7 +400,7 @@ def market_ledger(root, event, *, reason_sink=None):
     """Return verified group net + estimated LIMIT net, or None if incomplete.
 
     Read-only SQLite. No partial fees or fabricated profits. Same-sell-order
-    single-leg accounted cycles only; multi-leg cycles defer for audit.
+    multi-leg cycles require exact persisted fill and PnL parity.
     """
     def fail(reason):
         # Fixed diagnostic reason only. Never expose order IDs or database values.
@@ -437,6 +437,8 @@ def market_ledger(root, event, *, reason_sink=None):
         return fail('pnl_sqlite_read_failed')
     if len(rows)!=len(plan):
         return fail('accounted_cycle_count_mismatch')
+    if any(list(map(str,r.get('sell_ids',[])))!=[oid] for r in rows):
+        return _market_multileg_verified(root,group,plan,rows,state,cfg,fail)
     if any(list(map(str,r.get('sell_ids',[])))!=[oid] or r.get('kind')!='CLOSED' for r in rows):
         return fail('accounted_cycle_sell_identity_or_state_mismatch')
     if sum((number(r.get('qty_contracts')) or Decimal(0) for r in rows),Decimal(0))!=qty:
@@ -524,6 +526,181 @@ def market_ledger(root, event, *, reason_sink=None):
 
 def signed_usd6(value):
     return money(value,6,True)
+
+
+def _market_multileg_verified(root, group, plan, rows, state, cfg, fail):
+    """Verify the MARKET share of a closed multi-leg cycle using actual fills.
+
+    No exchange calls, guesses or fractional profits from an entire cycle.
+    Allocation mirrors the engine's timestamp/tradeId FIFO across the plan;
+    exact *whole-cycle* PnL must also match the durable accounted ledger.
+    """
+    oid=str(group.get('ordId') or '')
+    cv=number(cfg.get('contract_value'))
+    maker=number(cfg.get('maker_fee_at_setup'))
+    qty=number(group.get('sz'))
+    if not oid or not cv or cv<=0 or maker is None or not (0<=maker<1) or not qty or qty<=0:
+        return fail('multi_leg_configuration_invalid')
+    allocations={}
+    for entry in plan:
+        if not isinstance(entry,dict):return fail('multi_leg_plan_invalid')
+        cid=str(entry.get('cycleId') or '')
+        allocated=number(entry.get('sz'))
+        if not cid or cid in allocations or allocated is None or allocated<=0:
+            return fail('multi_leg_plan_invalid')
+        allocations[cid]=allocated
+    if not allocations or sum(allocations.values(),Decimal(0))!=qty:
+        return fail('multi_leg_plan_quantity_mismatch')
+    by_buy={}
+    for c in list(state.get('cycles',{}).values())+list(state.get('archived_cycles',[])):
+        bid=str(c.get('ordId') or '')
+        if bid:
+            if bid in by_buy:return fail('multi_leg_duplicate_buy_identity')
+            by_buy[bid]=c
+    missing={str(row.get('buy_id') or '') for row in rows}-set(by_buy)
+    if missing:
+        archive=cycles_db(root)
+        if not archive.is_file():return fail('multi_leg_archive_not_available')
+        try:
+            with closing(_readonly_connect(archive)) as db:
+                for (raw,) in db.execute('SELECT data FROM cycles'):
+                    c=json.loads(raw)
+                    bid=str(c.get('ordId') or '')
+                    if bid in missing:
+                        if bid in by_buy:return fail('multi_leg_duplicate_archive_buy')
+                        by_buy[bid]=c
+                        missing.remove(bid)
+                        if not missing:break
+        except Exception:
+            return fail('multi_leg_archive_read_error')
+        if missing:return fail('multi_leg_cycle_not_found')
+
+    ledger={}
+    for row in rows:
+        bid=str(row.get('buy_id') or '')
+        if not bid or bid in ledger:return fail('multi_leg_duplicate_ledger_identity')
+        ledger[bid]=row
+    cycles={}
+    for bid,row in ledger.items():
+        cycle=by_buy.get(bid)
+        if not isinstance(cycle,dict):return fail('multi_leg_cycle_not_found')
+        cid=str(cycle.get('cycleId') or '')
+        if cid not in allocations or cid in cycles:
+            return fail('multi_leg_cycle_plan_mismatch')
+        if row.get('kind') not in ('CLOSED','EXITED'):
+            return fail('multi_leg_cycle_not_terminal')
+        buy_qty=number(cycle.get('filledBuy'))
+        sold_qty=number(cycle.get('filledTP'))
+        if not buy_qty or buy_qty<=0 or sold_qty!=buy_qty:
+            return fail('multi_leg_cycle_quantity_unconfirmed')
+        legs=[leg for leg in cycle.get('tpOrders',[])
+              if number(leg.get('filled')) is not None and number(leg.get('filled'))>0]
+        if not legs or sum((number(x['filled']) for x in legs),Decimal(0))!=buy_qty:
+            return fail('multi_leg_sell_chain_unconfirmed')
+        markets=[leg for leg in legs if str(leg.get('ordId') or '')==oid]
+        if len(markets)!=1 or markets[0].get('source')!='aggregate_exit' or number(markets[0].get('filled'))!=allocations[cid]:
+            return fail('multi_leg_market_allocation_mismatch')
+        if any(x.get('source')=='aggregate_exit' and str(x.get('ordId'))!=oid for x in legs):
+            return fail('multi_leg_other_aggregate_unsupported')
+        if [str(x.get('ordId')) for x in legs]!=list(map(str,row.get('sell_ids',[]))):
+            return fail('multi_leg_ledger_sell_chain_mismatch')
+        cycles[cid]=(cycle,row,legs,buy_qty)
+    if set(cycles)!=set(allocations):
+        return fail('multi_leg_missing_accounted_cycle')
+
+    def checked(rows, order, side):
+        seen=set();qty=Decimal(0);value=Decimal(0);fee=Decimal(0)
+        for f in rows:
+            if str(f.get('ordId'))!=order or f.get('side')!=side:
+                raise ValueError('unexpected fill identity or side')
+            tid=str(f.get('tradeId') or '')
+            bill=str(f.get('billId') or '')
+            if not tid or not bill or (tid,bill) in seen:
+                raise ValueError('missing/duplicate fill identity')
+            seen.add((tid,bill))
+            n=number(f.get('fillSz'));px=number(f.get('fillPx'))
+            ffee=number(f.get('fee'))
+            if not n or n<=0 or not px or px<=0 or ffee is None or f.get('feeCcy')!='USDT' or f.get('execType') not in ('M','T'):
+                raise ValueError('unconfirmed amount, price, fee or liquidity')
+            qty+=n;value+=n*px*cv;fee+=ffee
+        return qty,value,fee
+
+    try:
+        with closing(_readonly_connect(fills_db(root))) as db:
+            db.execute('BEGIN')
+            all_orders={oid}
+            for cycle,_row,legs,_amount in cycles.values():
+                all_orders.add(str(cycle['ordId']))
+                all_orders.update(str(leg['ordId']) for leg in legs)
+            fills={}
+            for order in all_orders:
+                fills[order]=[json.loads(raw) for (raw,) in db.execute(
+                    'SELECT data FROM fills WHERE order_id=? ORDER BY rowid',(order,))]
+    except Exception:
+        return fail('multi_leg_fills_read_error')
+    try:
+        market_all=fills[oid]
+        total_qty,market_value,market_fee=checked(market_all,oid,'sell')
+        if total_qty!=qty:raise ValueError('market fill incomplete')
+        remaining=dict(allocations)
+        parts={cid:[] for cid in allocations}
+        for f in sorted(market_all,key=lambda x:(int(x.get('fillTime') or x.get('ts') or 0),str(x.get('tradeId')))):
+            left=number(f['fillSz']);left_fee=number(f['fee'])
+            chunks=[]
+            for cid in allocations:
+                part=min(left,remaining[cid])
+                if part>0:
+                    chunks.append((cid,part));remaining[cid]-=part;left-=part
+                if left==0:break
+            if left:raise ValueError('overfill allocation')
+            for i,(cid,n) in enumerate(chunks):
+                fee=(left_fee if i==len(chunks)-1 else number(f['fee'])*n/number(f['fillSz']))
+                left_fee-=fee
+                parts[cid].append((n,number(f['fillPx'])*n*cv,fee))
+        if any(remaining.values()):raise ValueError('unallocated market fills')
+        actual=Decimal(0);planned=Decimal(0)
+        for cid,(cycle,row,legs,buy_qty) in cycles.items():
+            buy_order=str(cycle['ordId'])
+            bqty,bnom,bfee=checked(fills[buy_order],buy_order,'buy')
+            if bqty!=buy_qty:raise ValueError('buy qty mismatch')
+            buy_vwap=bnom/(bqty*cv)
+            sell_nom=Decimal(0);sell_fee=Decimal(0)
+            market_n=Decimal(0);market_nom=Decimal(0);market_f=Decimal(0)
+            for leg in legs:
+                leg_oid=str(leg['ordId'])
+                leg_qty=number(leg['filled'])
+                if leg_oid==oid:
+                    entries=parts[cid]
+                    q=sum((x[0] for x in entries),Decimal(0))
+                    value=sum((x[1] for x in entries),Decimal(0))
+                    fee=sum((x[2] for x in entries),Decimal(0))
+                    market_n+=q;market_nom+=value;market_f+=fee
+                else:
+                    q,value,fee=checked(fills[leg_oid],leg_oid,'sell')
+                if q!=leg_qty:raise ValueError('sell leg qty mismatch')
+                sell_nom+=value;sell_fee+=fee
+            expected_net=sell_nom-bnom+bfee+sell_fee
+            if number(row.get('net'))!=expected_net:
+                raise ValueError('ledger net mismatch')
+            if number(row.get('qty_contracts'))!=buy_qty or number(row.get('qty_base'))!=buy_qty*cv:
+                raise ValueError('ledger qty mismatch')
+            if number(row.get('buy_px'))!=buy_vwap or number(row.get('sell_px'))!=sell_nom/(buy_qty*cv):
+                raise ValueError('ledger vwap mismatch')
+            if market_n!=allocations[cid]:raise ValueError('market share mismatch')
+            tp=number(cycle.get('tpPx'))
+            if not tp or tp<=0:raise ValueError('original TP unavailable')
+            portion_fee=bfee*market_n/buy_qty
+            actual+=market_nom-buy_vwap*market_n*cv+portion_fee+market_f
+            planned+=(tp-buy_vwap)*market_n*cv+portion_fee-tp*market_n*cv*maker
+        if sum((sum((x[1] for x in v),Decimal(0)) for v in parts.values()),Decimal(0))!=market_value:
+            raise ValueError('market allocation nominal mismatch')
+        if sum((sum((x[2] for x in v),Decimal(0)) for v in parts.values()),Decimal(0))!=market_fee:
+            raise ValueError('market allocation fee mismatch')
+        return dict(actual=actual,plan=planned,execution=actual-planned,
+                    avg_price=market_value/(qty*cv),qty_base=qty*cv,
+                    cycles=len(cycles),order_id=oid)
+    except (ValueError,TypeError,KeyError,ArithmeticError,InvalidOperation):
+        return fail('multi_leg_fills_or_ledger_unverified')
 
 
 # Market SELL UI — financial figures come only from verified fill accounting.

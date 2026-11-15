@@ -26,6 +26,9 @@ import okx_telegram_followups as followups
 TREE=ast.parse((ROOT/'okx_telegram_monitor.py').read_text())
 
 def extract(*names):
+    names=set(names)
+    if '_CommandBridge' in names:
+        names.update(('_preacked_delivery_notice','recover_orphaned_preack'))
     nodes=[n for n in TREE.body if isinstance(n,(ast.ClassDef,ast.FunctionDef)) and n.name in names]
     assert len(nodes)==len(names)
     return compile(ast.fix_missing_locations(ast.Module(body=nodes,type_ignores=[])),'<telegram-test>','exec')
@@ -117,7 +120,8 @@ class CommandSafety(unittest.TestCase):
             def _close_http(self):pass
         ns={'_cmd_queue':queue,'_cmd_threading':threading,'Telegram':Telegram,
             '_dispatch_command':lambda *args:None,'save_state':lambda st:None,
-            'time':time,'print':lambda *args,**kwargs:None}
+            'time':time,'print':lambda *args,**kwargs:None,
+            '_PREACK_INFLIGHT_KEY':'telegram_preacked_inflight_v0770'}
         exec(extract('_CommandBridge'),ns)
         return ns['_CommandBridge']('x','y',500),ns
 
@@ -152,20 +156,25 @@ class CommandSafety(unittest.TestCase):
             self.assertEqual(json.loads(path.read_text())['schema'],1)
 
     def test_preack_success_then_failed_dispatch_not_replayed(self):
-        b,ns=self.bridge();st={'updates_offset':500,'schema':1};saves=[]
-        ns['save_state']=lambda st:saves.append(st['updates_offset'])
-        self.assertTrue(b.prepare_dispatch(st,500))
-        self.assertTrue(b.permit.get_nowait())
-        b.done.put((500,False))
-        self.assertTrue(b.commit_completion(st))
-        self.assertEqual(b.ack.get_nowait(),501)
-        self.assertEqual(saves,[501])
-        self.assertFalse(b.prepare_dispatch(st,500))
-        self.assertFalse(b.permit.get_nowait())
+        with tempfile.TemporaryDirectory() as d:
+            path=Path(d)/'telegram_state.json'
+            with patch.object(delivery,'STATE_PATH',path):
+                b,ns=self.bridge();st={'updates_offset':500,'schema':1};saves=[]
+                ns['save_state']=lambda st:saves.append(st['updates_offset'])
+                self.assertTrue(b.prepare_dispatch(st,500))
+                self.assertTrue(b.permit.get_nowait())
+                b.done.put((500,False))
+                self.assertTrue(b.commit_completion(st))
+                self.assertEqual(b.ack.get_nowait(),501)
+                self.assertEqual(saves,[501,501])
+                self.assertEqual(len(st['alert_outbox_v0722']),1)
+                self.assertFalse(b.prepare_dispatch(st,500))
+                self.assertFalse(b.permit.get_nowait())
 
     def test_zero_discovery_does_not_erase_known_bots(self):
         ns={'BOT_DIRS':{'soph':'/tmp/soph'},'SERVICES':{'soph':'okx-grid-soph'},
-            '_DISCOVERY_LAST':0.0,'time':time,'discover_bots':lambda:{},
+            '_DISCOVERY_LAST':0.0,'_DISCOVERY_PARTIAL_ERROR':False,
+            '_DISCOVERY_LAST_WARN':0.0,'time':time,'discover_bots':lambda:{},
             '_confirmed_archived':lambda *args:False,'print':lambda *args,**kwargs:None}
         exec(extract('refresh_bots'),ns)
         ns['refresh_bots'](force=True)

@@ -1,3 +1,5 @@
+> **Историческая офлайн-заметка к разработке v0.7.69.** Кандидат впоследствии прошёл канареечное обновление SOPH, BARD, BTC и опубликован как GitHub Release v0.7.69. Термин OFFLINE ONLY ниже описывает состояние на момент подготовки кандидата, не актуальный LIVE-статус.
+
 # StatsWorker v2 — HOT fill throughput candidate (OFFLINE ONLY)
 
 ## Motivation and observed evidence
