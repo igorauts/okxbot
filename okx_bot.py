@@ -60,14 +60,15 @@ REAL_TP_TARGET = int(CFG.get('real_tp_target', min(25, REAL_TP_CONFIG)))
 # Ignore legacy buffer/protection keys; never inherit unsafe overrides.
 BUY_BUFFER = 5
 BUY_MAX = TARGET + BUY_BUFFER
+BUY_PACING_SEC = 0.02  # delay only between successful BUY placements
 BUY_CANCEL_PROTECT_STEPS = 5
 REAL_TP_RESERVE = TARGET + BUY_BUFFER
 REAL_TP_MAX = 100  # operational TP budget; independent exchange guard remains 150
-TP_BUFFER_COOLDOWN = 10.0
+TP_BUFFER_COOLDOWN = 12.0
 TP_BUFFER_CANCEL_INTERVAL = 0.1
-BUY_BUFFER_COOLDOWN = 10.0
+BUY_BUFFER_COOLDOWN = 12.0
 PRICE_WAKE_COOLDOWN = 0.5
-ESCAPE_COALESCE_SEC = 0.15
+ESCAPE_COALESCE_SEC = 0.10
 
 REDUCE_ONLY_HARD_CAP = 150
 TP_ACTIONS_PER_PASS = 5  # normal TP recovery; burst cleanup uses 1
@@ -2772,7 +2773,7 @@ def retry_stale_elective_cancel(st,pending,transport):
 class TPBufferScheduler:
     """Runtime timing only; exchange order states/cancel intent remain durable.
 
-    Each confirmed BUY/TP fill restarts the 10-second quiet period
+    Each confirmed BUY/TP fill restarts the 12-second quiet period
     while above the TP target. A process restart starts a fresh quiet
     period. Never sleep here or send exchange requests.
     """
@@ -4038,6 +4039,8 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             placed=0
             buy_batch_start=time.perf_counter_ns()
             for price in candidates:
+                if placed:
+                    time.sleep(BUY_PACING_SEC)  # only between BUYs; re-check all gates afterward
                 # Re-check for a newer private event at the actual BUY write
                 # boundary: it can arrive during candidate/grid calculations.
                 if not watcher.events.empty():
@@ -4061,7 +4064,6 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                     break
                 if place(st,price):placed+=1
                 else:break
-                time.sleep(0.05)  # BUY pacing; keep order rate limit
             if placed:
                 # persist positively ACKed BUY_LIVE facts after the
                 # placement batch. Pre-POST PLACING remains durably persisted
@@ -4071,7 +4073,7 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                 latency_ms('buy_batch',buy_batch_start,
                            attempted=len(candidates),placed=placed,
                            active_buys=len(active_buy(st)),target_buys=TARGET)
-            # After 10s without a confirmed fill, trim surplus BUYs BOTTOM-UP.
+            # After 12s without a confirmed fill, trim surplus BUYs BOTTOM-UP.
             # At the 30-BUY ceiling, a missing level may release the LOWEST
             # confirmed safe BUY earlier. Never choose cancellation candidates
             # based on the computed desired grid; it is only for additions.
@@ -4112,7 +4114,7 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                         live_loop._shift_at=time.monotonic()
                         # New grid shift: allow cancellation ONLY to free
                         # capacity at the hard 30-BUY ceiling. Otherwise wait
-                        # the complete 10s trade-quiet cooldown again.
+                        # the complete 12s trade-quiet cooldown again.
                         latest_missing=bool(cancel_desired-
                             {D(x['buyPx']) for x in active_buy(st)})
                         if not (len(active_buy(st))>=BUY_MAX and latest_missing):

@@ -50,31 +50,39 @@ class Mixed(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             p=Path(temp)/'.account_positions_gate_v075.json'
             p.write_text(json.dumps({'schema':1,'calls':[]}))
-            old=previous.AccountPositionsFIFO(p);new=AccountPositionsFIFO(p)
+            old=previous.AccountPositionsFIFO(p)
+            new=AccountPositionsFIFO(p)
             self.assertEqual(old.path,new.path)
             self.assertEqual(old.queue_path,new.queue_path)
-            self.assertEqual(old.MAX_SHARED,new.MAX_SHARED)
-            grants=[(client._reserve_if_available(time.time()))[0] for client in ([old,new]*8)]
-            self.assertEqual(sum(grants),old.MAX_SHARED)
+            # Old and new gates deliberately have incompatible quota limits.
+            self.assertGreater(new.MAX_SHARED,old.MAX_SHARED)
+            self.assertLess(new.WINDOW,old.WINDOW)
+            self.assertEqual(new.MAX_SHARED-old.MAX_SHARED,1)
+            # Only new/new concurrent use is permitted after the fleet switch.
+            gates=[AccountPositionsFIFO(p),AccountPositionsFIFO(p)]
+            grants=[gates[k%2]._reserve_if_available(time.time())[0]
+                    for k in range(2*new.MAX_SHARED)]
+            self.assertEqual(sum(grants),new.MAX_SHARED)
+            self.assertEqual(len(json.loads(p.read_text())['calls']),new.MAX_SHARED)
             self.assertEqual(json.loads(p.read_text())['schema'],1)
             f=Path(temp)/'.account_fills_history_gate_v0712.json'
             self.assertEqual(previous.FillsHistoryFIFO(f).path,FillsHistoryFIFO(f).path)
-
+            self.assertEqual(previous.FillsHistoryFIFO.MAX_SHARED,FillsHistoryFIFO.MAX_SHARED)
+            self.assertEqual(previous.FillsHistoryFIFO.WINDOW,FillsHistoryFIFO.WINDOW)
     def test_account_fifo_thread_contention(self):
-        # Same exact flock inode/quota under concurrent old + new contenders.
-        import multiprocessing as mp
-        previous=previous_module('okx_positions_fifo.py')
         with tempfile.TemporaryDirectory() as temp:
             path=Path(temp)/'rate.json'
             path.write_text(json.dumps({'schema':1,'calls':[]}))
-            gates=[previous.AccountPositionsFIFO(path), AccountPositionsFIFO(path)]
-            # flock is process-wide but each thread opens a separate fd; exercising
-            # lock competition and persistence without touching the real account.
+            gates=[AccountPositionsFIFO(path),AccountPositionsFIFO(path)]
             with ThreadPoolExecutor(max_workers=16) as pool:
-                rows=list(pool.map(lambda k:gates[k%2]._reserve_if_available(time.time())[0],range(16)))
+                rows=list(pool.map(
+                    lambda k:gates[k%2]._reserve_if_available(time.time())[0],
+                    range(2*AccountPositionsFIFO.MAX_SHARED)))
             self.assertEqual(sum(rows),AccountPositionsFIFO.MAX_SHARED)
-
+            self.assertEqual(len(json.loads(path.read_text())['calls']),
+                             AccountPositionsFIFO.MAX_SHARED)
     def test_two_os_processes_old_new_share_quota_inode(self):
+        # Same-version process contention; mixed-version rollout is forbidden.
         import subprocess
         child = r"""
 import importlib.util,json,sys,time
@@ -84,16 +92,18 @@ spec=importlib.util.spec_from_file_location('gatechild',modulepath)
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 gate=m.AccountPositionsFIFO(p)
 count=0
-for i in range(8):
+for i in range(2*gate.MAX_SHARED):
     count+=bool(gate._reserve_if_available(time.time())[0])
 print(json.dumps({'grants':count,'path':str(gate.path),'queue':str(gate.queue_path)}))
 """
         with tempfile.TemporaryDirectory() as td:
-            p=Path(td)/'shared_positions.json';p.write_text(json.dumps({'schema':1,'calls':[]}))
+            p=Path(td)/'shared_positions.json'
+            p.write_text(json.dumps({'schema':1,'calls':[]}))
             procs=[]
-            for source in (LEGACY_FIFO,ROOT/'okx_positions_fifo.py'):
-                procs.append(subprocess.Popen([sys.executable,'-B','-c',child,str(p),str(source)],
-                      stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True))
+            for source in (ROOT/'okx_positions_fifo.py',ROOT/'okx_positions_fifo.py'):
+                procs.append(subprocess.Popen(
+                    [sys.executable,'-B','-c',child,str(p),str(source)],
+                    stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True))
             rows=[]
             for childproc in procs:
                 stdout,stderr=childproc.communicate(timeout=8)
@@ -101,8 +111,23 @@ print(json.dumps({'grants':count,'path':str(gate.path),'queue':str(gate.queue_pa
                 rows.append(json.loads(stdout))
             self.assertEqual(sum(r['grants'] for r in rows),AccountPositionsFIFO.MAX_SHARED)
             self.assertEqual(rows[0]['queue'],rows[1]['queue'])
+            self.assertEqual(rows[0]['path'],rows[1]['path'])
             self.assertEqual(json.loads(p.read_text())['schema'],1)
 
+    def test_legacy_gate_cannot_safely_share_new_quota_window(self):
+        previous=previous_module('okx_positions_fifo.py')
+        with tempfile.TemporaryDirectory() as td:
+            p=Path(td)/'shared_positions.json'
+            now=time.time()
+            p.write_text(json.dumps({'schema':1,
+                    'calls':[now]*AccountPositionsFIFO.MAX_SHARED}))
+            old=previous.AccountPositionsFIFO(p)
+            self.assertGreater(AccountPositionsFIFO.MAX_SHARED,old.MAX_SHARED)
+            ok,wait=old._reserve_if_available(time.time())
+            self.assertFalse(ok)
+            self.assertGreater(wait,0)
+            # Old code resets nine reservations back to eight; mixing is unsafe.
+            self.assertEqual(len(json.loads(p.read_text())['calls']),old.MAX_SHARED)
     def test_persisted_telegram_survives_exactly_with_critical_alert(self):
         monitor=offline_monitor()
         with tempfile.TemporaryDirectory() as td:

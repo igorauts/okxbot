@@ -27,7 +27,7 @@ class TPRearmTests(unittest.TestCase):
         st={'cycles':{'v':virtual}}
         events=[]
         ns={'time':clock,'CLEANUP_LAST_FILL_AT':last_fill,
-            'TP_BUFFER_CANCEL_INTERVAL':0.1,'TP_BUFFER_COOLDOWN':10.0,
+            'TP_BUFFER_CANCEL_INTERVAL':0.1,'TP_BUFFER_COOLDOWN':12.0,
             'REAL_TP_MAX':100,'BUY_MAX':6,'REAL_TP_TARGET':target,'TP_ACTIONS_PER_PASS':5,
             'coverage_audit':lambda *a:(len(real),None,None),
             'real_tp_active':lambda st:real,
@@ -63,14 +63,14 @@ class TPRearmTests(unittest.TestCase):
         clock,_,_,events,act=self.env(target=1,real_count=1,now=100.02)
         self.assertEqual(act(),'NONE')
         self.assertFalse(any(e[0]=='CANCEL' for e in events))
-        clock.t=110.03
+        clock.t=112.03
         self.assertEqual(act(),'CANCEL')
         self.assertEqual(len([e for e in events if e[0]=='CANCEL']),1)
 
     def test_above_target_does_not_cleanup_during_quiet_grace(self):
         clock,_,_,events,act=self.env(target=1,real_count=2,now=100.02)
         self.assertEqual(act(),'NONE')
-        clock.t=110.03
+        clock.t=112.03
         self.assertEqual(act(),'CANCEL')
         self.assertEqual(len([e for e in events if e[0]=='CANCEL']),1)
 

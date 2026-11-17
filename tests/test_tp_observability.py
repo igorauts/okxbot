@@ -45,7 +45,7 @@ class TPObservability(unittest.TestCase):
         constants={t.id:node.value.value for node in tree.body
                    if isinstance(node,ast.Assign) and isinstance(node.value,ast.Constant)
                    for t in node.targets if isinstance(t,ast.Name)}
-        self.assertEqual(constants['ESCAPE_COALESCE_SEC'],0.15)
+        self.assertEqual(constants['ESCAPE_COALESCE_SEC'],0.10)
         fn=next(n for n in tree.body if isinstance(n,ast.FunctionDef)
                 and n.name=='virtual_escape')
         body=ast.get_source_segment((ROOT/'okx_bot.py').read_text(),fn)

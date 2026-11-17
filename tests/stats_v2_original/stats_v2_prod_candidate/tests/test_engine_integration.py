@@ -92,7 +92,13 @@ class EnginePatchTest(unittest.TestCase):
         new=new.replace('                    eager_archive_terminals(st,pnl,pending)\n','')
         c=new.index('def print_verified_incremental_stats(')
         d=new.index('\ndef active_tp_trace_id(',c)
-        self.assertEqual(old[:a].rstrip(),new[:c].rstrip())
+        nonfinancial_after_approved_delta = new
+        for approved_new, approved_old in (('BUY_MAX = TARGET + BUY_BUFFER\nBUY_PACING_SEC = 0.02  # delay only between successful BUY placements\n', 'BUY_MAX = TARGET + BUY_BUFFER\n'), ('TP_BUFFER_COOLDOWN = 12.0', 'TP_BUFFER_COOLDOWN = 10.0'), ('BUY_BUFFER_COOLDOWN = 12.0', 'BUY_BUFFER_COOLDOWN = 10.0'), ('ESCAPE_COALESCE_SEC = 0.10', 'ESCAPE_COALESCE_SEC = 0.15'), ('    Each confirmed BUY/TP fill restarts the 12-second quiet period', '    Each confirmed BUY/TP fill restarts the 10-second quiet period'), ('            # After 12s without a confirmed fill, trim surplus BUYs BOTTOM-UP.', '            # After 10s without a confirmed fill, trim surplus BUYs BOTTOM-UP.'), ('                        # the complete 12s trade-quiet cooldown again.', '                        # the complete 10s trade-quiet cooldown again.'), ('            for price in candidates:\n                if placed:\n                    time.sleep(BUY_PACING_SEC)  # only between BUYs; re-check all gates afterward\n                # Re-check for a newer private event at the actual BUY write\n', '            for price in candidates:\n                # Re-check for a newer private event at the actual BUY write\n'), ('                if place(st,price):placed+=1\n                else:break\n', '                if place(st,price):placed+=1\n                else:break\n                time.sleep(0.05)  # BUY pacing; keep order rate limit\n')):
+            self.assertEqual(nonfinancial_after_approved_delta.count(approved_new), 1,
+                             "approved engine delta drift")
+            nonfinancial_after_approved_delta = nonfinancial_after_approved_delta.replace(approved_new, approved_old)
+        self.assertEqual(old[:a].rstrip(),nonfinancial_after_approved_delta[:a].rstrip())
+
         self.assertEqual(old[b:],new[d:])
 
 if __name__=='__main__':unittest.main()

@@ -22,8 +22,8 @@ class GateUnavailable(RuntimeError):
 
 
 class AccountPositionsFIFO:
-    WINDOW = 2.10
-    MAX_SHARED = 8
+    WINDOW = 2.05
+    MAX_SHARED = 9
     MAX_QUEUE_WAIT = 15.0
     LOCK_TIMEOUT = 2.0
     LEASE_SEC = 20.0

@@ -112,7 +112,7 @@ class PriorityQueueContracts(unittest.TestCase):
         self.assertEqual([x['id'] for x in json.loads(self.new.queue_path.read_text())['waiters']],
                          ['emergency','normal'])
 
-    def test_quota_limit_eight_shared_across_old_new(self):
+    def test_quota_limit_shared_across_priority_and_plain_fifo(self):
         for _ in range(self.old.MAX_SHARED):
             granted,_=self.old._reserve_if_available(time.time())
             self.assertTrue(granted)
@@ -123,6 +123,6 @@ class PriorityQueueContracts(unittest.TestCase):
         finally:
             self.new._thread_priority.priority_supplier=None
         self.assertFalse(granted)
-        self.assertEqual(len(json.loads(self.new.path.read_text())['calls']),8)
+        self.assertEqual(len(json.loads(self.new.path.read_text())['calls']),self.old.MAX_SHARED)
 
 if __name__=='__main__':unittest.main()
