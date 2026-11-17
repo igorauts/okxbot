@@ -814,7 +814,7 @@
     "okx_position_reader_client.py": "88c010c1e21eb6e6106d77fa01d5f0f4a50a203f0299f28a473643e592944f97",
     "okx_position_reader_core.py": "aed9c97c9c757bc2f4a765a60625c659932e256d6e85e2259d2d308865ee5b6b",
     "okx_position_reader_ipc.py": "f7028fb7a485f7ff004e8d628d72bc6910827befb5950ba24c29edc9d7f8100e",
-    "okx_position_reader_service.py": "0aa06c6b727403b486b68c3a278e7ed1966c1ad4e2649356b9fc499d3f15172e",
+    "okx_position_reader_service.py": "5d9dd0eae49bba478e3a80bd08733e7a9e2804a7654ad0cba4b02f28ae2ff6ef",
     "okx_position_reader_watchdog.py": "e504f60c01575327be521185d20d4dfc72bffbdca8151ffab78354cd80852ee6",
     "okx_positions_fifo.py": "2349dcdbf2f99ed8ba11223f8daf84c3bb90146e5c2655150920277049c093b3",
     "okx_positions_priority.py": "a6c633b8469979c09f6c1bbe668084e5bfd7f67728a301993cd38f88f6f75795",

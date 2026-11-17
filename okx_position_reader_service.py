@@ -42,6 +42,110 @@ class CancellableLegacyFIFO(AccountPositionsFIFO):
         finally:
             self._thread.need=None
 
+class DiagPriorityPositionsFIFO(PriorityPositionsFIFO):
+    """Telemetry-only extension: quota decisions and gate storage unchanged.
+
+    All trace fields are per worker thread. The diagnostic callback is never
+    used to authorize a request and cannot propagate exceptions into the gate.
+    """
+    def __init__(self, path):
+        super().__init__(path, reporter=self._observe)
+        self._wait_trace = threading.local()
+
+    def _observe(self, phase, elapsed_ms, **fields):
+        record = getattr(self._wait_trace, 'record', None)
+        if record is None:
+            return
+        try:
+            elapsed_ms = max(0.0, float(elapsed_ms))
+            if phase == 'positions_gate_lock_wait':
+                record['lock_calls'] += 1
+                record['flock_ms'] += elapsed_ms
+            elif phase == 'positions_gate_quota_wait':
+                record['quota_full_visits'] += 1
+                record['quota_advised_max_ms'] = max(record['quota_advised_max_ms'], elapsed_ms)
+            elif phase == 'positions_gate_recovery':
+                record['recovery_count'] += 1
+            elif phase == 'positions_gate_error':
+                record['gate_errors'] += 1
+        except (TypeError, ValueError):
+            pass
+
+    def _read(self, fd):
+        started = time.monotonic_ns()
+        try:
+            return super()._read(fd)
+        finally:
+            record = getattr(self._wait_trace, 'record', None)
+            if record is not None:
+                record['file_read_ms'] += (time.monotonic_ns() - started) / 1e6
+                record['read_calls'] += 1
+
+    def _write(self, fd, data):
+        started = time.monotonic_ns()
+        try:
+            return super()._write(fd, data)
+        finally:
+            record = getattr(self._wait_trace, 'record', None)
+            if record is not None:
+                # Original _write includes truncate, write and fsync; we never
+                # call it an isolated fsync measurement.
+                record['file_write_including_fsync_ms'] += (time.monotonic_ns() - started) / 1e6
+                record['write_calls'] += 1
+
+    def _sort_queue(self, queue, now):
+        ordered = super()._sort_queue(queue, now)
+        record = getattr(self._wait_trace, 'record', None)
+        if record is not None:
+            ticket = getattr(self._thread_priority, 'ticket', None)
+            position = next((i for i, row in enumerate(ordered)
+                             if row.get('id') == ticket), None)
+            if position is not None:
+                record['queue_max_ahead'] = max(record['queue_max_ahead'], position)
+                if position:
+                    record['queue_not_head_visits'] += 1
+        return ordered
+
+    def trace_start(self):
+        self._wait_trace.record = dict(lock_calls=0, flock_ms=0.0,
+            quota_full_visits=0, quota_advised_max_ms=0.0,
+            queue_max_ahead=0, queue_not_head_visits=0,
+            read_calls=0, file_read_ms=0.0, write_calls=0,
+            file_write_including_fsync_ms=0.0, recovery_count=0,
+            gate_errors=0)
+
+    def trace_finish(self):
+        record = getattr(self._wait_trace, 'record', None)
+        self._wait_trace.record = None
+        return record
+
+# OKX_READER_PACING_230_PLUS_ONE_BEGIN
+class _ReaderPacer230PlusOne:
+    """Reader-local two-permit bucket, 1/230ms; existing account gate remains authoritative."""
+    GAP = 0.230
+    CAPACITY = 2.0
+    def __init__(self):
+        self._tokens = self.CAPACITY
+        self._last = time.monotonic()
+        self.delays = 0
+        self.wait_ms = 0.0
+    async def take(self, priority_supplier):
+        start = time.monotonic()
+        delayed = False
+        while True:
+            priority_supplier()  # fail closed if all client requests abandoned
+            now = time.monotonic()
+            self._tokens = min(self.CAPACITY, self._tokens + max(0, now-self._last)/self.GAP)
+            self._last = now
+            if self._tokens >= 1.0:
+                self._tokens -= 1.0
+                if delayed:
+                    self.delays += 1
+                    self.wait_ms += (now-start)*1000
+                return
+            delayed = True
+            await asyncio.sleep(min(.050, (1.0-self._tokens)*self.GAP))
+# OKX_READER_PACING_230_PLUS_ONE_END
 class SharedOriginalQuota:
     """Exactly ONE account quota file and FIFO queue in either scheduling mode.
 
@@ -52,12 +156,14 @@ class SharedOriginalQuota:
     have been verified as priority-aware. Neither mode creates a second quota.
     """
     def __init__(self,path, *, scheduling='mixed-fifo'):
+        self._reader_pacer = _ReaderPacer230PlusOne()
         if scheduling not in ('mixed-fifo','priority'):
             raise ValueError('Invalid Reader FIFO scheduling mode')
         self.scheduling=scheduling
         self.gate=(CancellableLegacyFIFO(path) if scheduling=='mixed-fifo'
-                   else PriorityPositionsFIFO(path))
+                   else DiagPriorityPositionsFIFO(path))
     async def take(self, priority_supplier):
+        await self._reader_pacer.take(priority_supplier)
         if self.scheduling=='mixed-fifo':
             # Do not promote Reader above a preexisting legacy PANIC ticket;
             # equally, do not demote it behind every old routine request.
@@ -65,7 +171,53 @@ class SharedOriginalQuota:
             # abandoned Reader does not consume a quota permit later.
             await asyncio.to_thread(self.gate.take_cancellable,priority_supplier)
         else:
-            await asyncio.to_thread(self.gate.take_prioritized,priority_supplier)
+            # Extra Reader-only telemetry. No change to admission decisions,
+            # priority supplier or shared quota/queue file paths.
+            begun_ns = time.monotonic_ns()
+            trace_holder = {}
+            result = 'ok'
+            def traced_take():
+                trace_holder['thread_start_ns'] = time.monotonic_ns()
+                self.gate.trace_start()
+                try:
+                    return self.gate.take_prioritized(priority_supplier)
+                finally:
+                    trace_holder['detail'] = self.gate.trace_finish()
+                    trace_holder['thread_end_ns'] = time.monotonic_ns()
+            try:
+                await asyncio.to_thread(traced_take)
+            except BaseException:
+                result = 'error_or_cancel'
+                raise
+            finally:
+                total_ms = (time.monotonic_ns() - begun_ns) / 1e6
+                if total_ms >= 200.0 or result != 'ok':
+                    detail = trace_holder.get('detail') or {}
+                    thread_start = trace_holder.get('thread_start_ns')
+                    thread_end = trace_holder.get('thread_end_ns')
+                    data = {
+                        'total_ms': round(total_ms, 2),
+                        'thread_dispatch_ms': round((thread_start-begun_ns)/1e6, 2)
+                            if thread_start is not None else None,
+                        'worker_ms': round((thread_end-thread_start)/1e6, 2)
+                            if thread_end is not None and thread_start is not None else None,
+                        'outcome': result,
+                        'quota_full_visits': detail.get('quota_full_visits'),
+                        'quota_advised_max_ms': round(detail.get('quota_advised_max_ms',0),2),
+                        'queue_not_head_visits': detail.get('queue_not_head_visits'),
+                        'queue_max_ahead': detail.get('queue_max_ahead'),
+                        'flock_ms': round(detail.get('flock_ms',0),2),
+                        'lock_calls': detail.get('lock_calls'),
+                        'file_read_ms': round(detail.get('file_read_ms',0),2),
+                        'file_write_including_fsync_ms':
+                            round(detail.get('file_write_including_fsync_ms',0),2),
+                        'recovery_count': detail.get('recovery_count'),
+                        'gate_errors': detail.get('gate_errors')}
+                    try:
+                        print('READER_FIFO_WAIT_DETAIL '+json.dumps(data,separators=(',', ':')),
+                              flush=True)
+                    except (OSError, ValueError, TypeError):
+                        pass
 
 class ReadOnlyOKXProvider:
     """GET-only, per-thread TLS keep-alive. A failed request is NOT retried
