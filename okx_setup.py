@@ -18,7 +18,7 @@ from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP
 from pathlib import Path
 
 from okx_version import ENGINE_VERSION as VER
-from okx_version import RELEASE_VERSION as MANAGER_RELEASE_VERSION
+from okx_manager_version import RELEASE_VERSION as MANAGER_RELEASE_VERSION
 from okx_contracts import validate_spec
 from okx_source_attestation import verify_bundle
 BASE=Path(__file__).resolve().parent

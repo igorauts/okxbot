@@ -82,7 +82,8 @@ class FairMixedQuota(unittest.TestCase):
         asyncio.run(run())
         self.assertGreaterEqual(calls,1)
         self.assertEqual(json.loads(self.path.read_text())['calls'],[])
-        queued=json.loads(quota.gate.queue_path.read_text())['waiters']
+        queued=(json.loads(quota.gate.queue_path.read_text())['waiters']
+                if quota.gate.queue_path.exists() else [])
         self.assertEqual(queued,[])
 
 

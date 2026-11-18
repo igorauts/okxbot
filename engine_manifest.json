@@ -814,18 +814,18 @@
     "okx_position_reader_client.py": "88c010c1e21eb6e6106d77fa01d5f0f4a50a203f0299f28a473643e592944f97",
     "okx_position_reader_core.py": "aed9c97c9c757bc2f4a765a60625c659932e256d6e85e2259d2d308865ee5b6b",
     "okx_position_reader_ipc.py": "f7028fb7a485f7ff004e8d628d72bc6910827befb5950ba24c29edc9d7f8100e",
-    "okx_position_reader_service.py": "5d9dd0eae49bba478e3a80bd08733e7a9e2804a7654ad0cba4b02f28ae2ff6ef",
+    "okx_position_reader_service.py": "92d88a3c92d2be163c65d84aa37c7cc59246b2881ec48294728d1f5aa7761a68",
     "okx_position_reader_watchdog.py": "e504f60c01575327be521185d20d4dfc72bffbdca8151ffab78354cd80852ee6",
     "okx_positions_fifo.py": "2349dcdbf2f99ed8ba11223f8daf84c3bb90146e5c2655150920277049c093b3",
     "okx_positions_priority.py": "a6c633b8469979c09f6c1bbe668084e5bfd7f67728a301993cd38f88f6f75795",
     "okx_reader_diagnostics.py": "cd9cc336c3dd5cbb6459d02c48e4725616fa78b8595f6802e197ca8a1d413ea5",
     "okx_reconcile_trigger_report.py": "263f9caa1e11555fef5bac93627e94524db7297f1c8e43bd7ccee9ccfd971904",
     "okx_release_contract.py": "b5e1737b4d01034e46bae8d4e05536bea2b99bdbeddcb6b80c61c9bc3a955eb2",
-    "okx_setup.py": "d5ecbf8a3089cbef3473e56ce994bd23fa4df673491d87186e00c69213e77784",
+    "okx_setup.py": "83243281161bb224d7feefea81bd46f28a9d77e0e77cc78ed04e4b1132e03f06",
     "okx_setup_presets.py": "711016648ce4101b739c39cf392291627cdb08d74d68ea024b086c45aae3e21b",
     "okx_shared_runtime_deploy.py": "5715defdca47fd201462f32d7f0757516ff97a6963f95d04c95ac722c2fbcc47",
     "okx_snapshot.py": "2407ecc598b3a0ff287c23dec3e80b92332e0e9c87025d9a9748e988ba0a0dbb",
-    "okx_source_attestation.py": "aee575c0add4cd9cee3110137f08358fd7ac7c86071405a53047985cbf03aca1",
+    "okx_source_attestation.py": "b148fb5d88ec82073226682944a492ac63f959ebe6bc1b8acc60f518c18b52de",
     "okx_state.py": "d50ea22aa6164d47c57f39501cb141b3f37c199cd3affdf7d19618194684e05a",
     "okx_stats_finance_incremental.py": "a84128ccc16f934428c595175609160d2dc8a33652265b93c62eca9c16a514bd",
     "okx_stats_incremental_core.py": "5ce6b759ece4f8ca096a9d5a1fa3481bc5f54978aa84ea10f89066a3f2be15a4",
@@ -858,7 +858,8 @@
     "okx_ui.py": "f54af6623585b508c718ccd47d148703cc8cc1eae5fd2e597a023ce62fc4f093",
     "okx_version.py": "f38090c9810498fe88db712b6776e6feb18e497a9562396bedc3fd5331d54f48",
     "okx_vps_resource_collector.py": "21fd496d5d7f1caabc3a518e21a7c7612d15f215077c8e5e21f15fc1d0a621a0",
-    "okxbot.py": "ac495d0cf23cedcc161e903152e94098d328bac5b75d9eb6818ee802b355bb44",
-    "rollout_preflight.py": "db5348290f665eefa227494e64ec680a407b206ffd1161d5f8b607d3c9d56893"
+    "okxbot.py": "ae0502033363cb225abf42f91204785ffa42509e8ffe9825441f4303dc8b33d4",
+    "rollout_preflight.py": "db5348290f665eefa227494e64ec680a407b206ffd1161d5f8b607d3c9d56893",
+    "okx_manager_version.py": "c140e9827964c18e030674a4f0caaf489cb825fb7aa8e4b4dfa881b59acc4c4d"
   }
 }

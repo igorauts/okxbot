@@ -7,7 +7,8 @@ import hashlib
 import json
 import re
 from pathlib import Path
-from okx_version import RELEASE_VERSION, ENGINE_VERSION, STATE_SCHEMA, validate_version_ids
+from okx_version import ENGINE_VERSION, STATE_SCHEMA, validate_version_ids
+from okx_manager_version import RELEASE_VERSION, validate_manager_version
 
 FILENAME = 'okx_source_bundle.json'
 _PATTERN = re.compile(r'[a-zA-Z][a-zA-Z0-9_]*\.py|requirements\.txt|engine_manifest\.json')
@@ -33,6 +34,7 @@ def verify_bundle(root):
         raise RuntimeError('SOURCE_BUNDLE_MANIFEST_MISSING')
     raw = json.loads(path.read_text(encoding='utf-8'))
     validate_version_ids()
+    validate_manager_version()
     if (not isinstance(raw,dict) or raw.get('schema') != 1
             or raw.get('release_version') != RELEASE_VERSION
             or raw.get('engine_version') != ENGINE_VERSION
@@ -47,7 +49,7 @@ def verify_bundle(root):
     if not all(isinstance(n,str) and re.fullmatch(r'[A-Za-z0-9_]+\.py',n) for n in deps):
         raise RuntimeError('SOURCE_BUNDLE_BAD_DEPENDENCIES')
     required = set(deps)|{'okx_bot.py','okxbot.py','okx_setup.py',
-                         'okx_version.py','okx_source_attestation.py',
+                         'okx_version.py','okx_manager_version.py','okx_source_attestation.py',
                          'engine_manifest.json','requirements.txt'}
     if set(files) != required:
         raise RuntimeError('SOURCE_BUNDLE_FILE_SET_MISMATCH')

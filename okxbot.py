@@ -26,7 +26,8 @@ import sys
 import tempfile
 from pathlib import Path
 from okx_archive_reader import state_file
-from okx_version import RELEASE_VERSION, ENGINE_VERSION, STATE_SCHEMA, validate_version_ids
+from okx_version import ENGINE_VERSION, STATE_SCHEMA
+from okx_manager_version import RELEASE_VERSION, validate_manager_version
 from okx_source_attestation import verify_bundle, verify_instance
 
 import okx_setup as wizard
@@ -155,7 +156,7 @@ def latest_engine(source=SOURCE):
     if not path.is_file() or path.is_symlink():
         raise RuntimeError('Нет установленного торгового движка okx_bot.py')
     compile(path.read_bytes(),str(path),'exec')
-    validate_version_ids(RELEASE_VERSION,ENGINE_VERSION)
+    validate_manager_version()
     ver=ENGINE_VERSION
     manifest=json.loads((source/'engine_manifest.json').read_text(encoding='utf-8'))
     if manifest.get('schema_version')!=STATE_SCHEMA or manifest.get('current_version')!=ver:

@@ -122,7 +122,7 @@ class DiagPriorityPositionsFIFO(PriorityPositionsFIFO):
 # OKX_READER_PACING_230_PLUS_ONE_BEGIN
 class _ReaderPacer230PlusOne:
     """Reader-local two-permit bucket, 1/230ms; existing account gate remains authoritative."""
-    GAP = 0.230
+    GAP = 0.260
     CAPACITY = 2.0
     def __init__(self):
         self._tokens = self.CAPACITY
