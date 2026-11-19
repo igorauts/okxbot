@@ -14,6 +14,7 @@ from pathlib import Path
 from okx_position_reader_core import Priority, SnapshotError, build_snapshot
 
 MAX_IPC_BYTES = 65536
+READER_SYSTEMD_SOCKET = Path("/run/okx-position-reader/positions.sock")
 
 class PositionReaderUnavailable(RuntimeError):
     # Only validated local IPC transport failures can authorize URGENT direct GET.
@@ -35,16 +36,36 @@ def read_positions(socket_path, instrument, *, account_uid, emergency=False, exi
     Same-host CLOCK_MONOTONIC timestamps are meaningful across processes.
     The local gate is NOT taken here: Reader owns the shared original gate.
     """
-    p=Path(socket_path)
-    if not p.is_absolute() or not p.parent.is_dir() or p.is_symlink():
-        raise PositionReaderUnavailable('Invalid IPC path')
-    mode=p.parent.stat().st_mode
-    if (not stat.S_ISDIR(mode) or stat.S_IMODE(mode)&0o077):
-        raise PositionReaderUnavailable('IPC directory is not private')
+    # Validate identity and input independently of the Reader's availability.
     if not isinstance(account_uid,str) or not account_uid.strip() or len(account_uid)>64:
         raise PositionReaderUnavailable('Unverified account UID')
     if type(background) is not bool or (background and not callable(cancel_if)):
         raise PositionReaderUnavailable('Unverified background interruption guard')
+    p=Path(socket_path)
+    if not p.is_absolute() or p.is_symlink() or p.parent.is_symlink():
+        raise PositionReaderUnavailable('Invalid IPC path')
+    # Missing paths authorize emergency GET ONLY for the configured systemd
+    # Reader endpoint. A similarly named path under /tmp, /home etc must NOT.
+    reader_endpoint=(p==READER_SYSTEMD_SOCKET and
+                     p.parent.parent.is_dir() and
+                     not p.parent.parent.is_symlink())
+    if not p.parent.exists():
+        if not reader_endpoint:
+            raise PositionReaderUnavailable('Invalid IPC path')
+        raise PositionReaderUnavailable('Reader runtime directory missing',
+                                        reason='reader_down')
+    try:
+        mode=p.parent.stat().st_mode
+    except FileNotFoundError as exc:
+        # Race with systemd stop/removing RuntimeDirectory.
+        if not reader_endpoint:
+            raise PositionReaderUnavailable('Invalid IPC path') from exc
+        raise PositionReaderUnavailable('Reader runtime directory disappeared',
+                                        reason='reader_down') from exc
+    except OSError as exc:
+        raise PositionReaderUnavailable('IPC directory cannot be validated') from exc
+    if (not stat.S_ISDIR(mode) or stat.S_IMODE(mode)&0o077):
+        raise PositionReaderUnavailable('IPC directory is not private')
     def check_preempt():
         if background:
             try:

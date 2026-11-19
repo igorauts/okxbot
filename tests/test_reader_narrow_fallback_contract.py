@@ -69,10 +69,15 @@ class NarrowFallback(unittest.TestCase):
 
     def test_reader_down_exit_direct_then_local_paced(self):
         self.exit=True
+        import time
+        from unittest import mock
         with self.fake('reader_down'):
             self.obj.positions()
-            with self.assertRaises(Temporary):self.obj.positions()
-        self.assertEqual(len(self.calls),1)
+            with mock.patch('okx_api.time.sleep',wraps=time.sleep) as sleeper:
+                self.obj.positions()
+        self.assertEqual(len(self.calls),2)
+        self.assertTrue(any(c.args and 0 < c.args[0] <= 0.75
+                            for c in sleeper.call_args_list))
         self.assertEqual(self.calls[0][1],'/api/v5/account/positions')
         self.assertTrue(any(a[0]=='position_reader_fallback' and kw['priority']=='exit' for a,kw in self.metrics))
 

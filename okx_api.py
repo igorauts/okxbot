@@ -391,11 +391,17 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
                     raise ExchangeTemporary('Reader unavailable; direct positions forbidden')
                 # Per-process/API-class limiter. Same global account FIFO remains
                 # authoritative; concurrent threads cannot double-reserve.
-                clock=time.monotonic()
                 with type(self)._reader_direct_lock:
-                    if clock<type(self)._reader_direct_next:
-                        raise ExchangeTemporary('Reader direct emergency GET locally paced')
-                    type(self)._reader_direct_next=clock+0.75
+                    # Hold only the local limiter lock while waiting. The
+                    # account-wide FIFO is still taken separately by req().
+                    # Do not fail here: the trading loop would sleep 3s.
+                    remaining=max(0.0,type(self)._reader_direct_next-time.monotonic())
+                    if remaining>0.750001:
+                        raise ExchangeTemporary('Reader direct pacing clock invalid')
+                    if remaining:
+                        time.sleep(remaining)
+                    type(self)._reader_direct_next=max(
+                        time.monotonic(),type(self)._reader_direct_next)+0.75
                 latency_ms('position_reader_fallback',time.perf_counter_ns(),
                            method='GET',route=path,priority=priority_name,
                            outcome='direct',reason=reason,count=1,

@@ -143,10 +143,12 @@ class BreakerBehavior(unittest.TestCase):
             self.assertEqual(mock.call_count,1)
             self.assertGreater(self.api._reader_bypass_until,time.monotonic()+4.0)
             self.assertLess(self.api._reader_bypass_until,time.monotonic()+5.1)
-            # Repeated urgent requests inside 750ms cannot multiply GETs.
-            with self.assertRaisesRegex(self.ns['ExchangeTemporary'],'locally paced'):
-                self.ns['positions'](self.api)
+            # Second urgent request waits up to 750ms, not 3s loop backoff.
+            with patch('okx_api.time.sleep',wraps=time.sleep) as sleeper:
+                self.assertEqual(self.ns['positions'](self.api),[{'source':'direct'}])
             self.assertEqual(mock.call_count,1)
+            self.assertTrue(any(c.args and 0 < c.args[0] <= 0.75
+                                for c in sleeper.call_args_list))
             self.api._reader_bypass_until=0.0
             mock.side_effect=None
             mock.return_value=[{'source':'reader'}]
@@ -154,6 +156,7 @@ class BreakerBehavior(unittest.TestCase):
             self.assertEqual(mock.call_count,2)
             self.assertEqual(self.api._reader_bypass_until,0.0)
             self.assertEqual(self.calls,[
+                ('GET','/api/v5/account/positions',{'instId':'ZEC-USDT-SWAP'}),
                 ('GET','/api/v5/account/positions',{'instId':'ZEC-USDT-SWAP'})])
     def test_reader_down_normal_cannot_issue_direct_get(self):
         with patch('okx_position_reader_client.read_positions',

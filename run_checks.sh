@@ -177,3 +177,5 @@ python3 -B -m unittest tests.test_p0p1_transition_contract -q
 
 # Dynamic manager/engine identity: full vs maintenance; strict SHA source bundle.
 python3 -B -m unittest tests.test_manager_release_divergence tests.test_full_release_version_modes -q
+# v-next: real missing Reader runtime directory and urgent pacing
+python3 -B -m unittest tests.test_reader_missing_runtime_contract -q
