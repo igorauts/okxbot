@@ -1,9 +1,7 @@
 {
-  "schema_version": 1,
-  "current_version": "0.7.72",
+  "current_version": "0.7.75",
   "engines": {
     "0.7.28": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -18,10 +16,10 @@
         "okx_strategy.py",
         "okx_latency_rollup.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "36e84babf5968cd17dfe1092bbaa0ef2ad2b6d3f7d99eaef107de9ad8463bfb3"
     },
     "0.7.30": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -36,10 +34,10 @@
         "okx_strategy.py",
         "okx_latency_rollup.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "6a7608536ee8788d8f67fb2baeb826146b28b0e4df8bf54796a9b42037f40866"
     },
     "0.7.31": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -55,10 +53,10 @@
         "okx_latency_rollup.py",
         "okx_tp_telemetry.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "fa20dbdab9279fca41f654e0feb960d674e15f331c2a8d0e024d5bfaa3b11fe8"
     },
     "0.7.32": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -74,10 +72,10 @@
         "okx_latency_rollup.py",
         "okx_tp_telemetry.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "1f35274f4f8570f88e47c5f498172a1839b8c62e9295b5823f59f8a26ae71ea2"
     },
     "0.7.33": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -93,10 +91,10 @@
         "okx_latency_rollup.py",
         "okx_tp_telemetry.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "62202f16e683ef9a1ec91774f033af22d33b3fff2c6e3d4b86b7e86ded1efd97"
     },
     "0.7.34": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -115,10 +113,10 @@
         "okx_position_reader_core.py",
         "okx_positions_priority.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "edfd544e43839ac0554f2cf0a75a1f797f31931fc52020237cb5d0b574824fb3"
     },
     "0.7.35": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -137,10 +135,10 @@
         "okx_position_reader_core.py",
         "okx_positions_priority.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "c0774039572335eba1db2ceec0cfee37055a4a7cc7670c81aa78aacafd81b14d"
     },
     "0.7.37": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -159,10 +157,10 @@
         "okx_position_reader_core.py",
         "okx_positions_priority.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "14921ed3d6d9636e797ca20b1a034c10716a11c6b722977d37bc51e327d285b9"
     },
     "0.7.38": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -182,10 +180,10 @@
         "okx_positions_priority.py",
         "okx_idle_reconcile.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "9e7f164e890b095a69d5b72a23155abd1c3dc524d44dcd0593c19276bf7c20dc"
     },
     "0.7.39": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -205,10 +203,10 @@
         "okx_positions_priority.py",
         "okx_idle_reconcile.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "a7a3fc8f12adaf68cab5963f0f2477a26b51d03cc990f6d18c0e17a480a91004"
     },
     "0.7.40": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -228,10 +226,10 @@
         "okx_positions_priority.py",
         "okx_idle_reconcile.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "a65463192b57b08885a879560acd5d6e49ef27bd9b0c9a06deb35cd184b2439a"
     },
     "0.7.41": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -251,10 +249,10 @@
         "okx_positions_priority.py",
         "okx_idle_reconcile.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "a65463192b57b08885a879560acd5d6e49ef27bd9b0c9a06deb35cd184b2439a"
     },
     "0.7.42": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -274,10 +272,10 @@
         "okx_positions_priority.py",
         "okx_idle_reconcile.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "4109d63dc5610a9d9ab31f38cfe3944747532c45f013cd7124080f99fdec83e8"
     },
     "0.7.43": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -297,10 +295,10 @@
         "okx_positions_priority.py",
         "okx_idle_reconcile.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "70c267668b8ddd7b1297f2ad75da5381a1f7c1ff19f157c4f17a7dd457cb7bb0"
     },
     "0.7.44": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -320,10 +318,10 @@
         "okx_positions_priority.py",
         "okx_idle_reconcile.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "ad47db19edb417581bc1020bf9c4350ab1194e70810fa9cd072064527e5ae87c"
     },
     "0.7.45": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -343,10 +341,10 @@
         "okx_positions_priority.py",
         "okx_idle_reconcile.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "54d94915f6ada56722164df73c6b5bbda5799035aba836fd1daebcf92fde4bb9"
     },
     "0.7.46": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -366,10 +364,10 @@
         "okx_positions_priority.py",
         "okx_idle_reconcile.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "d1a315c3c4571e21c58fe80e0ffab6892608c57ed3837689431705e603f47d0a"
     },
     "0.7.47": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -389,10 +387,10 @@
         "okx_positions_priority.py",
         "okx_idle_reconcile.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "30f913fb2022d76103b46a38031ed89cb684ba27544218f490ed3f3acef66671"
     },
     "0.7.51": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -412,10 +410,10 @@
         "okx_positions_priority.py",
         "okx_idle_reconcile.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "bcba2f02086543c15d501fb7b1bb6e486877da78c66ca63b506c64bab76f7a27"
     },
     "0.7.52": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -435,10 +433,10 @@
         "okx_positions_priority.py",
         "okx_idle_reconcile.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "4e194ffa20501d811dbf16dbb9dcd5258ac2d5be7d04fa4b49ef26efd6f64fab"
     },
     "0.7.53": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -461,10 +459,10 @@
         "okx_stats_incremental_runtime.py",
         "okx_stats_sqlite_delta_v0751.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "5c116a04df618ccd50a1f48cff8bf252e0b8e85b4ef894708f7368a7b4d3e2fe"
     },
     "0.7.54": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -488,10 +486,10 @@
         "okx_stats_sqlite_delta_v0751.py",
         "okx_cleanup_transport.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "155e047274e5229741d2281d37e0b92d8f4ebf4d48b1b232db69193e3ba4770f"
     },
     "0.7.55": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -515,10 +513,10 @@
         "okx_stats_sqlite_delta_v0751.py",
         "okx_cleanup_transport.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "835550f064540b05eb9a9537b51610a43ff799dca2d7604ca81c201d81d0b37e"
     },
     "0.7.56": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -542,10 +540,10 @@
         "okx_stats_sqlite_delta_v0751.py",
         "okx_cleanup_transport.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "27ea75bcdf75cc4869e13c67e2992f45c5c83f9cf4d6ec297ed394f296738370"
     },
     "0.7.57": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -569,10 +567,10 @@
         "okx_stats_sqlite_delta_v0751.py",
         "okx_cleanup_transport.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "04c2fb1ebddad3c10274e3a81cb1bb944483ee176e0203e40c295bc6230b3400"
     },
     "0.7.60": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_terminal_accounting.py",
         "okx_latency.py",
@@ -596,10 +594,10 @@
         "okx_stats_sqlite_delta_v0751.py",
         "okx_cleanup_transport.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "9c6cf1b46ba8f0b045a80ea97b3178657fd296c2e6d564fb8579839e66057cbd"
     },
     "0.7.62": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_accounting.py",
         "okx_api.py",
@@ -629,10 +627,10 @@
         "okx_tp_telemetry.py",
         "okx_version.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "60c369f9383888b0f8b5cbf5fa48dcaa2c878c1caeeddbf1c10d84fc73f7a448"
     },
     "0.7.63": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_accounting.py",
         "okx_api.py",
@@ -660,10 +658,10 @@
         "okx_tp_telemetry.py",
         "okx_version.py"
       ],
+      "file": "okx_bot.py",
       "sha256": "abb005fdf857d724b7d6090f061cdc67f2a13f51213f2f7fa9b4a8f393fa417f"
     },
     "0.7.64": {
-      "file": "okx_bot.py",
       "dependencies": [
         "okx_accounting.py",
         "okx_api.py",
@@ -691,7 +689,6 @@
         "okx_tp_telemetry.py",
         "okx_version.py"
       ],
-      "sha256": "f256fe3182aa0eb46690a800728544274db474ca0f057b7df3fd922b25a12227",
       "dependency_sha256": {
         "okx_accounting.py": "3773dffc5f70d88a7cf90e664807236fa35f322d8bb78668be4cef9594531d2c",
         "okx_api.py": "7a30f345b76ab16f7276e35b3c2c56648aaa5a3f3bed65eede6b43a9d2a8822c",
@@ -718,7 +715,9 @@
         "okx_terminal_accounting.py": "0a1902ac323b1b3bc0ee7464fd7799d51ebf1df0dd77f1467085b078cf932753",
         "okx_tp_telemetry.py": "45c5324efd0cc67ec55dd7f30b52844e4b53f767d30ae2d615cd11398c346e1a",
         "okx_version.py": "96e8947a223e4a5ebd53ad89e1f65379ba2893269be8add7bc2870d06626caf0"
-      }
+      },
+      "file": "okx_bot.py",
+      "sha256": "f256fe3182aa0eb46690a800728544274db474ca0f057b7df3fd922b25a12227"
     },
     "0.7.72": {
       "file": "okx_bot.py",
@@ -777,14 +776,73 @@
         "okx_tp_telemetry.py": "45c5324efd0cc67ec55dd7f30b52844e4b53f767d30ae2d615cd11398c346e1a",
         "okx_version.py": "f38090c9810498fe88db712b6776e6feb18e497a9562396bedc3fd5331d54f48"
       }
+    },
+    "0.7.75": {
+      "dependencies": [
+        "okx_accounting.py",
+        "okx_api.py",
+        "okx_cleanup_transport.py",
+        "okx_contracts.py",
+        "okx_emergency_gate.py",
+        "okx_fill_singleflight.py",
+        "okx_idle_reconcile.py",
+        "okx_latency.py",
+        "okx_latency_rollup.py",
+        "okx_position_reader_client.py",
+        "okx_position_reader_core.py",
+        "okx_positions_fifo.py",
+        "okx_positions_priority.py",
+        "okx_state.py",
+        "okx_stats_v2_checkpoint.py",
+        "okx_stats_v2_contract.py",
+        "okx_stats_v2_money.py",
+        "okx_stats_v2_phase3.py",
+        "okx_stats_v2_phase4.py",
+        "okx_stats_v2_production.py",
+        "okx_stats_v2_recovery.py",
+        "okx_strategy.py",
+        "okx_terminal_accounting.py",
+        "okx_tp_telemetry.py",
+        "okx_version.py"
+      ],
+      "dependency_sha256": {
+        "okx_accounting.py": "3773dffc5f70d88a7cf90e664807236fa35f322d8bb78668be4cef9594531d2c",
+        "okx_api.py": "b26e99e5389de51d19a1e49e4c87ab6e0873c5b67a6a664feeadf297e9aa1aba",
+        "okx_cleanup_transport.py": "bcd0f846aa04e77be31741d850dc5519c3a820e6221f02671c455d786b4f00b2",
+        "okx_contracts.py": "46e17ecbf873f6e04d1da4361bfb5120a2d18224f89fdfc988551972f7e16db2",
+        "okx_emergency_gate.py": "860dadfaebd7b30dbd4b6b4031944eebe707afd994ee9db96bb90578614aacba",
+        "okx_fill_singleflight.py": "b73c8d09a0bc7487520ebd9c23e7ce4645db373e4eef0f42d3b83e881726632c",
+        "okx_idle_reconcile.py": "bcc30292ca972ad1f3a6f56c3328db7110a3482629913a392be725939dfc84a0",
+        "okx_latency.py": "d88011cd4d7f37ef84517d9240ed3434ca2b8d22fc020b46db8851179064cf54",
+        "okx_latency_rollup.py": "9bfe907c86cc47f78cc55248fc2b1918d071d50d790efad72aeca9a86e842cb8",
+        "okx_position_reader_client.py": "56d3c81bcdb2013fae15a4d443206ef67f6d18be0c1b2ab9287a7d820072c4c3",
+        "okx_position_reader_core.py": "a0a2c67913b6277981ad26b4348dc7be595c71015cfd076d3f59bc94aa2d21de",
+        "okx_positions_fifo.py": "2349dcdbf2f99ed8ba11223f8daf84c3bb90146e5c2655150920277049c093b3",
+        "okx_positions_priority.py": "a6c633b8469979c09f6c1bbe668084e5bfd7f67728a301993cd38f88f6f75795",
+        "okx_state.py": "d50ea22aa6164d47c57f39501cb141b3f37c199cd3affdf7d19618194684e05a",
+        "okx_stats_v2_checkpoint.py": "c9ba79ba5872e198a90942b3d8b2b5d935b24743486a222ec77f777c54de54e6",
+        "okx_stats_v2_contract.py": "cd5bfab7e10af9883be85fb23f76bdf28c05f66327c981e94ace90b19845f05d",
+        "okx_stats_v2_money.py": "125c943ab92c5f47505614ef20a37017be3b82e54ee9ac75ac5be671e05cc66a",
+        "okx_stats_v2_phase3.py": "0d89abf1c22ac0e7dc34c56d1dbfab00fac53441b76764a4b5f2605c0247a1a5",
+        "okx_stats_v2_phase4.py": "e59739225e99affcbf6565b118d34d57a81a4e739722ce4000d6d5bf58944e81",
+        "okx_stats_v2_production.py": "a7d83ea29bef676e404260e38b63c5a320906f78f83028734fe4c2a46fa2aef2",
+        "okx_stats_v2_recovery.py": "398acbba8d69129bf5433405009eaefd0a767f9807c949614c28161d4899f231",
+        "okx_strategy.py": "1b0406eff39d0038711eef63f9b20a20a92c37690bff459edb0d4b37b71a630c",
+        "okx_terminal_accounting.py": "0a1902ac323b1b3bc0ee7464fd7799d51ebf1df0dd77f1467085b078cf932753",
+        "okx_tp_telemetry.py": "45c5324efd0cc67ec55dd7f30b52844e4b53f767d30ae2d615cd11398c346e1a",
+        "okx_version.py": "ae5e63c49a256bc0c17378af7021fbd09ed1c1aff07450ee03a72d32d2fd3f4a"
+      },
+      "file": "okx_bot.py",
+      "sha256": "fac151f5ef9ac5a6f9ab11f8bb13b942de0fb89e55e1bd76f2cd8915dfc96565"
     }
   },
+  "schema_version": 1,
   "source_modules_sha256": {
     "build_release_zip.py": "3fa6ea1ecb300f5206a24f04afbc9a5ccb398e351e722edafbb675628b339490",
     "collect_okx_diagnostics_24h.py": "856e4dc63b585ea77523d0945f8dca3a03b179eb17778ed5d714250a0b0a8374",
     "okx_account_ui.py": "23f011cf0d0dc5dee3badb61e74f73179a57e6ad2df2cdda0bc06e50f20604de",
     "okx_accounting.py": "3773dffc5f70d88a7cf90e664807236fa35f322d8bb78668be4cef9594531d2c",
-    "okx_api.py": "7a30f345b76ab16f7276e35b3c2c56648aaa5a3f3bed65eede6b43a9d2a8822c",
+    "okx_api.py": "b26e99e5389de51d19a1e49e4c87ab6e0873c5b67a6a664feeadf297e9aa1aba",
     "okx_archive_reader.py": "dd7984516de63d47a70bcd45a7683608bfc5e5b3ab2e1fe904cb6da6ef9c81e1",
     "okx_bot.py": "fac151f5ef9ac5a6f9ab11f8bb13b942de0fb89e55e1bd76f2cd8915dfc96565",
     "okx_cleanup_transport.py": "bcd0f846aa04e77be31741d850dc5519c3a820e6221f02671c455d786b4f00b2",
@@ -798,10 +856,11 @@
     "okx_gate_snapshot.py": "1ed38e764ab8846c37fe18c3461141a01f4f0cfaa844aa4523053d5fa607b3be",
     "okx_idle_reconcile.py": "bcc30292ca972ad1f3a6f56c3328db7110a3482629913a392be725939dfc84a0",
     "okx_instance_discovery.py": "0314ffb96c205224e421ed9af0482488802771733a3ec524ae0788752a167f6b",
-    "okx_latency.py": "5cbcdf31cc7a073f0a565474c88283020320ef41c05505acd9b8212f653eb499",
+    "okx_latency.py": "d88011cd4d7f37ef84517d9240ed3434ca2b8d22fc020b46db8851179064cf54",
     "okx_latency_rollup.py": "9bfe907c86cc47f78cc55248fc2b1918d071d50d790efad72aeca9a86e842cb8",
     "okx_latency_ui.py": "15fd0091c43a9400b4a2b5de4d5f5f348634807901613dd7672bc1e1fcc5092c",
     "okx_live_upgrade.py": "12d49b5ecbe1db62262466cf26b1a627b757d46c3f52b17e58a37f1755ce6350",
+    "okx_manager_version.py": "27ee0d628eeb01ffcd0847b903453c5efd18d7aaba3082e107c49852e802f239",
     "okx_market_fill_audit.py": "94428c25b46f072c05dcd055a3b285661d6e20c9be599d077afdd7f0c7b93512",
     "okx_monitor.py": "810ac9a75ef2203c5d8491eecb0cf6dde814a670480126ae5ced92aefedf4de6",
     "okx_observers.py": "0dcef018dabd4d53ad19eeddfe59d9374bf495d742a41128d607a513326a0550",
@@ -811,10 +870,10 @@
     "okx_per_bot_speed_readonly.py": "f055cd8a4177636d415f0faaad1776a6f42ebfc80fec1b170d8eebd149166bd9",
     "okx_pnl_diagnostics.py": "10a3b1f137249e9004f0cdaf9d762bf2d0e83af42c27326205a5d96342e1448f",
     "okx_position_peak.py": "d3e33013f6e8b703aac7a8cd8282fb9cf7b96fc261b1cd8cf1cf46b444b2f525",
-    "okx_position_reader_client.py": "88c010c1e21eb6e6106d77fa01d5f0f4a50a203f0299f28a473643e592944f97",
-    "okx_position_reader_core.py": "aed9c97c9c757bc2f4a765a60625c659932e256d6e85e2259d2d308865ee5b6b",
-    "okx_position_reader_ipc.py": "f7028fb7a485f7ff004e8d628d72bc6910827befb5950ba24c29edc9d7f8100e",
-    "okx_position_reader_service.py": "92d88a3c92d2be163c65d84aa37c7cc59246b2881ec48294728d1f5aa7761a68",
+    "okx_position_reader_client.py": "56d3c81bcdb2013fae15a4d443206ef67f6d18be0c1b2ab9287a7d820072c4c3",
+    "okx_position_reader_core.py": "a0a2c67913b6277981ad26b4348dc7be595c71015cfd076d3f59bc94aa2d21de",
+    "okx_position_reader_ipc.py": "1263038c7e03dd8a316f0aa37ab4ae21fcd4bcb28bd0dea7228c84180dc795b1",
+    "okx_position_reader_service.py": "86c525a77a101d09a0818954ac3fef4d2622778377c0449eb5da4acb854913e5",
     "okx_position_reader_watchdog.py": "e504f60c01575327be521185d20d4dfc72bffbdca8151ffab78354cd80852ee6",
     "okx_positions_fifo.py": "2349dcdbf2f99ed8ba11223f8daf84c3bb90146e5c2655150920277049c093b3",
     "okx_positions_priority.py": "a6c633b8469979c09f6c1bbe668084e5bfd7f67728a301993cd38f88f6f75795",
@@ -856,10 +915,9 @@
     "okx_tp_telemetry.py": "45c5324efd0cc67ec55dd7f30b52844e4b53f767d30ae2d615cd11398c346e1a",
     "okx_tp_trace_report.py": "29478e29164ce387bcf499ac0110ff436a8cfe766dcbc427028a68fcbd9397e7",
     "okx_ui.py": "f54af6623585b508c718ccd47d148703cc8cc1eae5fd2e597a023ce62fc4f093",
-    "okx_version.py": "f38090c9810498fe88db712b6776e6feb18e497a9562396bedc3fd5331d54f48",
+    "okx_version.py": "ae5e63c49a256bc0c17378af7021fbd09ed1c1aff07450ee03a72d32d2fd3f4a",
     "okx_vps_resource_collector.py": "21fd496d5d7f1caabc3a518e21a7c7612d15f215077c8e5e21f15fc1d0a621a0",
     "okxbot.py": "ae0502033363cb225abf42f91204785ffa42509e8ffe9825441f4303dc8b33d4",
-    "rollout_preflight.py": "db5348290f665eefa227494e64ec680a407b206ffd1161d5f8b607d3c9d56893",
-    "okx_manager_version.py": "c140e9827964c18e030674a4f0caaf489cb825fb7aa8e4b4dfa881b59acc4c4d"
+    "rollout_preflight.py": "db5348290f665eefa227494e64ec680a407b206ffd1161d5f8b607d3c9d56893"
   }
 }

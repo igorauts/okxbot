@@ -426,9 +426,19 @@ class SharedReaderCore:
                     self.counters['fetch_failed'] += 1
                 # Fail only waiters already present at failure boundary.
                 failures = claimed if claimed else list(self._pending())
+                # Preserve a sanitized reason from the provider; no raw HTTP
+                # message, URL, account ID or exception text crosses IPC.
+                if isinstance(exc, asyncio.TimeoutError):
+                    reason='quota_timeout' if not claimed else 'okx_error'
+                else:
+                    reason=getattr(exc,'reader_reason','okx_error')
+                if reason not in ('okx_error','okx_rate_limit','quota_timeout'):
+                    reason='okx_error'
                 for w in failures:
                     if not w.future.done():
-                        w.future.set_exception(ReaderError(f'Reader operation failed: {type(exc).__name__}'))
+                        fault=ReaderError(f'Reader operation failed: {type(exc).__name__}')
+                        fault.reader_reason=reason
+                        w.future.set_exception(fault)
             finally:
                 self._inflight = False
                 self._inflight_since_ns = 0

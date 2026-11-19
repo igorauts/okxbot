@@ -7,6 +7,7 @@ import json
 import os
 import tempfile
 import time
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -126,15 +127,25 @@ class BreakerBehavior(unittest.TestCase):
                  'position_trace_id':position_trace_id}
         exec(compile(ast.Module(body=[method],type_ignores=[]),str(ROOT/'okx_api.py'),'exec'),self.ns)
         self.calls=[]
-        self.api=SimpleNamespace(req=lambda *a,**kw:self.calls.append(a) or [{'source':'direct'}])
+        class OfflineAPIFixture(SimpleNamespace):
+            # Match the actual per-API-class direct emergency GET limiter.
+            _reader_direct_lock=threading.Lock()
+            _reader_direct_next=0.0
+        OfflineAPIFixture._reader_direct_next=0.0
+        self.api=OfflineAPIFixture(req=lambda *a,**kw:self.calls.append(a) or [{'source':'direct'}])
 
-    def test_reader_failure_then_minute_direct_then_recovery(self):
+    def test_reader_process_down_exit_short_bypass_then_recovery(self):
+        # A verified socket/transport failure may permit ONE urgent direct GET.
+        self.api._reader_exit_hint=lambda:True
         with patch('okx_position_reader_client.read_positions') as mock:
-            mock.side_effect=PositionReaderUnavailable('offline')
+            mock.side_effect=PositionReaderUnavailable('offline',reason='reader_down')
             self.assertEqual(self.ns['positions'](self.api),[{'source':'direct'}])
             self.assertEqual(mock.call_count,1)
-            self.assertGreater(self.api._reader_bypass_until,time.monotonic()+59)
-            self.assertEqual(self.ns['positions'](self.api),[{'source':'direct'}])
+            self.assertGreater(self.api._reader_bypass_until,time.monotonic()+4.0)
+            self.assertLess(self.api._reader_bypass_until,time.monotonic()+5.1)
+            # Repeated urgent requests inside 750ms cannot multiply GETs.
+            with self.assertRaisesRegex(self.ns['ExchangeTemporary'],'locally paced'):
+                self.ns['positions'](self.api)
             self.assertEqual(mock.call_count,1)
             self.api._reader_bypass_until=0.0
             mock.side_effect=None
@@ -142,16 +153,34 @@ class BreakerBehavior(unittest.TestCase):
             self.assertEqual(self.ns['positions'](self.api),[{'source':'reader'}])
             self.assertEqual(mock.call_count,2)
             self.assertEqual(self.api._reader_bypass_until,0.0)
-            self.assertEqual(self.calls, [
-                ('GET','/api/v5/account/positions',{'instId':'ZEC-USDT-SWAP'}),
+            self.assertEqual(self.calls,[
                 ('GET','/api/v5/account/positions',{'instId':'ZEC-USDT-SWAP'})])
-
-    def test_empty_instrument_avoids_double_get_for_subsequent_passes(self):
-        with patch('okx_position_reader_client.read_positions',side_effect=PositionReaderEmpty('zero unproven')) as mock:
-            self.ns['positions'](self.api)
-            self.ns['positions'](self.api)
+    def test_reader_down_normal_cannot_issue_direct_get(self):
+        with patch('okx_position_reader_client.read_positions',
+                   side_effect=PositionReaderUnavailable('offline',reason='reader_down')) as mock:
+            with self.assertRaisesRegex(self.ns['ExchangeTemporary'],'normal/background gated'):
+                self.ns['positions'](self.api)
             self.assertEqual(mock.call_count,1)
-            self.assertEqual(len(self.calls),2)
+            self.assertEqual(self.calls,[])
+    def test_live_reader_rate_limit_blocks_direct_get_even_panic(self):
+        self.ns['control_mode']=lambda:'PANIC'
+        with patch('okx_position_reader_client.read_positions',
+                   side_effect=PositionReaderUnavailable('rate',reason='okx_rate_limit')) as mock:
+            with self.assertRaisesRegex(self.ns['ExchangeTemporary'],'no direct GET'):
+                self.ns['positions'](self.api)
+            self.assertEqual(mock.call_count,1)
+            self.assertEqual(self.calls,[])
+
+    def test_unproven_zero_must_fail_closed_without_direct_get(self):
+        # Neither RUN nor EXIT can silently treat missing rows as proven zero.
+        self.api._reader_exit_hint=lambda:True
+        with patch('okx_position_reader_client.read_positions',
+                   side_effect=PositionReaderEmpty('zero unproven')) as mock:
+            for _ in range(2):
+                with self.assertRaisesRegex(self.ns['ExchangeTemporary'],'cannot prove zero'):
+                    self.ns['positions'](self.api)
+            self.assertEqual(mock.call_count,2)
+            self.assertEqual(self.calls,[])
 
 
 class RetiredStartupError(unittest.TestCase):

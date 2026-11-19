@@ -83,8 +83,19 @@ class ActiveSafety(unittest.TestCase):
         self.assertIn('PositionReaderPreempted', (ROOT/'okx_bot.py').read_text())
         self.assertIn('b3_preempt_to_reconcile',(ROOT/'okx_bot.py').read_text())
         api=(ROOT/'okx_api.py').read_text()
-        # The preempt exception must never be converted to a direct GET fallback.
-        self.assertNotIn('except PositionReaderPreempted:',api)
+        # A preempt exception may be recorded for diagnosis, but it MUST be
+        # re-raised immediately, never converted to a direct GET fallback.
+        # Enforce the actual handler body through AST, not source formatting.
+        handlers=[n for n in ast.walk(ast.parse(api))
+                  if isinstance(n,ast.ExceptHandler)
+                  and isinstance(n.type,ast.Name)
+                  and n.type.id=='PositionReaderPreempted']
+        self.assertEqual(len(handlers),1)
+        handler=handlers[0]
+        self.assertEqual(len(handler.body),2)
+        self.assertEqual(ast.unparse(handler.body[0]),"outcome = 'preempted'")
+        self.assertIsInstance(handler.body[1],ast.Raise)
+        self.assertIsNone(handler.body[1].exc)
         self.assertIn('Priority.BACKGROUND',(ROOT/'okx_position_reader_client.py').read_text())
         self.assertIn('background=background',(ROOT/'okx_api.py').read_text())
 if __name__=='__main__': unittest.main()

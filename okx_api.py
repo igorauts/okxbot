@@ -132,6 +132,8 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
         network attempt, with durable intent and next-pass clOrdId reconciliation.
         """
         _local=threading.local()
+        _reader_direct_lock=threading.Lock()
+        _reader_direct_next=0.0
 
         def _connect(self):
             conn=getattr(self._local,'conn',None)
@@ -235,6 +237,7 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
                         p=getattr(_PERF_LOCAL,'current',None) if _PERF_RECON_ENABLED else None
                         http_start=time.perf_counter_ns()
                         http_status=None
+                        http_outcome='unknown'
                         try:
                             _stats_rotate_idle_get(self,method)
                             if elective_cancel:
@@ -248,9 +251,18 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
                                 status,result=self._http(method,path,payload,headers)
                             _stats_note_http_use(self)
                             http_status=status
+                            http_outcome='response'
+                        except ExchangeTemporary:
+                            http_outcome='temporary'
+                            raise
+                        except (OSError,TimeoutError,ConnectionError,http.client.HTTPException,
+                                ssl.SSLError) as exc:
+                            # Only exception class, NEVER exception text/body/credentials.
+                            http_outcome='transport_'+type(exc).__name__
+                            raise
                         finally:
                             latency_ms('http',http_start,method=method,route=route,
-                                       status=http_status,attempt=attempt+1,trace_id=tp_trace)
+                                       status=http_status,attempt=attempt+1,trace_id=tp_trace,outcome=http_outcome)
                     except ExchangeTemporary:
                         if method!='GET':raise ExchangeUnresolved('Uncertain POST response; saved intent must reconcile')
                         if attempt==attempts-1:raise
@@ -267,7 +279,12 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
                         if attempt==attempts-1:
                             raise ExchangeTemporary(f'GET {route} transport unavailable: {type(exc).__name__}') from exc
                         self._close()
-                        REST_GATE.throttle(route,min(12,2*(2**attempt)))
+                        # GET-only: a stale keep-alive is retried once on a fresh
+                        # connection without adding an artificial 2-second delay.
+                        # Subsequent transport failures retain bounded backoff.
+                        if attempt == 0:
+                            continue
+                        REST_GATE.throttle(route,min(12,2*(2**(attempt-1))))
                         continue
                     if status==429 or status>=500 or result.get('code')=='50011':
                         limited=True
@@ -340,81 +357,113 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
             return data[0] if data else None
 
         def positions(self):
-            # Explicit OFFLINE-candidate opt-in. The published engine path is
-            # unchanged unless an operator separately provisions the Reader.
-            # No trading TTL: the Reader must start a GET AFTER each request.
             socket_path=ENV.get('OKX_POSITION_READER_SOCKET')
-            if socket_path:
-                # Reader failure must NOT cost 5s on each subsequent pass.
-                # A bounded circuit breaker uses direct GET via SAME gate.
-                if time.monotonic()<getattr(self,'_reader_bypass_until',0.0):
-                    return self.req('GET','/api/v5/account/positions',{'instId':INST})
-                from okx_position_reader_client import (read_positions,
-                                                       PositionReaderUnavailable,
-                                                       PositionReaderEmpty)
-                import secrets
-                try:
-                    emergency=bool(control_mode is not None and
-                                   control_mode() in ('HARD','PANIC'))
-                    trace_id=position_trace_id(self) or secrets.token_hex(12)
-                    hint=getattr(self,'_reader_exit_hint',None)
-                    # Priority is scheduling-only and cannot affect REST safety.
-                    exit_priority=False
-                    if callable(hint) and not emergency:
-                        try:exit_priority=bool(hint())
-                        except Exception:exit_priority=False
-                    started=time.perf_counter_ns()
-                    background_hint=getattr(self,'_reader_background_hint',None)
-                    background=False
-                    if not emergency and not exit_priority and callable(background_hint):
-                        try: background=(background_hint() is True)
-                        except Exception: background=False
-                    cancel_if=(getattr(self,'_reader_background_interrupt',None)
-                               if background else None)
-                    if background and not callable(cancel_if): background=False
-                    priority_name=('emergency' if emergency else ('exit' if exit_priority else
-                                   ('background' if background else 'normal')))
-                    result='unavailable'
-                    def record_snapshot_timing(diag):
-                        # Only the already-validated Reader result can supply
-                        # these diagnostic values. They never authorize POST.
-                        if 'quota_wait_ms' in diag:
-                            latency_ms('position_reader_quota',
-                                       time.perf_counter_ns()-int(diag['quota_wait_ms']*1_000_000),
-                                       priority=priority_name,trace_id=trace_id,
-                                       batch_size=diag.get('batch_size'))
-                        if 'fetch_ms' in diag:
-                            latency_ms('position_reader_http',
-                                       time.perf_counter_ns()-int(diag['fetch_ms']*1_000_000),
-                                       priority=priority_name,trace_id=trace_id,
-                                       batch_size=diag.get('batch_size'))
-                    try:
-                        data=read_positions(socket_path,INST,
-                                            account_uid=verify_reader_uid(self),
-                                            emergency=emergency,exit_priority=exit_priority,
-                                            background=background,cancel_if=cancel_if,
-                                            trace_id=trace_id,on_trace=record_snapshot_timing)
-                        result='ok'
-                        self._reader_bypass_until=0.0
-                        return data
-                    finally:
-                        latency_ms('position_reader_ipc',started,method='GET',
-                                   route='/api/v5/account/positions',outcome=result,
-                                   trace_id=trace_id,priority=priority_name)
-                except PositionReaderEmpty:
-                    # An omitted instrument does NOT prove zero. Avoid a
-                    # duplicate broad GET on every pass for a flat bot.
-                    self._reader_bypass_until=time.monotonic()+60.0
-                    return self.req('GET','/api/v5/account/positions',{'instId':INST})
-                except (PositionReaderUnavailable, ExchangeTemporary) as exc:
-                    self._reader_bypass_until=time.monotonic()+60.0
-                    # RUN must not be blinded by a Reader outage or unknown
-                    # instrument. A direct GET consumes the SAME original
-                    # account FIFO permit as other bots, never a second quota.
-                    # Never trust rejected Reader data. Original engine still
-                    # performs all position/order/ownership safety checks.
-                    return self.req('GET','/api/v5/account/positions',{'instId':INST})
-            return self.req('GET','/api/v5/account/positions',{'instId':INST})
+            if not socket_path:
+                return self.req('GET','/api/v5/account/positions',{'instId':INST})
+            from okx_position_reader_client import (read_positions,
+                                                    PositionReaderUnavailable,
+                                                    PositionReaderEmpty,
+                                                    PositionReaderPreempted)
+            import secrets
+            emergency=bool(control_mode is not None and
+                           control_mode() in ('HARD','PANIC'))
+            hint=getattr(self,'_reader_exit_hint',None)
+            exit_priority=False
+            if callable(hint) and not emergency:
+                try:exit_priority=bool(hint())
+                except Exception:exit_priority=False
+            urgent=emergency or exit_priority
+            background_hint=getattr(self,'_reader_background_hint',None)
+            background=False
+            if not urgent and callable(background_hint):
+                try:background=(background_hint() is True)
+                except Exception:background=False
+            cancel_if=(getattr(self,'_reader_background_interrupt',None)
+                       if background else None)
+            if background and not callable(cancel_if):background=False
+            priority_name=('emergency' if emergency else ('exit' if exit_priority else
+                           ('background' if background else 'normal')))
+            trace_id=position_trace_id(self) or secrets.token_hex(12)
+            path='/api/v5/account/positions'
+            def direct_urgent(reason):
+                if not urgent or reason not in ('reader_down','ipc_timeout',
+                                               'ipc_transport_failure'):
+                    raise ExchangeTemporary('Reader unavailable; direct positions forbidden')
+                # Per-process/API-class limiter. Same global account FIFO remains
+                # authoritative; concurrent threads cannot double-reserve.
+                clock=time.monotonic()
+                with type(self)._reader_direct_lock:
+                    if clock<type(self)._reader_direct_next:
+                        raise ExchangeTemporary('Reader direct emergency GET locally paced')
+                    type(self)._reader_direct_next=clock+0.75
+                latency_ms('position_reader_fallback',time.perf_counter_ns(),
+                           method='GET',route=path,priority=priority_name,
+                           outcome='direct',reason=reason,count=1,
+                           window_ms=5000.0)
+                return self.req('GET',path,{'instId':INST})
+            now=time.monotonic()
+            if not urgent and now<getattr(self,'_reader_next_nonurgent_probe',0.0):
+                raise ExchangeTemporary('Reader nonurgent retry interval active')
+            # Only urgent requests can use an already open bypass window.
+            if (urgent and now<getattr(self,'_reader_bypass_until',0.0)
+                    and getattr(self,'_reader_bypass_reason',None) in
+                       ('reader_down','ipc_timeout','ipc_transport_failure')):
+                return direct_urgent(self._reader_bypass_reason)
+            started=time.perf_counter_ns()
+            outcome='unavailable'
+            def record_snapshot_timing(diag):
+                if 'quota_wait_ms' in diag:
+                    latency_ms('position_reader_quota',
+                               time.perf_counter_ns()-int(diag['quota_wait_ms']*1_000_000),
+                               priority=priority_name,trace_id=trace_id,
+                               batch_size=diag.get('batch_size'))
+                if 'fetch_ms' in diag:
+                    latency_ms('position_reader_http',
+                               time.perf_counter_ns()-int(diag['fetch_ms']*1_000_000),
+                               priority=priority_name,trace_id=trace_id,
+                               batch_size=diag.get('batch_size'))
+            try:
+                data=read_positions(socket_path,INST,
+                                    account_uid=verify_reader_uid(self),
+                                    emergency=emergency,exit_priority=exit_priority,
+                                    background=background,cancel_if=cancel_if,
+                                    trace_id=trace_id,on_trace=record_snapshot_timing)
+                outcome='ok'
+                self._reader_bypass_until=0.0
+                self._reader_bypass_reason=None
+                self._reader_next_nonurgent_probe=0.0
+                return data
+            except PositionReaderPreempted:
+                outcome='preempted'
+                raise
+            except PositionReaderEmpty as exc:
+                outcome='invalid_snapshot'
+                raise ExchangeTemporary('Reader cannot prove zero position') from exc
+            except PositionReaderUnavailable as exc:
+                reason=getattr(exc,'reason','invalid_request')
+                if reason not in ('reader_down','ipc_timeout','ipc_transport_failure',
+                                  'okx_error','okx_rate_limit','quota_timeout',
+                                  'reader_busy','snapshot_rejected','reader_rejected',
+                                  'invalid_request'):
+                    reason='invalid_request'
+                outcome=reason
+                # Pace nonurgent retries even when the Reader itself reports
+                # an exchange/rate-limit error. Never redirect those to OKX.
+                if not urgent:
+                    self._reader_next_nonurgent_probe=time.monotonic()+0.75
+                if reason not in ('reader_down','ipc_timeout','ipc_transport_failure'):
+                    raise ExchangeTemporary('Reader responded or validation failed; no direct GET') from exc
+                if not urgent:
+                    raise ExchangeTemporary('Reader unavailable; normal/background gated') from exc
+                self._reader_bypass_until=time.monotonic()+5.0
+                self._reader_bypass_reason=reason
+                return direct_urgent(reason)
+            except ExchangeTemporary:
+                outcome='verification_error'
+                raise
+            finally:
+                latency_ms('position_reader_ipc',started,method='GET',route=path,
+                           outcome=outcome,trace_id=trace_id,priority=priority_name)
 
         def ticker(self):
             data=self.req('GET','/api/v5/market/ticker',{'instId':INST})

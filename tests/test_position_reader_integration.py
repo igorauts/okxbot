@@ -4,6 +4,7 @@ import asyncio
 import tempfile
 import unittest
 import time
+import threading
 from pathlib import Path
 from unittest.mock import patch
 from types import SimpleNamespace
@@ -69,7 +70,12 @@ class APIRouting(unittest.TestCase):
             'position_trace_id':position_trace_id}
         exec(compile(ast.Module(body=[method],type_ignores=[]),str(p),'exec'),ns)
         calls=[]
-        api=SimpleNamespace(req=lambda *a,**kw:calls.append((a,kw)) or [{'source':'original'}], _reader_account_uid=lambda:'TEST_UID')
+        class OfflineAPIFixture(SimpleNamespace):
+            # Match the real per-process API class emergency direct-GET limiter.
+            _reader_direct_lock=threading.Lock()
+            _reader_direct_next=0.0
+        OfflineAPIFixture._reader_direct_next=0.0
+        api=OfflineAPIFixture(req=lambda *a,**kw:calls.append((a,kw)) or [{'source':'original'}], _reader_account_uid=lambda:'TEST_UID')
         if exit_hint is not None:api._reader_exit_hint=lambda:exit_hint
         with patch('okx_position_reader_client.read_positions') as mock:
             if isinstance(rows,Exception):mock.side_effect=rows
@@ -82,14 +88,20 @@ class APIRouting(unittest.TestCase):
     def test_reader_success_skips_original_gate_and_http(self):
         data,calls,n,_=self.method(True,'RUN')
         self.assertEqual(data,[{'source':'reader'}]);self.assertEqual(n,1);self.assertFalse(calls)
-    def test_reader_fail_in_run_falls_back_shared_original_gate(self):
+    def test_reader_down_in_run_must_fail_closed(self):
         from okx_position_reader_client import PositionReaderUnavailable
-        data,calls,n,_=self.method(True,'RUN',rows=PositionReaderUnavailable('down'))
-        self.assertEqual(data,[{'source':'original'}])
-        self.assertEqual(len(calls),1)
-    def test_reader_failed_emergency_falls_back_to_original_gate(self):
-        data,calls,n,_=self.method(True,'PANIC',rows=PositionReaderUnavailable('down'))
+        # Process/socket really down: NORMAL must NOT bypass the Reader.
+        with self.assertRaisesRegex(RuntimeError,'normal/background gated'):
+            self.method(True,'RUN',rows=PositionReaderUnavailable('down',reason='reader_down'))
+    def test_reader_down_emergency_uses_protected_direct_get(self):
+        # Only a classified local IPC transport outage allows PANIC fallback.
+        data,calls,n,_=self.method(True,'PANIC',rows=PositionReaderUnavailable('down',reason='reader_down'))
         self.assertEqual(data,[{'source':'original'}]);self.assertEqual(n,1);self.assertEqual(len(calls),1)
+        self.assertEqual(calls[0][0][0:2],('GET','/api/v5/account/positions'))
+    def test_reader_alive_rate_limited_emergency_must_not_direct_get(self):
+        # A live Reader reporting OKX quota trouble cannot authorize more GET.
+        with self.assertRaisesRegex(RuntimeError,'no direct GET'):
+            self.method(True,'PANIC',rows=PositionReaderUnavailable('rate',reason='okx_rate_limit'))
     def test_virtual_exit_hint_only_affects_ipc_priority(self):
         # RUN + passive WS crossing does not create/authorize a POST.
         data,calls,n,_=self.method(True,'RUN',exit_hint=True)
@@ -101,9 +113,10 @@ class APIRouting(unittest.TestCase):
         self.assertEqual(len(calls),1)
         self.assertEqual(calls[0][0][0],'GET')
 
-    def test_omitted_instrument_gets_individual_fresh_get(self):
-        data,calls,n,_=self.method(True,'RUN',rows=PositionReaderEmpty('not zero'))
-        self.assertEqual(data,[{'source':'original'}]);self.assertEqual(len(calls),1)
+    def test_omitted_instrument_fails_closed_without_zero_proof(self):
+        # An unproven zero is never converted into a direct GET or new BUY.
+        with self.assertRaisesRegex(RuntimeError,'cannot prove zero position'):
+            self.method(True,'RUN',rows=PositionReaderEmpty('not zero'))
 
 class SharedLegacyGate(unittest.TestCase):
     def test_original_single_quota_cross_process_contract(self):

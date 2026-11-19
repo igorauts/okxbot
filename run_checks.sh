@@ -165,3 +165,15 @@ python3 -B tests/run_stats_v2_original_suites.py
 
 # Eager terminal archival + legitimate STALLED suppression (offline).
 python3 -B -m unittest tests.test_v0764_eager_archive -q
+
+# P0: urgent-only fallback with Reader IPC failure classification
+python3 -B -m unittest tests.test_reader_narrow_fallback_contract -q
+
+# GET-only first-transport-failure fast retry; POST and rate-limit invariants.
+python3 -B -m unittest tests.test_get_fast_retry_contract -q
+
+# Verify new engine ↔ old Reader fail-closed transitions before Reader rollout.
+python3 -B -m unittest tests.test_p0p1_transition_contract -q
+
+# Dynamic manager/engine identity: full vs maintenance; strict SHA source bundle.
+python3 -B -m unittest tests.test_manager_release_divergence tests.test_full_release_version_modes -q

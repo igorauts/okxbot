@@ -219,6 +219,13 @@ class SharedOriginalQuota:
                     except (OSError, ValueError, TypeError):
                         pass
 
+class ReaderUpstreamError(RuntimeError):
+    def __init__(self, message, reason):
+        if reason not in ('okx_error','okx_rate_limit'):
+            raise ValueError('Invalid upstream error reason')
+        super().__init__(message)
+        self.reader_reason=reason
+
 class ReadOnlyOKXProvider:
     """GET-only, per-thread TLS keep-alive. A failed request is NOT retried
     inside provider: a new wire attempt would require another quota permit.
@@ -285,13 +292,16 @@ class ReadOnlyOKXProvider:
             if res.will_close: self._close()
             if len(raw)>self.MAX_RESPONSE_BYTES or res.status!=200:
                 self._close()
-                raise RuntimeError('Reader GET failed or oversized')
+                raise ReaderUpstreamError('Reader GET failed or oversized',
+                    'okx_rate_limit' if res.status==429 else 'okx_error')
             obj=json.loads(raw)
             if positions and isinstance(obj,dict) and str(obj.get('code'))=='50011':
                 self._positions_inc('okx_50011')
             if not isinstance(obj,dict) or obj.get('code')!='0' or not isinstance(obj.get('data'),list):
                 if positions:self._positions_inc('okx_rejected')
-                raise RuntimeError('Reader GET rejected by exchange')
+                code=obj.get('code') if isinstance(obj,dict) else None
+                raise ReaderUpstreamError('Reader GET rejected by exchange',
+                                          'okx_rate_limit' if str(code)=='50011' else 'okx_error')
             if positions:self._positions_inc('http_ok')
             return obj
         except (OSError, TimeoutError, ConnectionError,

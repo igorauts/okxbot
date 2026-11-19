@@ -16,7 +16,10 @@ from okx_position_reader_core import Priority, SnapshotError, build_snapshot
 MAX_IPC_BYTES = 65536
 
 class PositionReaderUnavailable(RuntimeError):
-    pass
+    # Only validated local IPC transport failures can authorize URGENT direct GET.
+    def __init__(self, message, *, reason='invalid_request'):
+        super().__init__(message)
+        self.reason=reason
 
 class PositionReaderEmpty(PositionReaderUnavailable):
     pass
@@ -64,7 +67,7 @@ def read_positions(socket_path, instrument, *, account_uid, emergency=False, exi
     def remaining():
         left=deadline-time.monotonic()
         if left<=0:
-            raise PositionReaderUnavailable('Reader total IPC deadline expired')
+            raise PositionReaderUnavailable('Reader total IPC deadline expired',reason='ipc_timeout')
         return left
     try:
         with socket.socket(socket.AF_UNIX,socket.SOCK_STREAM) as s:
@@ -85,14 +88,21 @@ def read_positions(socket_path, instrument, *, account_uid, emergency=False, exi
                         check_preempt()
                         continue
                     raise
-                if not chunk: raise PositionReaderUnavailable('Incomplete IPC response')
+                if not chunk:
+                    raise PositionReaderUnavailable('Incomplete IPC response',reason='ipc_transport_failure')
                 buf.extend(chunk)
                 if len(buf)>MAX_IPC_BYTES:raise PositionReaderUnavailable('Oversized IPC response')
         remaining()  # reject response completed only after the budget
         check_preempt()
         obj=json.loads(bytes(buf).split(b'\n',1)[0])
         if not isinstance(obj,dict) or obj.get('ok') is not True:
-            raise PositionReaderUnavailable('Reader rejected request')
+            # A response PROVES that the Reader socket accepted the request.
+            # Never trust remote error codes as evidence Reader is down.
+            allowed={'okx_error','okx_rate_limit','quota_timeout','reader_busy',
+                     'snapshot_rejected','reader_rejected'}
+            code=obj.get('reason') if isinstance(obj,dict) else None
+            reason=code if type(code) is str and code in allowed else 'reader_rejected'
+            raise PositionReaderUnavailable('Reader rejected request',reason=reason)
         response=obj.get('data')
         if (not isinstance(response,dict) or response.get('instrument')!=instrument
                 or response.get('trace_id')!=trace_id[:128]
@@ -137,4 +147,17 @@ def read_positions(socket_path, instrument, *, account_uid, emergency=False, exi
         return response['rows']
     except (OSError,TimeoutError,ValueError,TypeError,UnicodeError,KeyError,
             SnapshotError) as exc:
-        raise PositionReaderUnavailable('Reader IPC/response unavailable: '+type(exc).__name__) from exc
+        # Do not promote local UID/permission/validation bugs into direct GET.
+        if isinstance(exc,(FileNotFoundError,ConnectionRefusedError,ConnectionResetError,
+                           ConnectionAbortedError,BrokenPipeError)):
+            reason='reader_down'
+        elif isinstance(exc,(socket.timeout,TimeoutError)):
+            reason='ipc_timeout'
+        elif isinstance(exc,OSError) and getattr(exc,'errno',None) in (
+                __import__('errno').EPIPE,__import__('errno').ECONNRESET,
+                __import__('errno').ECONNREFUSED,__import__('errno').ENOTCONN):
+            reason='ipc_transport_failure'
+        else:
+            reason='invalid_request'
+        raise PositionReaderUnavailable('Reader IPC/response unavailable: '+type(exc).__name__,
+                                        reason=reason) from exc

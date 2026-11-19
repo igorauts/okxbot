@@ -19,6 +19,15 @@ MAX_LINE = 4096
 WIRE_SCHEMA = 1  # IPC protocol only, NOT a trading-engine/release version
 
 
+def reader_ipc_error_reason(exc):
+    allowed={'okx_error','okx_rate_limit','quota_timeout'}
+    code=getattr(exc,'reader_reason',None)
+    if type(code) is str and code in allowed:
+        return code
+    if isinstance(exc,asyncio.TimeoutError):
+        return 'quota_timeout'
+    return 'reader_rejected'
+
 class ReaderIPCServer:
     def __init__(self, core: SharedReaderCore, socket_path: Path, *, registry_loader=None):
         self.core = core
@@ -205,7 +214,10 @@ class ReaderIPCServer:
             else:
                 raise ReaderError("Unknown IPC operation")
         except Exception as exc:
-            reply = {"ok": False, "error": type(exc).__name__}
+            # Distinguish a live Reader reporting an exchange/quota failure
+            # from a missing IPC process. Never send raw error strings.
+            reason=reader_ipc_error_reason(exc)
+            reply = {"ok": False, "error": type(exc).__name__, "reason":reason}
         try:
             writer.write((json.dumps(reply, separators=(',', ':')) + '\n').encode('utf-8'))
             await writer.drain()
