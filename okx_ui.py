@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Read-only OKX bot and archive presentation."""
 from __future__ import annotations
+import ast
+import hashlib
+import os
 import json
 import re
 import sqlite3
@@ -52,7 +55,7 @@ def systemd_info(unit):
     try:
         p=subprocess.run(['systemctl','show',unit,
             '-p','ActiveState','-p','ActiveEnterTimestampMonotonic',
-            '-p','ActiveEnterTimestamp','-p','ExecStart'],
+            '-p','ActiveEnterTimestamp','-p','MainPID','-p','ExecStart'],
             check=False,capture_output=True,text=True,timeout=5)
         if p.returncode not in (0,):return {}
         rows={k:v for line in p.stdout.splitlines() if '=' in line
@@ -183,10 +186,68 @@ def history_multifill(path):
 def table_row(label,value):return f'  {label:<26} {value}'
 
 
+
+
+def installed_engine_version(root, info=None, manifest_path=None):
+    """Installed engine metadata, SHA-pinned to manager manifest; never config.version.
+
+    For active services, additionally ensure the live PID belongs to this bot
+    root, executes okx_bot.py, and started after the metadata was installed.
+    Nothing is imported from the bot root or executed on the exchange.
+    """
+    try:
+        root = Path(root)
+        source = root / 'okx_version.py'
+        if not source.is_file() or source.is_symlink():
+            return 'не определена'
+        raw = source.read_bytes()
+        version_nodes = []
+        for node in ast.parse(raw, filename=str(source)).body:
+            if isinstance(node, ast.Assign):
+                for target in node.targets:
+                    if isinstance(target, ast.Name) and target.id == 'ENGINE_VERSION':
+                        version_nodes.append(ast.literal_eval(node.value))
+        if len(version_nodes) != 1:
+            return 'не определена'
+        ver = version_nodes[0]
+        if not isinstance(ver, str) or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', ver):
+            return 'не определена'
+        manpath = Path(manifest_path) if manifest_path is not None else Path(__file__).resolve().with_name('engine_manifest.json')
+        if not manpath.is_file() or manpath.is_symlink():
+            return 'не определена'
+        manifest = read_json(manpath)
+        entry = (manifest or {}).get('engines', {}).get(ver)
+        if not isinstance(entry, dict):
+            return 'не определена'
+        if entry.get('dependency_sha256', {}).get('okx_version.py') != hashlib.sha256(raw).hexdigest():
+            return 'не определена'
+        if info is not None and info.get('ActiveState') == 'active':
+            pid = int(info.get('MainPID') or 0)
+            if pid <= 0:
+                return 'не определена'
+            proc = Path('/proc') / str(pid)
+            if Path(os.readlink(proc / 'cwd')).resolve() != root.resolve():
+                return 'не определена'
+            if b'okx_bot.py' not in (proc / 'cmdline').read_bytes():
+                return 'не определена'
+            # Linux starttime (field 22) is relative to system boot.
+            rest = (proc / 'stat').read_text().rsplit(')', 1)[1].split()
+            start_ticks = int(rest[19])
+            with Path('/proc/stat').open() as f:
+                boot_seconds = next(int(x.split()[1]) for x in f if x.startswith('btime '))
+            process_start = boot_seconds + start_ticks / os.sysconf('SC_CLK_TCK')
+            # A later on-disk patch must never be mistaken for a running version.
+            if source.stat().st_mtime > process_start + 2.0:
+                return 'не определена'
+        return 'v' + ver
+    except (OSError, ValueError, TypeError, SyntaxError, KeyError, StopIteration, AttributeError, OverflowError):
+        return 'не определена'
+
+
 def settings(name,root,unit):
     cfg=read_json(Path(root)/'config.json')
     if cfg is None:return f'Бот {name}: настройки недоступны'
-    info=systemd_info(unit);ver=('v'+str(cfg.get('version'))) if cfg.get('version') else 'не определена'
+    info=systemd_info(unit);ver=installed_engine_version(root, info)
     buy=int(cfg.get('active_buy_orders',25));real_tp=int(cfg.get('real_tp_target',min(25,int(cfg.get('active_tp_orders',25)))))
     buy_buffer = 5
     tp_buffer = buy+5
@@ -205,7 +266,7 @@ def settings(name,root,unit):
     try:created=datetime.fromtimestamp(float(cfg['created_at']),timezone.utc).strftime('%d.%m.%Y %H:%M UTC')
     except (KeyError,ValueError,TypeError,OverflowError):pass
     rows=[f'Бот: {name}  |  {cfg.get("instrument","—")}',
-          '\nОБЩЕЕ','─'*54,table_row('Версия',ver),
+          '\nОБЩЕЕ','─'*54,table_row('Версия движка',ver),
           table_row('Направление',str(cfg.get('direction','—')).upper()),
           '\nСЕТКА И ОРДЕРА','─'*54,
           table_row('Шаг сетки',fmt_price(step, cfg)),table_row('Take Profit',fmt_price(tp, cfg)+ratio),
@@ -232,7 +293,7 @@ def _monitor_label(unit,root,kind):
 def status(name,root,unit):
     cfg=read_json(Path(root)/'config.json')
     if cfg is None:return f'Бот {name}: конфигурация недоступна'
-    info=systemd_info(unit);ver=('v'+str(cfg.get('version'))) if cfg.get('version') else 'не определена'
+    info=systemd_info(unit);ver=installed_engine_version(root, info)
     running=info.get('ActiveState')=='active'
     control=read_json(Path(root)/'state/control.json') or {}
     ack=read_json(Path(root)/'state/control_ack.json') or {}
@@ -268,7 +329,7 @@ def status(name,root,unit):
     def show(x):return 'нет данных' if x is None else str(x)
     s=[f'Бот: {name}  |  {cfg.get("instrument","—")}',
        '\nСОСТОЯНИЕ','─'*54,
-       table_row('Версия',ver),table_row('Бот',label),
+       table_row('Версия движка',ver),table_row('Бот',label),
        table_row('Работает с',started),
        table_row('Аптайм бота',duration(bot_age)),
        table_row('Аптайм процесса',duration(proc)),

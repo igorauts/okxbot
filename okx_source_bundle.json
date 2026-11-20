@@ -26,9 +26,9 @@
     "okx_tp_telemetry.py",
     "okx_version.py"
   ],
-  "engine_version": "0.7.76",
+  "engine_version": "0.7.78",
   "files": {
-    "engine_manifest.json": "2ff7339c788cc21cf257c088fd4a90862e1771d63fedb01c02619ac1a2f59e6f",
+    "engine_manifest.json": "440f27e179ace0367dbb0a1873da870465d83d2defd4a23b8fec0e494e0970e0",
     "okx_accounting.py": "3773dffc5f70d88a7cf90e664807236fa35f322d8bb78668be4cef9594531d2c",
     "okx_api.py": "39934db24a5e13ef38cfb178a62cf2f0f6cedaeba34d8459826039b47d6894c4",
     "okx_bot.py": "fac151f5ef9ac5a6f9ab11f8bb13b942de0fb89e55e1bd76f2cd8915dfc96565",
@@ -39,7 +39,7 @@
     "okx_idle_reconcile.py": "bcc30292ca972ad1f3a6f56c3328db7110a3482629913a392be725939dfc84a0",
     "okx_latency.py": "bc35caaec1b306953cc2e654e131742189697306083474e2acec9c6a1229c777",
     "okx_latency_rollup.py": "9bfe907c86cc47f78cc55248fc2b1918d071d50d790efad72aeca9a86e842cb8",
-    "okx_manager_version.py": "0be28c8abbf29aeb68d0e6719a2f27cffb64d56741f6df177d32f62df5208284",
+    "okx_manager_version.py": "42a2ce315f55ae1a55f76fca749fa779d474f34fc535ad96633430cbe75a5cef",
     "okx_position_reader_client.py": "14ef4c0b6ebc4b6153d9874c67c0982cefd89c18da84c6f12b2f74585f2f6704",
     "okx_position_reader_core.py": "a0a2c67913b6277981ad26b4348dc7be595c71015cfd076d3f59bc94aa2d21de",
     "okx_positions_fifo.py": "2349dcdbf2f99ed8ba11223f8daf84c3bb90146e5c2655150920277049c093b3",
@@ -57,12 +57,12 @@
     "okx_strategy.py": "1b0406eff39d0038711eef63f9b20a20a92c37690bff459edb0d4b37b71a630c",
     "okx_terminal_accounting.py": "0a1902ac323b1b3bc0ee7464fd7799d51ebf1df0dd77f1467085b078cf932753",
     "okx_tp_telemetry.py": "45c5324efd0cc67ec55dd7f30b52844e4b53f767d30ae2d615cd11398c346e1a",
-    "okx_version.py": "e9d9bbf8a1e0c0b8216799b1ebbb0eb0d4bfe6c51b6c9c60cbaf594db6ea8973",
+    "okx_version.py": "70acfd62d8cda4d62faec9cee0c47a7494f04f128f60ff0da41aa3e4169a0a33",
     "okxbot.py": "f298e54e5496fd3d03ecb06d51326a05260a8ec6f8fe4dd6ca98d0f1f650a4c2",
     "requirements.txt": "769713e3bf1092a3392790b05318eca3e983605e503a700d47d9481c4cbb67d7"
   },
   "provenance": "manager 0.7.67 source export + v0.7.69 verified StatsWorker + v0.7.71 LIVE Telegram export",
-  "release_version": "0.7.77",
+  "release_version": "0.7.78",
   "schema": 1,
   "scope": "new-and-cloned-instances-only; existing bots unchanged",
   "state_schema": 1

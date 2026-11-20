@@ -182,3 +182,5 @@ python3 -B -m unittest tests.test_manager_release_divergence tests.test_full_rel
 python3 -B -m unittest tests.test_reader_missing_runtime_contract -q
 # v0.7.77: curses/SSH START confirmation must fail closed on malformed UTF-8.
 python3 -B -m unittest tests.test_manager_tty_confirmation -q
+python3 -B -m unittest tests.test_engine_history_immutable -q
+python3 -B -m unittest tests.test_ui_engine_version_display -q
