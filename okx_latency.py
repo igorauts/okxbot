@@ -54,7 +54,9 @@ class LatencyJournal:
                          'reason','attempt','source','cycles','added',
                          'priority','batch_size','trace_id','step',
                          'start_unix_ms','end_unix_ms','expected','missing',
-                         'event_clock','idle_ms','window_ms'}
+                         'event_clock','idle_ms','window_ms',
+                         'new_conn','thread_id','conn_id','conn_age_s',
+                         'conn_requests','connect_ms','ttfb_ms','rotated_slow'}
             safe = {k: v for k,v in fields.items()
                     if k in permitted and (v is None or type(v) in (str, int, float, bool))}
             if 'trace_id' in safe and (len(str(safe['trace_id']))>32 or

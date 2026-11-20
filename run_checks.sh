@@ -20,6 +20,7 @@ python3 -B tests/test_telegram_0722.py
 python3 -B tests/test_v0723.py
 python3 -B tests/test_v0723_final_ui.py
 python3 -B -m unittest tests.test_manager_next_maintenance -q
+python3 -B -m unittest tests.test_manager_reader_registration_order -q
 # v0.7.70: durable pre-ACK, multi-leg market parity and full source SHA audit.
 python3 -B -m unittest tests.test_v0770_telegram_contract tests.test_v0770_manifest -q
 # Telegram-only FD/market/ACK regression tests.
@@ -179,3 +180,5 @@ python3 -B -m unittest tests.test_p0p1_transition_contract -q
 python3 -B -m unittest tests.test_manager_release_divergence tests.test_full_release_version_modes -q
 # v-next: real missing Reader runtime directory and urgent pacing
 python3 -B -m unittest tests.test_reader_missing_runtime_contract -q
+# v0.7.77: curses/SSH START confirmation must fail closed on malformed UTF-8.
+python3 -B -m unittest tests.test_manager_tty_confirmation -q

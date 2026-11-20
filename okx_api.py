@@ -135,31 +135,98 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
         _reader_direct_lock=threading.Lock()
         _reader_direct_next=0.0
 
+        # Only the two GET routes with measured long tails are eligible.
+        # No emergency positions GET, account verification, or POST is shortened.
+        _short_get_routes=frozenset(('/api/v5/trade/orders-pending',
+                                     '/api/v5/trade/fills-history'))
+        _warm_get_deadline_s=0.5
+        _http_socket_timeout_s=12.0
         def _connect(self):
             conn=getattr(self._local,'conn',None)
             if conn is None:
                 conn=http.client.HTTPSConnection('www.okx.com',timeout=12,
                         context=ssl.create_default_context())
                 self._local.conn=conn
+                self._local.conn_seq=getattr(self._local,'conn_seq',0)+1
+                self._local.conn_id=self._local.conn_seq
+                self._local.conn_created_s=time.monotonic()
+                self._local.conn_requests=0
             return conn
-
         def _close(self):
             conn=getattr(self._local,'conn',None)
             self._local.conn=None
             if conn is not None:
                 try:conn.close()
                 except Exception:pass
-
         def _http(self, method,path,payload,headers):
+            # Diagnostic fields are immutable primitives and never contain URL,
+            # query parameters, headers, account IDs or request/response bodies.
+            # A *new* TCP/TLS session retains the existing 12-s socket timeout.
+            self._local.http_diag={}
             conn=self._connect()
+            # Old contract tests inject sockets without using _connect.
+            if not hasattr(self._local,'conn_id'):
+                self._local.conn_seq=getattr(self._local,'conn_seq',0)+1
+                self._local.conn_id=self._local.conn_seq
+                self._local.conn_created_s=time.monotonic()
+                self._local.conn_requests=0
+            needs_connect=getattr(conn,'sock',None) is None
+            short_first=bool(getattr(self._local,'http_short_first',False))
+            warm=not needs_connect
+            self._local.conn_requests+=1
+            diag={'new_conn':int(needs_connect),
+                  'thread_id':threading.get_native_id(),
+                  'conn_id':self._local.conn_id,
+                  'conn_requests':self._local.conn_requests,
+                  'conn_age_s':round(max(0.0,time.monotonic()-self._local.conn_created_s),3)}
+            started=time.monotonic()
+            deadline=(started+self._warm_get_deadline_s
+                      if method=='GET' and short_first and warm else None)
+            def arm_deadline():
+                if deadline is None:return
+                remaining=deadline-time.monotonic()
+                if remaining<=0:
+                    raise TimeoutError('warm GET deadline exceeded')
+                sock=getattr(conn,'sock',None)
+                if sock is None:
+                    raise ConnectionError('warm GET lost its connected socket')
+                sock.settimeout(remaining)
             try:
+                # For GET, separate TCP+TLS connect from the HTTP request so it
+                # can be measured. POST keeps its original implicit connect path.
+                if method=='GET' and needs_connect and hasattr(conn,'connect'):
+                    started_connect=time.perf_counter_ns()
+                    conn.connect()
+                    diag['connect_ms']=round((time.perf_counter_ns()-started_connect)/1e6,3)
+                arm_deadline()
                 conn.request(method,path,body=payload.encode() if payload else None,
                              headers=headers)
+                arm_deadline()
+                started_headers=time.perf_counter_ns()
                 response=conn.getresponse()
-                raw=response.read()
+                # Proxy TTFB: elapsed from end of request() to full headers.
+                diag['ttfb_ms']=round((time.perf_counter_ns()-started_headers)/1e6,3)
+                if deadline is None:
+                    raw=response.read()
+                else:
+                    # Re-arm remaining wall-clock budget between body reads.
+                    # Socket/DNS internals can still exceed this bound: it is
+                    # not a hard CPU/network scheduling guarantee.
+                    chunks=[]
+                    while True:
+                        arm_deadline()
+                        chunk=response.read(8192)
+                        if not chunk:break
+                        chunks.append(chunk)
+                        if response.isclosed():break
+                    raw=b''.join(chunks)
                 status=response.status
-                # Do not reuse a connection the server decided to close.
-                if response.will_close:self._close()
+                if response.will_close:
+                    self._close()
+                # Never carry a slow successful GET socket into the next call.
+                if method=='GET' and time.monotonic()-started>self._warm_get_deadline_s:
+                    diag['rotated_slow']=1
+                    self._close()
                 try:result=json.loads(raw.decode('utf-8'))
                 except (ValueError,UnicodeError):
                     if status>=500:raise ExchangeTemporary(f'HTTP {status} invalid JSON')
@@ -169,7 +236,18 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
                     ssl.SSLError):
                 self._close()
                 raise
-
+            finally:
+                # Restore the exact original 12-s socket semantics before a
+                # subsequent POST/cancel can reuse the TLS connection.
+                if deadline is not None and getattr(self._local,'conn',None) is conn:
+                    try:
+                        if getattr(conn,'sock',None) is None:
+                            self._close()
+                        else:
+                            conn.sock.settimeout(self._http_socket_timeout_s)
+                    except (OSError,ValueError):
+                        self._close()
+                self._local.http_diag=diag
         def req(self, method, path, params=None, body=None, *, background=False, exp_time_ms=None,
                 elective_cancel=False):
             if elective_cancel and (method!='POST' or path!='/api/v5/trade/cancel-order'
@@ -245,10 +323,17 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
                                 latency_ms('cancel_idle_socket',time.perf_counter_ns(),
                                            method=method,route=route,
                                            outcome=socket_state,idle_ms=round(idle_ms,1))
-                            if p is not None:
-                                status,result=p.run('rest_http',self._http,method,path,payload,headers)
-                            else:
-                                status,result=self._http(method,path,payload,headers)
+                            self._local.http_diag={}
+                            previous_short_first=getattr(self._local,'http_short_first',False)
+                            self._local.http_short_first=(method=='GET' and attempt==0 and
+                                                          route in self._short_get_routes)
+                            try:
+                                if p is not None:
+                                    status,result=p.run('rest_http',self._http,method,path,payload,headers)
+                                else:
+                                    status,result=self._http(method,path,payload,headers)
+                            finally:
+                                self._local.http_short_first=previous_short_first
                             _stats_note_http_use(self)
                             http_status=status
                             http_outcome='response'
@@ -261,8 +346,10 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
                             http_outcome='transport_'+type(exc).__name__
                             raise
                         finally:
+                            diag=getattr(self._local,'http_diag',{})
                             latency_ms('http',http_start,method=method,route=route,
-                                       status=http_status,attempt=attempt+1,trace_id=tp_trace,outcome=http_outcome)
+                                       status=http_status,attempt=attempt+1,trace_id=tp_trace,outcome=http_outcome,
+                                       **diag)
                     except ExchangeTemporary:
                         if method!='GET':raise ExchangeUnresolved('Uncertain POST response; saved intent must reconcile')
                         if attempt==attempts-1:raise

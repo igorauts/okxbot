@@ -3,8 +3,8 @@ Trading instances retain the original okx_version.py and ENGINE_VERSION.
 """
 import re
 from okx_version import ENGINE_VERSION, validate_version_ids
-RELEASE_VERSION = '0.7.76'
-RELEASE_KIND = 'engine'
+RELEASE_VERSION = '0.7.77'
+RELEASE_KIND = 'maintenance'
 def validate_manager_version(release=RELEASE_VERSION, engine=ENGINE_VERSION):
     """Full release: package == engine; maintenance: package > engine."""
     validate_version_ids()

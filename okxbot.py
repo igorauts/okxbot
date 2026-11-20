@@ -651,6 +651,41 @@ def cmd_attach(name, path, service):
     print('Рабочий процесс, config.json и systemd НЕ изменены.')
 
 
+def _read_start_confirmation(name):
+    """Read exact START phrase from controlling terminal, never locale-decoded stdin.
+
+    `curses` may leave invalid multibyte sequences in the terminal input buffer.
+    Only explicit exact UTF-8 START confirmation can authorize LIVE trading.
+    Non-TTY fallback preserves existing offline command contract tests.
+    """
+    phrase = f'START {name}'
+    prompt = f'Для запуска введи точно {phrase}: '
+    if not sys.stdin.isatty():
+        try:
+            return input(prompt).strip() == phrase
+        except (EOFError, UnicodeDecodeError):
+            return False
+    try:
+        import termios
+        with open('/dev/tty', 'rb', buffering=0) as tty:
+            # Drop leftover curses key bytes before asking for LIVE confirmation.
+            termios.tcflush(tty.fileno(), termios.TCIFLUSH)
+            sys.stdout.write(prompt)
+            sys.stdout.flush()
+            raw = tty.readline(257)
+    except (OSError, ValueError):
+        print('Не удалось прочитать подтверждение из SSH-терминала.')
+        return False
+    if not raw or len(raw) > 256 or not raw.endswith((b'\n', b'\r')):
+        print('Некорректная или слишком длинная строка подтверждения.')
+        return False
+    try:
+        entered = raw.decode('utf-8', 'strict').strip()
+    except UnicodeDecodeError:
+        print('Некорректные UTF-8 байты во вводе. Повторите запуск из меню.')
+        return False
+    return entered == phrase
+
 def cmd_start(name):
     # Account capacity is a CREATION/ATTACH invariant only. Existing bots
     # must remain startable even if an unrelated archived registry path moved.
@@ -675,12 +710,14 @@ def cmd_start(name):
                            'В NET-режиме два независимых бота на одной паре опасны.')
     if not (path / '.venv/bin/python').exists():
         raise RuntimeError('Python venv не найден. Не запускаем.')
-    # Every attempted start must pass a fresh read-only reconciliation.
-    audit_entry(entry)
+    # Refresh the authoritative Reader registry before first-start audit.
+    # Fail closed: a new instrument cannot be audited before Reader knows it.
     reader_registration_ready(name,entry,cfg)
+    # Every attempted start still needs a fresh read-only reconciliation.
+    audit_entry(entry)
     print(f'\nВНИМАНИЕ: запуск «{name}» означает РЕАЛЬНЫЕ ордера на OKX.')
     print(f'Пара: {cfg.get("instrument")}  |  GRID: {cfg.get("grid_step")}  |  TP: {cfg.get("take_profit")}')
-    if input(f'Для запуска введи точно START {name}: ').strip()!=f'START {name}':
+    if not _read_start_confirmation(name):
         print('Запуск отменён. Ничего не менялось.')
         return
     reader_registration_ready(name,entry,cfg)
