@@ -1,0 +1,4 @@
+# OFFLINE template. Verify effective paths on VPS before deployment.
+FUNDING_BASE=/root/okx
+FUNDING_REGISTRY=/root/okx/.okxbot_registry.json
+FUNDING_SYSTEMD_DIR=/etc/systemd/system

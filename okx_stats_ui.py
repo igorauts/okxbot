@@ -106,7 +106,8 @@ def drawdown_lines(root, instrument, capital, now):
 
 
 def format_stats(root, instrument, payload, *, bot_active=False,
-                 heartbeat_fresh=False, snapshot_at=None, now=None):
+                 heartbeat_fresh=False, snapshot_at=None, now=None,
+                 include_funding=False, funding_db=None):
     """Render a verified schema-1 performance payload. Never mutates files."""
     root=Path(root)
     now=time.time() if now is None else float(now)
@@ -155,6 +156,23 @@ def format_stats(root, instrument, payload, *, bot_active=False,
     elapsed=now-float(started) if started is not None else None
     uptime=payload.get('uptime') or 'н/д'
     capital=dec(payload.get('capital'))
+    # Manager opt-in only; original fill-audited PnL checks above stay unchanged.
+    funding_line=None
+    if include_funding:
+        try:
+            from okx_funding_view import load_funding, initial_line
+            db_path=Path(funding_db) if funding_db is not None else Path('/srv/okx-funding/funding.sqlite')
+            if not db_path.is_file() or db_path.is_symlink():
+                raise OSError('Funding database unavailable')
+            funding=load_funding(db_path,instrument,config['created_at'],terminal=False)
+            if funding is None:
+                funding_line=initial_line()
+            else:
+                funding_line=funding.line(int(now*1000))
+                total=funding.add_to(total)
+        except (OSError,sqlite3.Error,ValueError,TypeError,KeyError,ArithmeticError,ImportError):
+            # Never mislabel an unreadable database as a confirmed zero payment.
+            funding_line='FUNDING: ошибка чтения'
     pct_total=pct(total,capital)
     waiting=payload.get('tp_waiting_all')
     if type(waiting) is not int or waiting<0:
@@ -179,6 +197,7 @@ def format_stats(root, instrument, payload, *, bot_active=False,
         '',
         f'Открытая позиция: {base_quantity(base,config)} {coin} ({usd(nominal)})',
         'Floating PnL: '+signed(floating),
+        *([funding_line] if funding_line is not None else []),
         '',
         'ИТОГОВЫЙ PnL: '+signed(total)+f' ({pct_total} от 1x)',
         '',

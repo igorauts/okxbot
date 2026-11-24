@@ -1492,7 +1492,7 @@ def stats_text(name):
             except (OSError,ValueError,TypeError,KeyError):pass
             content=format_stats(path,instrument,(data.get('performance') or data.get('performance_v0724')),
                          bot_active=service_running(unit),heartbeat_fresh=heartbeat,
-                         snapshot_at=ts)
+                         snapshot_at=ts, include_funding=True)
             return content
         report = with_latest_bot_dd(report, path, instrument)
         try:
@@ -1591,6 +1591,27 @@ def _viewer_frame(scr, title, lines, scroll, footer, live=False, paint_stats=Fal
     for j, line in enumerate(lines[first:first + room]):
         if not paint_stats:
             _put(scr, j + 2, 1, line, w - 2)
+            continue
+        # Funding is a presentation-only indicator: do not color the text.
+        funding_match = re.match(r'^FUNDING: ([+−-])([0-9]+\.[0-9]{6}), ', line)
+        if funding_match:
+            prefix = 'FUNDING: '
+            line = prefix + '● ' + line[len(prefix):]
+            _put(scr, j, 1, line, w - 2)
+            if curses.has_colors():
+                try:
+                    sign, magnitude = funding_match.groups()
+                    if not any(ch in '123456789' for ch in magnitude):
+                        dot_attr = curses.A_DIM
+                    else:
+                        curses.start_color()
+                        curses.use_default_colors()
+                        curses.init_pair(1,curses.COLOR_GREEN,-1)
+                        curses.init_pair(2,curses.COLOR_RED,-1)
+                        dot_attr = curses.color_pair(1 if sign == '+' else 2)
+                    scr.chgat(j, 1 + len(prefix), 1, dot_attr)
+                except (curses.error, ValueError):
+                    pass
             continue
         attribute=curses.A_NORMAL
         if line.startswith(('GRID PROFIT:', 'ИТОГОВЫЙ PnL:')):

@@ -1,0 +1,11 @@
+[Unit]
+Description=Collect OKX funding once per hour
+
+[Timer]
+OnCalendar=*-*-* *:05:00 UTC
+AccuracySec=1s
+Persistent=true
+Unit=okx-funding-collector.service
+
+[Install]
+WantedBy=timers.target

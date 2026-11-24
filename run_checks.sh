@@ -184,3 +184,8 @@ python3 -B -m unittest tests.test_reader_missing_runtime_contract -q
 python3 -B -m unittest tests.test_manager_tty_confirmation -q
 python3 -B -m unittest tests.test_engine_history_immutable -q
 python3 -B -m unittest tests.test_ui_engine_version_display -q
+python3 -B -m unittest tests.test_funding_manager_ui -q
+python3 -B -m unittest tests.test_funding_color -q
+
+# Standalone funding collector regression suite (offline).
+(cd funding && python3 -B -m unittest discover -v)
