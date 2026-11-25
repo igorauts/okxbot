@@ -5197,7 +5197,37 @@ def stats_capture_bid(market=None):
         return value
     return A.ticker()
 
-def print_full_stats(pnl=None, *, require_complete=False, market=None, stats_cache=None, finance_cache=None):
+def require_pristine_first_audit(st):
+    # The first manager audit deliberately has no persisted trading state.
+    # Never reinterpret missing established state or orphan history as new.
+    if (not AUDIT or LIVE or STATS_ONLY or TERMINAL_ONLY or
+            CFG.get('live_trading') is not False or CFG.get('version')!=VER or
+            DATA.exists() or DATA.is_symlink() or st!=empty_state(VER,INST)):
+        raise ExchangeUnresolved('Missing trading state is not a pristine first-start audit')
+    for path in (RUNTIME_STATS,STATS_FILE,STATS_FINANCIAL_ANCHOR,TERMINAL_STATS,BOT_DD_DATA,CONTROL_ACK):
+        if path.exists() or path.is_symlink():
+            raise ExchangeUnresolved('Missing trading state with prior runtime evidence: '+path.name)
+    if EVENTS.exists():
+        with EVENTS.open(encoding='utf-8') as stream:
+            for line in stream:
+                event=json.loads(line)
+                if event.get('live') is True or event.get('event') in ('BUY_PLACED','BUY_FILLED','TP_FILLED'):
+                    raise ExchangeUnresolved('Missing trading state with prior trading events')
+    for path,table,required in ((ARCHIVE_DB,'cycles',True),(FILL_DB,'fills',False),
+                                (PNL_DB,'accounted',False)):
+        if path.is_symlink() or (required and not path.is_file()):
+            raise ExchangeUnresolved('Missing or unsafe first-start ledger: '+path.name)
+        if not path.exists():continue
+        if not path.is_file():raise ExchangeUnresolved('Unsafe first-start ledger: '+path.name)
+        with contextlib.closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True,timeout=5)) as db:
+            if db.execute('PRAGMA quick_check').fetchone()!=('ok',):
+                raise ExchangeUnresolved('First-start ledger integrity failure: '+path.name)
+            if db.execute('SELECT 1 FROM '+table+' LIMIT 1').fetchone() is not None:
+                raise ExchangeUnresolved('Missing trading state with nonempty ledger: '+path.name)
+
+
+def print_full_stats(pnl=None, *, require_complete=False, market=None, stats_cache=None, finance_cache=None,
+                     audited_fresh_state=None):
     """Complete verified account snapshot anchored to one pre-REST state.
 
     Never demand that trading stop while the history calls run. The report's
@@ -5210,6 +5240,11 @@ def print_full_stats(pnl=None, *, require_complete=False, market=None, stats_cac
     t_start=clock()
     t_start_unix_ms=time.time()*1000
     st=json.loads(DATA.read_text()) if DATA.exists() else None
+    if audited_fresh_state is not None:
+        if not require_complete or pnl is None or stats_cache is not None or finance_cache is not None:
+            raise ExchangeUnresolved('Fresh audit snapshot requires mandatory accounting')
+        require_pristine_first_audit(audited_fresh_state)
+        st=copy.deepcopy(audited_fresh_state)
     if st is None:
         print('📊 GRID STATISTICS: торговое состояние ещё не создано',flush=True)
         return False
@@ -5767,7 +5802,10 @@ def main():
                     log('STARTUP_SYNC_WAIT',error=f'{type(exc).__name__}: {str(exc)[:160]}')
                     startup_warning=time.monotonic()
                 time.sleep(5)
+        fresh_audit=AUDIT and not DATA.exists()
         st=ensure_state()
+        if fresh_audit:
+            require_pristine_first_audit(st)
         if st.get('terminal_mode') and not AUDIT:
             die('Bot retired: never restart this instance, create a clone')
         pnl=PnLLedger(value)
@@ -5783,7 +5821,10 @@ def main():
             audit_kind=audit_once(st,allow_partial_isolation=isolation_audit)
             pnl.work(st,max_cycles=1,historical=True)
             print('💰',pnl.status(st),flush=True)
-            if print_full_stats(pnl,require_complete=True) is not True:
+            if fresh_audit and audit_kind!='STRICT':
+                die('First-start audit must fully reconcile')
+            if print_full_stats(pnl,require_complete=True,
+                    audited_fresh_state=st if fresh_audit else None) is not True:
                 die('Mandatory financial audit did not finish')
             if isolation_audit:
                 if control_mode()!='RUN' or tp_failure_buy_hold(st):

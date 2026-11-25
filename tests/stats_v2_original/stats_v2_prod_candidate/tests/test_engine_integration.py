@@ -84,6 +84,17 @@ class EnginePatchTest(unittest.TestCase):
         # Verify every changed candidate hunk against the reviewed digest, undo
         # only those exact hunks, and retain the historical oracle for all else.
         import gzip, hashlib
+        # v0.7.83: pin first-start audit-only changes before all historical guards.
+        v82=gzip.decompress((DIR/'okx_bot_v0782_baseline.py.gz').read_bytes())
+        self.assertEqual(hashlib.sha256(v82).hexdigest(), '0d6bcd37f7908df0bb3442a5443e32a92aaae366611b7648219744674882663d')
+        v82_base=v82.decode().splitlines(keepends=True)
+        v83_lines=new.splitlines(keepends=True)
+        v83_hunks=[(5199, 5200, 5199, 5230, 'cfa3f009d754a0aafd92e72446950d239ee045ac901e2d1c4d456d269e9c5030'), (5212, 5212, 5242, 5247, '2e6daa4ae4d90b1f898e4a4b46f15c850357360d663fd491bd9fd817028a76d6'), (5769, 5769, 5804, 5805, '9ab1de3d7a349945223a0de740320e3e1ad2140cfede669d61821bb8df72422a'), (5770, 5770, 5806, 5808, 'cd7afe11620bf8ac6e580e5b8a79703826c5172be5abf154a5497a7fc1ecd239'), (5785, 5786, 5823, 5827, '18c515aa7fa097f0f1838b58dda5a4e73139ea124857cd7f2f1cff12227b5c9c')]
+        for i1,i2,j1,j2,digest in reversed(v83_hunks):
+            self.assertEqual(hashlib.sha256(''.join(v83_lines[j1:j2]).encode()).hexdigest(),digest)
+            v83_lines[j1:j2]=v82_base[i1:i2]
+        new=''.join(v83_lines)
+        self.assertEqual(new.encode(),v82)
         # v0.7.82: reverse ONLY the exact reviewed changes relative to the
         # published 0.7.81 engine; then run the original 0.7.81 and older guards.
         v81=gzip.decompress((DIR/'okx_bot_v0781_baseline.py.gz').read_bytes())

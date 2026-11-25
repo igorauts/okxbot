@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.7.83 — 2026-11-25 UTC — First-start mandatory accounting
+
+- Pass the freshly audited empty snapshot into full mandatory accounting; do not synthesize bot_state.json. Reject prior trading evidence and orphan ledgers.
+- End-to-end offline manager NEW/CLONE + START regression, including actual financial audit and first LIVE initialization up to the loop boundary.
+
+- Final offline candidate: 999 tests. LIVE BIGTIME first start and trading verified; existing engines remain on 0.7.82. See [release notes](RELEASE_NOTES_V0783.md).
+
 ## v0.7.82 — 2026-11-25 UTC — Bounded attached TP reconciliation and emergency progress
 
 - Durable terminal parent proof, bounded history probes, fresh independent reconciliation; stable reserve identity and hold telemetry.

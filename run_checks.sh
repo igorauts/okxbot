@@ -193,3 +193,6 @@ python3 -B -m unittest tests.test_v0782_audit -q
 
 # Standalone funding collector regression suite (offline).
 (cd funding && python3 -B -m unittest discover -v)
+
+# Full first-start integration, including mandatory accounting and confirmed systemd boundary.
+python3 -B -m unittest tests.test_first_start_full_audit -v
