@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.7.81 — 2026-11-25 UTC — Attached TP isolation and audit corrections
+
+- Isolate unresolved attached TP after confirmed canceled partial BUY; retain reserved quantity and occupied level, permit independently reconciled trading, preserve strict terminal protection.
+- Funding fallback and overdue warnings; common manager/Telegram display; atomic financial anchor and compact report compatibility.
+- Repair source-bundle and shared-install gates, version identity, source pins and new/clone regression coverage.
+- Full offline suite (973 unittest tests) and LIVE rollout verified by operator; release packaging changes only documentation. See [release notes](RELEASE_NOTES_V0781.md).
+
 ## v0.7.80 — 2026-11-24 UTC — Telegram Funding UI maintenance (engine 0.7.78)
 
 - `/status`: two lines per active bot; sort by GRID PROFIT, then existing name tie-break. `TOTAL = GRID PROFIT + FUNDING + adjusted FLOAT`; fold partial exits and realized open-cycle components into the report-only residual, reconcile displayed cents, sum exact verified totals. No accounting or strategy change in the engine.

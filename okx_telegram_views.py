@@ -102,15 +102,22 @@ def price_digits(cfg):
     return max(2, -tick.normalize().as_tuple().exponent) if tick is not None and tick > 0 else 2
 
 
-def verified_snapshot_bid(root, cfg, stats):
+def snapshot_anchor(root, stats):
+    # New StatsWorker publishes this pair atomically in stats.json. Never fall
+    # back to an external file if the embedded anchor is present but malformed.
+    if 'financial_anchor' in stats:
+        a=stats['financial_anchor']
+        return a if isinstance(a,dict) else {}
+    return read_json(Path(root)/'state'/'stats_financial_anchor.json')
+
+
+def verified_snapshot_bid(root, cfg, stats, *, anchor=None):
     """Price from the same confirmed stats sample, never its rounded report.
 
-    The running engine publishes stats_financial_anchor.json and
-    stats.json with the *same* timestamp, in that order. The two files can
-    briefly be from different samples, so fail closed rather than show a
-    spurious $0.000000 / -100% price change. Read-only, no exchange calls.
+    Prefer the embedded atomic financial anchor; older engines require a
+    matching compatibility file. Read-only, no exchange calls.
     """
-    anchor = read_json(Path(root) / 'state' / 'stats_financial_anchor.json')
+    if anchor is None: anchor = snapshot_anchor(root, stats)
     if anchor.get('schema') != 1 or anchor.get('instrument') != cfg.get('instrument'):
         return None
     if not stats.get('complete') or stats.get('instrument') != cfg.get('instrument'):
@@ -119,7 +126,7 @@ def verified_snapshot_bid(root, cfg, stats):
     generated = number(stats.get('generated_at_unix'))
     bid = number(anchor.get('bid'))
     if (at is None or generated is None or at <= 0 or generated <= 0
-            or abs(at - generated) > Decimal('0.5')
+            or abs(at - generated) > (Decimal(0) if 'financial_anchor' in stats else Decimal('0.5'))
             or bid is None or bid <= 0):
         return None
     return bid
@@ -154,7 +161,7 @@ def highest_open_filled_buy_price(root, cfg):
     return '$' + human_amount(max(prices), price_digits(cfg)) if prices else '—'
 
 
-def _full_verified_total(root, cfg, stats, generated):
+def _full_verified_total(root, cfg, stats, generated, *, anchor=None):
     """Verify the same financial snapshot used by the full report, no grid-state dependency."""
     perf=stats.get('performance') or stats.get('performance_v0724')
     if not isinstance(perf,dict) or perf.get('schema')!=1:
@@ -173,23 +180,31 @@ def _full_verified_total(root, cfg, stats, generated):
         or abs(v['grid_profit']+v['partial_exit_net']+v['floating_pnl']+
                v['realized_open_components']-v['total_pnl'])>Decimal('0.00000001')):
         return None
-    a=read_json(root/'state/stats_financial_anchor.json')
+    a=snapshot_anchor(root,stats) if anchor is None else anchor
     at=strict(a.get('at'))
     if (a.get('schema')!=1 or a.get('instrument')!=cfg.get('instrument') or
         at is None or abs(at-generated)>Decimal('0.5') or
         strict(a.get('total_pnl_usdt'))!=v['total_pnl']):return None
+    if 'financial_anchor' in stats and strict(perf.get('bid'))!=strict(a.get('bid')):
+        return None
     return v['total_pnl']
 
 
-def _full_funding_fields(root,cfg,stats,generated,subtotal,funding_loader):
+def _full_funding_fields(root,cfg,stats,generated,subtotal,funding_loader,*,anchor=None):
     from decimal import localcontext
-    funding=None if funding_loader is None or (root/'state/final_stats.json').exists() else funding_loader(cfg)
-    base=_full_verified_total(root,cfg,stats,generated)
+    # Terminal funding attribution is separate; preserve the previous archive
+    # presentation rather than treat a pre-termination snapshot as final money.
+    if (root/'state/final_stats.json').exists():
+        return 'н/д','н/д',None
+    funding=None if funding_loader is None else funding_loader(cfg)
+    base=_full_verified_total(root,cfg,stats,generated,anchor=anchor)
+    amount=Decimal(0) if funding is None else getattr(funding,'amount',funding)
+    note=('пока нет данных' if funding is None else funding.note() if hasattr(funding,'note') else '')
     with localcontext() as ctx:
         ctx.prec=400
-        total=base+funding if base is not None and funding is not None else None
-        funding_text=('н/д' if funding is None else
-                      ('−' if funding<0 else '+')+'$'+f'{abs(funding).quantize(Decimal(".01"),rounding=ROUND_HALF_UP):,.2f}')
+        total=base+amount if base is not None else None
+        funding_text=('−' if amount<0 else '+')+'$'+f'{abs(amount).quantize(Decimal(".01"),rounding=ROUND_HALF_UP):,.2f}'
+        if note: funding_text+=' · '+note
         if total is None:return funding_text,'н/д',None
         # Preserve the original subtotal suffix; recompute its percent if shown.
         # Do not add funding to an already rounded string or to an existing percent.
@@ -218,7 +233,9 @@ def status_one(name, root, age_text='н/д', *, funding_loader=None, total_sink=
     if age_seconds is None or not (Decimal('0')<=age_seconds<=Decimal('900')):
         return ('<b>'+html.escape(name)+'</b>\n'
                 '⚠️ Финансовая статистика устарела или не подтверждена. PnL: н/д')
-    if verified_snapshot_bid(root,cfg,stats) is None:
+    anchor=snapshot_anchor(root,stats)
+    bid_exact=verified_snapshot_bid(root,cfg,stats,anchor=anchor)
+    if bid_exact is None:
         return ('<b>'+html.escape(name)+'</b>\n'
                 '⚠️ Финансовый снимок не подтверждён. PnL: н/д')
     values = report_map(stats.get('report', ''))
@@ -228,7 +245,6 @@ def status_one(name, root, age_text='н/д', *, funding_loader=None, total_sink=
         return title+': '+val
     # Engine report may contain $0.00 for inexpensive assets .
     # Anchor and report must share an identical sample timestamp.
-    bid_exact = verified_snapshot_bid(root, cfg, stats)
     bid = ('$' + human_amount(bid_exact, price_digits(cfg))
            if bid_exact is not None else 'н/д')
     up = highest_open_filled_buy_price(root, cfg)
@@ -238,7 +254,7 @@ def status_one(name, root, age_text='н/д', *, funding_loader=None, total_sink=
     if p and number(p.group(1)) is not None:
         pos = format(number(p.group(1)), 'f').rstrip('0').rstrip('.') + ' ' + p.group(2) if '.' in format(number(p.group(1)), 'f') else format(number(p.group(1)), 'f') + ' ' + p.group(2)
     subtotal = fmt_source(value(values,'ИТОГОВЫЙ PnL'))
-    funding_text,subtotal,sub_n = _full_funding_fields(root,cfg,stats,generated,subtotal,funding_loader)
+    funding_text,subtotal,sub_n = _full_funding_fields(root,cfg,stats,generated,subtotal,funding_loader,anchor=anchor)
     icon = '⚪' if sub_n is None else '🟢' if sub_n >= 0 else '🔴'
     # Read the authoritative local 5s DD record, not a stale 10-minute report.
     # No exchange requests; schema/instrument checked before displaying.

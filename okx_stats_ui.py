@@ -160,19 +160,14 @@ def format_stats(root, instrument, payload, *, bot_active=False,
     funding_line=None
     if include_funding:
         try:
-            from okx_funding_view import load_funding, initial_line
+            from okx_funding_view import display_funding
             db_path=Path(funding_db) if funding_db is not None else Path('/srv/okx-funding/funding.sqlite')
-            if not db_path.is_file() or db_path.is_symlink():
-                raise OSError('Funding database unavailable')
-            funding=load_funding(db_path,instrument,config['created_at'],terminal=False)
-            if funding is None:
-                funding_line=initial_line()
-            else:
-                funding_line=funding.line(int(now*1000))
-                total=funding.add_to(total)
+            funding=display_funding(db_path,instrument,config.get('created_at'),now_ms=int(now*1000))
+            funding_line=funding.manager_line(int(now*1000))
+            if funding.snapshot is not None:
+                total=funding.snapshot.add_to(total)
         except (OSError,sqlite3.Error,ValueError,TypeError,KeyError,ArithmeticError,ImportError):
-            # Never mislabel an unreadable database as a confirmed zero payment.
-            funding_line='FUNDING: ошибка чтения'
+            funding_line='FUNDING: +0.000000, нет данных'
     pct_total=pct(total,capital)
     waiting=payload.get('tp_waiting_all')
     if type(waiting) is not int or waiting<0:

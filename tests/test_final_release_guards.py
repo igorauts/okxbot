@@ -22,6 +22,19 @@ class ReleaseSafety(unittest.TestCase):
         ]:
             with self.subTest(rc=rc,output=output):
                 self.assertFalse(U.audit_output_complete(rc,output))
+    def test_canary_audit_requires_final_financial_marker_and_optin(self):
+        isolated='AUDIT ISOLATED COVERAGE PASS — UNKNOWN TP RESERVED\nTP links resolved: False\n✅ Все закрытые циклы сопоставлены.\nUPGRADE AUDIT COMPLETE ISOLATED\n'
+        strict=GOOD+'UPGRADE AUDIT COMPLETE STRICT\n'
+        self.assertTrue(U.audit_output_complete(0,isolated,single_instance=True))
+        self.assertTrue(U.audit_output_complete(0,strict,single_instance=True))
+        self.assertFalse(U.audit_output_complete(0,isolated))
+        for output in (isolated.replace('TP links resolved: False','TP links resolved: True'),
+                       isolated.replace('✅ Все закрытые циклы сопоставлены.',''),
+                       isolated.replace('UPGRADE AUDIT COMPLETE ISOLATED',''),
+                       isolated+'unexpected trailing output\n',
+                       isolated+'⛔ STOP: failure\n',GOOD):
+            self.assertFalse(U.audit_output_complete(0,output,single_instance=True))
+        self.assertFalse(U.audit_output_complete(1,isolated,single_instance=True))
     def test_manager_mode_prevents_shared_install_before_mutation(self):
         # Explicit ZIP metadata contract: a normal readable Python file is
         # insufficient for the system manager launcher, which needs 0755.

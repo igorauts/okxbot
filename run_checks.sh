@@ -137,6 +137,8 @@ python3 -B -m unittest tests.test_cleanup_transport_rc2 tests.test_cancel_owner_
 # Isolated elective-CANCEL reconciliation: remote live with exact reservation,
 # absence/identity mismatch fail-closed, no global hold from one known TP.
 python3 -B -m unittest tests.test_cancel_isolation_rc3 -q
+python3 -B -m unittest tests.test_partial_attached_isolation -q
+python3 -B -m unittest tests.test_single_instance_install -q
 # Verified exact-ID, bounded same-order CANCEL retry; never duplicate an order.
 python3 -B -m unittest tests.test_cancel_retry_rc3 -q
 
@@ -186,6 +188,7 @@ python3 -B -m unittest tests.test_engine_history_immutable -q
 python3 -B -m unittest tests.test_ui_engine_version_display -q
 python3 -B -m unittest tests.test_funding_manager_ui -q
 python3 -B -m unittest tests.test_funding_color -q
+python3 -B -m unittest tests.test_v0781_audit -q
 
 # Standalone funding collector regression suite (offline).
 (cd funding && python3 -B -m unittest discover -v)

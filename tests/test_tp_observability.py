@@ -54,7 +54,8 @@ class TPObservability(unittest.TestCase):
             "if unresolved_aggregate(st):return 'WAIT'",
             "if any(o.get('side')=='sell' for o in pending):",
             "if now-float(collect['startedAt'])<ESCAPE_COALESCE_SEC:",
-            "if qty<=0 or qty>actual:die('Aggregate exit exceeds reconciled position')",
+            "if reserved_qty<0 or qty<=0 or qty>actual-reserved_qty:",
+            "die('Aggregate exit exceeds reconciled unreserved position')",
             'save(st)  # fsync all parent links + intent BEFORE the network POST',
             "rows=A.req('POST','/api/v5/trade/order',body=body,exp_time_ms=exp)",
         ):

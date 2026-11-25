@@ -125,13 +125,36 @@ def allowed_package_member(name):
         return False
     if len(parts) == 1:
         return True
-    if len(parts) == 2:
-        return parts[0] in ('tests', 'historical')
+    if len(parts) == 2 and parts[0] in ('tests', 'historical'):
+        return True
     if len(parts) == 3 and parts[:2] == ('deploy', 'reader'):
         return True
     # Explicit historical oracle fixture and original offline tests. This
     # nested layout is test-only, never copied into a trading instance.
-    if parts == ('tests','fixtures','okx_bot_original_full_v0760.py.gz'):
+    if name in (
+        'deploy/reader_pacing/okx_reader_230_plus1_readonly_audit.py',
+        'deploy/reader_pacing/okx_reader_pacing_230_plus1_install.py',
+        'deploy/resources/README.md',
+        'deploy/resources/collector.py',
+        'deploy/resources/http429_audit.py',
+        'funding/README.md',
+        'funding/benchmark_funding.py',
+        'funding/f1_bills_fixture.json',
+        'funding/okx_funding_backup.py',
+        'funding/okx_funding_collector.py',
+        'funding/okx_funding_ledger.py',
+        'funding/okx_funding_view.py',
+        'funding/systemd/okx-funding-collector.service',
+        'funding/systemd/okx-funding-collector.timer',
+        'funding/systemd/paths.conf.example',
+        'funding/test_funding_collector.py',
+        'funding/test_funding_f6.py',
+        'funding/test_funding_f61.py',
+        'funding/test_funding_ledger.py',
+        'funding/test_funding_view_backup.py',
+    ):return True
+    if parts in (('tests','fixtures','okx_bot_original_full_v0760.py.gz'),
+                 ('tests','fixtures','okx_bot_v0780_baseline.py.gz')):
         return True
     if (len(parts) == 5 and parts[:2] == ('tests','stats_v2_original')
         and parts[2] in ('stats_v2_release_work','stats_v2_prod_candidate')
@@ -174,6 +197,10 @@ def stage_check():
     if (mod.ENGINE_VERSION != NEW_VERSION or mod.STATE_SCHEMA != 1
             or mod.validate_version_ids() is not True):
         fail('Version constants mismatch')
+    from okx_source_attestation import verify_bundle
+    verify_bundle(STAGE)
+    from okx_dependency_attestation import verify
+    verify(STAGE,json_read(STAGE/'engine_manifest.json'))
     return True
 
 
@@ -313,7 +340,7 @@ def install_shared():
     if not SHARED.is_dir() or SHARED.is_symlink():fail('Unsafe shared runtime')
     # Do not touch the trading services. Shared Python modules are imported on next process start.
     dest=backup_dir('shared')
-    to_copy=sorted(p.name for p in STAGE.iterdir() if p.suffix=='.py')+['engine_manifest.json']
+    to_copy=sorted(p.name for p in STAGE.iterdir() if p.suffix=='.py')+['engine_manifest.json','requirements.txt','okx_source_bundle.json']
     (dest/'old').mkdir(mode=0o700)
     old_exists=[]
     for name in to_copy:
@@ -326,6 +353,8 @@ def install_shared():
         for name in to_copy:atomic_replace_file(STAGE/name,SHARED/name)
         for name in to_copy:
             if sha256(STAGE/name)!=sha256(SHARED/name):fail('Shared content mismatch: '+name)
+        from okx_source_attestation import verify_bundle
+        verify_bundle(SHARED)
         if not os.access(SHARED/'okxbot.py',os.X_OK):
             fail('Manager executable bit lost; shared install requires rollback')
     except BaseException:
@@ -381,7 +410,7 @@ def install_telegram():
     print('TELEGRAM PASS:',len(names),'files; monitor ACTIVE; backup:',old)
 
 
-def audit_output_complete(returncode, output):
+def audit_output_complete(returncode, output, *, single_instance=False):
     """Require the entire mandatory pre-LIVE financial audit, not an early marker.
 
     The current engine prints AUDIT CONSISTENT before mandatory PnL/history
@@ -393,20 +422,50 @@ def audit_output_complete(returncode, output):
     required = ('AUDIT CONSISTENT', '✅ Все закрытые циклы сопоставлены.')
     failure = ('⛔ STOP:', '⚠️ Статистика неполная:',
                '⚠️ Статистика неполная', 'Финансовые суммы не выводятся.')
-    return all(marker in output for marker in required) and not any(
-        marker in output for marker in failure)
+    if any(marker in output for marker in failure):return False
+    if not single_instance:
+        return all(marker in output for marker in required)
+    lines=output.splitlines()
+    if not lines or required[1] not in output:return False
+    # Explicit canary requires a final post-finance marker; never accept an
+    # isolated proof in the standard strict installer path.
+    return ((lines[-1]=='UPGRADE AUDIT COMPLETE STRICT' and required[0] in output)
+        or (lines[-1]=='UPGRADE AUDIT COMPLETE ISOLATED'
+            and 'AUDIT ISOLATED COVERAGE PASS' in output
+            and 'TP links resolved: False' in output))
 
 
-def upgrade_bot(bot):
+def verify_single_instance_sources(root):
+    from okx_dependency_attestation import verify
+    manifest=json_read(STAGE/'engine_manifest.json')
+    verify(STAGE,manifest)
+    # The canary may change only engine and its version module. All other
+    # dependencies must match the current published instance and target.
+    old=manifest['engines'][OLD_VERSION];new=manifest['engines'][NEW_VERSION]
+    if set(old['dependencies'])!=set(new['dependencies']):
+        fail('Single-instance dependency inventory changed')
+    for name in old['dependencies']:
+        expected=old['dependency_sha256'][name]
+        if sha256(check_file(root/name))!=expected:
+            fail('Installed dependency drift: '+name)
+        if name!='okx_version.py' and new['dependency_sha256'][name]!=expected:
+            fail('Single-instance dependency change outside approved scope: '+name)
+    return True
+
+
+def upgrade_bot(bot, *, single_instance=False):
     stage_check()
-    shared_ver=json_read(SHARED/'engine_manifest.json').get('current_version')
-    if shared_ver!=NEW_VERSION:fail('Shared runtime is not staged target engine')
     engine_files=files_required()
-    # Check staged dependencies are byte-identical to installed shared runtime.
-    for name in engine_files:
-        if sha256(STAGE/name)!=sha256(check_file(SHARED/name)):
-            fail('Shared runtime dependency mismatch: '+name)
+    if not single_instance:
+        shared_ver=json_read(SHARED/'engine_manifest.json').get('current_version')
+        if shared_ver!=NEW_VERSION:fail('Shared runtime is not staged target engine')
+        for name in engine_files:
+            if sha256(STAGE/name)!=sha256(check_file(SHARED/name)):
+                fail('Shared runtime dependency mismatch: '+name)
     root,unit,kv=instance_check(bot,OLD_VERSION,need_active=True)
+    if single_instance:
+        verify_single_instance_sources(root)
+        engine_files=['okx_bot.py','okx_version.py']
     stop_safety_readonly(root,json_read(root/'state/bot_state.json'))
     before_pid=int(kv['MainPID'])
     print('STOPPING',bot,'PID',before_pid,'(exchange orders remain active)',flush=True)
@@ -421,9 +480,11 @@ def upgrade_bot(bot):
     # Re-evaluate state AFTER service actually stopped and flushed any completed writes.
     root,unit,_=instance_check(bot,OLD_VERSION,need_active=False)
     stop_safety_readonly(root,json_read(root/'state/bot_state.json'))
+    if single_instance:verify_single_instance_sources(root)
     dest=backup_dir(bot)
     backup_instance(root,dest,engine_files)
     print('BACKUP PASS:',dest,flush=True)
+    audit_started=False
     try:
         for name in engine_files:atomic_replace_file(STAGE/name,root/name)
         config=json_read(root/'config.json');state=json_read(root/'state/bot_state.json')
@@ -435,15 +496,22 @@ def upgrade_bot(bot):
         atomic_json(root/'state/bot_state.json',state)
         instance_check(bot,NEW_VERSION,need_active=False)
         print('AUDIT START',bot,'GET only, no trading',flush=True)
-        env={k:v for k,v in os.environ.items() if k not in ('OKX_GRID_LIVE','OKX_GRID_PROBE','OKX_GRID_STATS')}
+        env={k:v for k,v in os.environ.items() if k not in ('OKX_GRID_LIVE','OKX_GRID_PROBE','OKX_GRID_STATS','OKX_GRID_ISOLATION_AUDIT','OKX_GRID_TERMINAL_ONLY')}
         env['OKX_GRID_AUDIT']='READ_ONLY'
+        if single_instance:env['OKX_GRID_ISOLATION_AUDIT']='1'
+        audit_started=True
         proc=subprocess.run([str(root/'.venv/bin/python'),'-u',str(root/'okx_bot.py')],
             cwd=root,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=180)
         print('\n'.join(proc.stdout.splitlines()[-28:]),flush=True)
-        if not audit_output_complete(proc.returncode, proc.stdout):
+        if not audit_output_complete(proc.returncode, proc.stdout,single_instance=single_instance):
             fail('READ-ONLY AUDIT did not fully finish; BOT REMAINS STOPPED')
         print('AUDIT PASS',bot,flush=True)
     except BaseException:
+        if single_instance and audit_started:
+            # GET-only audit can persist new exchange facts and fill evidence.
+            # Never restore an old state over those facts after an audit starts.
+            print('AUDIT FAILED; CANDIDATE AND CURRENT STATE RETAINED; SERVICE STOPPED; backup',dest,flush=True)
+            raise
         # Fail before any LIVE start: restore config, state and engine files.
         # No automatic restart, because exchange state must be independently checked.
         try:
@@ -496,7 +564,11 @@ def main():
                     help='Explicit currently installed engine identity; must have trusted manifest SHA256')
     ap.add_argument('--confirm-live-stop',action='store_true',
                     help='Acknowledge stop leaves exchange orders LIVE; required for bot')
+    ap.add_argument('--single-instance',action='store_true',
+                    help='Canary: no shared install; allow bounded attached TP reservation audit')
     args=ap.parse_args()
+    if args.single_instance and args.action not in ('preflight','bot'):
+        fail('Single-instance mode is only for preflight or bot')
     import re
     if not re.fullmatch(r'[a-z0-9-]{3,32}',args.bot):fail('Invalid bot name')
     if not re.fullmatch(r'[0-9a-f]{64}',args.sha256):fail('Invalid expected SHA256')
@@ -520,13 +592,19 @@ def main():
     fd=os.open(LOCK,os.O_CREAT|os.O_RDWR,0o600)
     try:
         fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
-        if args.action=='preflight':verify_staging()
+        if args.action=='preflight':
+            verify_staging()
+            if args.single_instance:
+                root,_,_=instance_check(args.bot,OLD_VERSION,need_active=True)
+                verify_single_instance_sources(root)
+                stop_safety_readonly(root,json_read(root/'state/bot_state.json'))
+                print('SINGLE INSTANCE PREFLIGHT PASS; NO SHARED WRITES')
         elif args.action=='shared':install_shared()
         elif args.action=='telegram':install_telegram()
         elif args.action=='bot':
             if not args.confirm_live_stop:
                 fail('Refuse to stop trading bot without --confirm-live-stop')
-            upgrade_bot(args.bot)
+            upgrade_bot(args.bot,single_instance=args.single_instance)
         else:
             _,_,kv=unit_check(args.bot,need_active=False)
             print(args.bot,kv.get('ActiveState'),'PID',kv.get('MainPID'),

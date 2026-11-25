@@ -44,7 +44,7 @@ class FundingManagerUI(unittest.TestCase):
     def test_positive_stale_incomplete_and_stopped(self):
         self.put('19.164214',complete=0,synced=int(self.now*1000)-192*3600000)
         text=self.render(bot_active=False)
-        self.assertIn('FUNDING: +19.164214, 192ч 00м 00с назад',text)
+        self.assertIn('FUNDING: +19.164214, 192ч 00м 00с назад · ⚠ Funding:',text)
         self.assertIn('ИТОГОВЫЙ PnL: +$39.16421400',text)
     def test_new_instance_does_not_inherit(self):
         self.put('99',created=self.created-100)
@@ -53,7 +53,7 @@ class FundingManagerUI(unittest.TestCase):
     def test_read_error_keeps_existing_total(self):
         with patch('okx_funding_view.load_funding',side_effect=sqlite3.OperationalError('busy')):
             text=self.render()
-        self.assertIn('FUNDING: ошибка чтения',text); self.assertIn('ИТОГОВЫЙ PnL: +$20.00000000',text)
+        self.assertIn('FUNDING: +0.000000, ещё не обновлялся · ⚠ Funding:',text); self.assertIn('ИТОГОВЫЙ PnL: +$20.00000000',text)
     def test_existing_reconciliation_not_bypassed(self):
         self.put('5'); self.payload['total_pnl']='21'
         with self.assertRaises(ValueError): self.render()

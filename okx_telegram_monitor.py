@@ -26,7 +26,7 @@ from urllib.request import Request, urlopen, getproxies
 import http.client
 import ssl
 import html
-from okx_telegram_views import status_one, latency_report, read_json, LINE, verified_snapshot_bid, number
+from okx_telegram_views import status_one, latency_report, read_json, LINE, verified_snapshot_bid, snapshot_anchor, number
 from okx_telegram_events import (one, event_alert, market_event, market_process, zero_buy_scan, observer_fault_scan, gate_alert_scan)
 from okx_telegram_followups import partial_scan, panic_scan
 from okx_telegram_delivery import persist as durable_save, drain as alert_drain
@@ -456,48 +456,6 @@ def _account_number(value):
     return number if number.is_finite() else None
 
 
-def _account_total_pnl(active):
-    from decimal import Decimal
-    now=time.time()
-    total=Decimal(0)
-    for _name,root in active:
-        cfg=read_json(root/'config.json')
-        stats=read_json(root/'state/stats.json')
-        perf=(stats.get('performance') or stats.get('performance_v0724')) if isinstance(stats,dict) else None
-        if (not isinstance(cfg,dict) or not isinstance(stats,dict)
-            or stats.get('complete') is not True or
-                stats.get('instrument')!=cfg.get('instrument') or
-                not isinstance(perf,dict) or perf.get('schema')!=1):
-            return None
-        try:
-            generated=float(stats['generated_at_unix'])
-        except (TypeError,ValueError,KeyError,OverflowError):
-            return None
-        if not (0<=now-generated<=900):
-            return None
-        values={k: _account_number(perf.get(k)) for k in (
-            'total_pnl','grid_profit','limit_tp_net','market_tp_net',
-            'partial_exit_net','floating_pnl','realized_open_components')}
-        if any(v is None for v in values.values()):
-            return None
-        if (abs(values['limit_tp_net']+values['market_tp_net']-values['grid_profit'])>Decimal('0.00000001')
-            or abs(values['grid_profit']+values['partial_exit_net']+
-                   values['floating_pnl']+values['realized_open_components']-
-                   values['total_pnl'])>Decimal('0.00000001')):
-            return None
-        anchor=read_json(root/'state/stats_financial_anchor.json')
-        if not isinstance(anchor,dict):
-            return None
-        anchor_at=_account_number(anchor.get('at'))
-        anchor_total=_account_number(anchor.get('total_pnl_usdt'))
-        if (anchor.get('schema')!=1 or anchor.get('instrument')!=cfg.get('instrument')
-            or anchor_at is None or abs(anchor_at-_account_number(generated))>Decimal('0.5')
-            or anchor_total!=values['total_pnl']):
-            return None
-        total+=values['total_pnl']
-    return total
-
-
 _ACCOUNT_READER = Path('/root/okx/okx_telegram_account_balance_getonly.py')
 _ACCOUNT_READER_SHA = '1556838774bcaa0be9473cb67b2a9c374fe99dbcb46a488c739de55172606754'
 _ACCOUNT_READ_CACHE = {'mono':0.0,'value':None}
@@ -557,39 +515,31 @@ def _display_money(value, *, signed=False, symbol=True):
 
 
 def _status_funding_amount(cfg):
-    """Reuse the manager read API. Missing/unreadable funding is not zero."""
-    import sqlite3
+    """Shared manager/Telegram display-only funding policy."""
     try:
-        # The existing monitor already searches its own and shared directories.
-        # Collector-only installations may expose the same reader here instead.
         funding_dir='/opt/okx-funding'
         if funding_dir not in sys.path:
             sys.path.append(funding_dir)
-        from okx_funding_view import load_funding
-        funding=load_funding(Path('/srv/okx-funding/funding.sqlite'),
-                             cfg['instrument'],cfg['created_at'],terminal=False)
-        return funding.amount if funding is not None else None
-    except (OSError,sqlite3.Error,ValueError,TypeError,KeyError,ArithmeticError,ImportError):
+        from okx_funding_view import display_funding
+        return display_funding(Path('/srv/okx-funding/funding.sqlite'),
+                               cfg.get('instrument'),cfg.get('created_at'))
+    except (OSError,ValueError,TypeError,KeyError,ArithmeticError,ImportError):
         return None
 
 
 def _grid_formula(net, grid, funding):
     """Three terms; fold all non-grid engine PnL into display-only FLOAT.
     Preserve the visible cent identity using the rounded residual for FLOAT.
-    Missing funding remains unknown, while verified grid/float stay visible.
+    Missing funding is estimated zero; never invalidates verified trading PnL.
     """
     from decimal import localcontext
     with localcontext() as ctx:
         ctx.prec=400
         g=grid.quantize(_CENT, rounding=ROUND_HALF_UP)
-        if funding is None:
-            n=None
-            h=None
-            f=(net-grid).quantize(_CENT, rounding=ROUND_HALF_UP)
-        else:
-            n=(net+funding).quantize(_CENT, rounding=ROUND_HALF_UP)
-            h=funding.quantize(_CENT, rounding=ROUND_HALF_UP)
-            f=n-g-h
+        funding=Decimal(0) if funding is None else funding
+        n=(net+funding).quantize(_CENT, rounding=ROUND_HALF_UP)
+        h=funding.quantize(_CENT, rounding=ROUND_HALF_UP)
+        f=n-g-h
         first=('−' if g<0 else '')+f'{abs(g):,.2f}'
         def signed(v):
             if v is None:
@@ -629,8 +579,7 @@ def _precise_bid(value, cfg):
     tick=number(cfg.get('tick_size'))
     if tick is None or tick<=0 or not value.is_finite() or value<=0:
         return 'н/д'
-    raw=str(cfg.get('tick_size')).lower()
-    digits=max(0,-Decimal(raw).as_tuple().exponent)
+    digits=max(0,-tick.normalize().as_tuple().exponent)
     if digits>18:
         return 'н/д'
     with localcontext() as ctx:
@@ -656,7 +605,8 @@ def _compact_bot_row(name,root,now):
     generated=_account_number(stats.get('generated_at_unix'))
     if generated is None or not 0<=Decimal(str(now))-generated<=Decimal('900'):
         raise ValueError('stats stale')
-    bid=verified_snapshot_bid(root,cfg,stats)
+    anchor=snapshot_anchor(root,stats)
+    bid=verified_snapshot_bid(root,cfg,stats,anchor=anchor)
     if bid is None:
         raise ValueError('bid/financial anchor not confirmed')
     values={k:_account_number(perf.get(k)) for k in (
@@ -669,7 +619,6 @@ def _compact_bot_row(name,root,now):
         or abs(values['total_pnl']-values['grid_profit']-values['partial_exit_net']-
                values['floating_pnl']-values['realized_open_components'])>Decimal('0.00000001')):
         raise ValueError('financial identity mismatch')
-    anchor=read_json(root/'state/stats_financial_anchor.json')
     if (anchor.get('schema')!=1 or anchor.get('instrument')!=cfg.get('instrument')
         or abs((_account_number(anchor.get('at')) or Decimal('-999'))-generated)>Decimal('0.5')
         or _account_number(anchor.get('total_pnl_usdt'))!=values['total_pnl']):
@@ -691,10 +640,11 @@ def _compact_bot_row(name,root,now):
         raise ValueError('invalid coin')
     from decimal import localcontext
     net=values['total_pnl'];grid=values['grid_profit']
-    funding=_status_funding_amount(cfg)
+    funding_display=_status_funding_amount(cfg)
+    funding=Decimal(0) if funding_display is None else funding_display.amount
     with localcontext() as ctx:
         ctx.prec=400
-        adjusted=net+funding if funding is not None else None
+        adjusted=net+funding
     left,expr=_grid_formula(net,grid,funding)
     volume=_account_number(perf.get('volume'))
     if volume is None or volume<0:
@@ -705,7 +655,9 @@ def _compact_bot_row(name,root,now):
         'left':left,'expr':expr,'sort':grid,'stamp':float(generated),'net':adjusted,
         'position':_precise_quantity(values['open_base'],cfg)+' '+coin,
         'grid':f'{occupied}/{cap}',
-        'bid':_precise_bid(bid,cfg),'volume':volume_text}
+        'bid':_precise_bid(bid,cfg),'volume':volume_text,
+        'funding_estimated':funding_display is None or funding_display.estimated,
+        'funding_warning':funding_display is not None and funding_display.warning}
 
 
 def compact_status_report():
@@ -741,6 +693,12 @@ def compact_status_report():
         second=f"{entry['bid']} {entry['position']} {entry['grid']} {entry['volume']}"
         lines.extend((entry['marker']+' <code>'+html.escape(first)+'</code>',
                       '<code>'+html.escape(second)+'</code>',''))
+    estimated=[e['name'] for e in entries if e.get('funding_estimated')]
+    warnings=[e['name'] for e in entries if e.get('funding_warning')]
+    if estimated:
+        lines.extend(('Funding: оценка (последние данные или 0): '+html.escape(', '.join(estimated)),''))
+    if warnings:
+        lines.extend(('⚠️ Funding: нет полной актуальной сверки >8ч: '+html.escape(', '.join(warnings)),''))
     for name,reason in failed:
         lines.extend(('⚪ <code>'+html.escape(name+' — н/д ('+reason+')')+'</code>',''))
     # Same verified snapshots and funding amounts as the individual rows.
@@ -1023,7 +981,7 @@ def _dispatch_command(api, msg):
             send_report(api,status_report(parts[1] if len(parts)==2 else None,
                                           include_account=True))
     elif cmd=='/help':
-        api.send('📊 /status — деньги и торговая статистика, две строки на бот'
+        api.send('📊 /status — деньги и торговая статистика, две строки на бот; BID — до 5 значащих цифр без округления'
                  '\n📋 /full — полный отчёт и TOTAL PnL'
                  '\n⚡ /latency — последние 60 минут'
                  '\n/help — список команд')

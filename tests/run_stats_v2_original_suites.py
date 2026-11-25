@@ -44,6 +44,7 @@ def main():
         for f in ROOT.glob('okx_stats_v2_*.py'):
             shutil.copyfile(f,release/f.name)
         shutil.copyfile(ROOT/'okx_bot.py',production/'okx_bot.py')
+        shutil.copyfile(HERE/'fixtures/okx_bot_v0780_baseline.py.gz',production/'okx_bot_v0780_baseline.py.gz')
         for group,loc in [('stats_v2_release_work',release),('stats_v2_prod_candidate',production)]:
             test_src=SOURCES/group/'tests'
             require(test_src.is_dir(),'MISSING_IMPORTED_TESTS '+group)

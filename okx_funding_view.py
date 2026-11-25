@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from decimal import Decimal, localcontext
 from pathlib import Path
 import re
+import sqlite3
+from collections import OrderedDict
 import time
 from typing import Optional
 from okx_funding_ledger import read_snapshot, integer_ms, require, creation_ms
@@ -15,6 +17,7 @@ class FundingValue:
     last_bill_ms: Optional[int]
     synced_ms: int
     complete: bool  # internal diagnostic; never suppress known amount in UI
+    last_complete_ms: Optional[int] = None
 
     def age_text(self, now_ms=None):
         now_ms = int(time.time()*1000) if now_ms is None else integer_ms(now_ms)
@@ -62,9 +65,86 @@ def load_funding(path, instrument, created_at, *, terminal):
     raw = row['amount']
     require(isinstance(raw, str) and len(raw) <= 320 and
             re.fullmatch(r'-?[0-9]+(?:\.[0-9]+)?', raw) is not None, 'INVALID_SNAPSHOT_AMOUNT')
-    return FundingValue(instrument, created, Decimal(raw), last, synced, bool(row['complete']))
+    last_complete = row.get('last_complete_ms')
+    require(synced >= created, 'INVALID_SYNC_TIME')
+    require(last_complete is None or created <= integer_ms(last_complete) <= synced, 'INVALID_COMPLETE_TIME')
+    return FundingValue(instrument, created, Decimal(raw), last, synced, bool(row['complete']), last_complete)
 
 
 def initial_line():
     """Display placeholder only, not a FundingValue or confirmed monetary total."""
     return 'FUNDING: +0.000000, ещё не обновлялся'
+
+
+# Read-only, bounded, process-local cache. Identity includes DB and creation time;
+# never carry a previous instance's funding into a new bot on the same instrument.
+_LAST_GOOD = OrderedDict()
+WARNING_MS = 8 * 3600 * 1000
+
+@dataclass(frozen=True)
+class FundingDisplay:
+    amount: Decimal
+    snapshot: Optional[FundingValue]
+    warning: bool
+    fallback: bool
+
+    @property
+    def estimated(self):
+        return self.fallback or self.snapshot is None or not self.snapshot.complete or self.warning
+
+    def note(self):
+        if self.warning:
+            return '⚠ Funding: нет полной актуальной сверки >8ч'
+        if self.snapshot is None:
+            return 'пока нет данных'
+        if self.fallback:
+            return 'последний доступный снимок'
+        if not self.snapshot.complete:
+            return 'неполная история'
+        return ''
+
+    def manager_line(self, now_ms):
+        if self.snapshot is None:
+            line = initial_line()
+        else:
+            line = self.snapshot.line(now_ms)
+        note = self.note()
+        return line + (' · '+note if note and (self.snapshot is not None or self.warning) else '')
+
+
+def display_funding(path, instrument, created_at, *, now_ms=None):
+    """One policy for manager and Telegram, never a source of trading facts.
+
+    Use last persisted snapshot, including incomplete/stale, or last validated
+    in-process snapshot on read failure; otherwise use an explicitly estimated 0.
+    Legacy incomplete rows without a completeness watermark use creation time.
+    """
+    now = int(time.time()*1000) if now_ms is None else integer_ms(now_ms)
+    try:
+        created = creation_ms(created_at)
+        require(created <= now, 'FUTURE_CREATED_AT')
+        key = (str(Path(path).absolute()),instrument,created)
+        require(isinstance(instrument,str), 'INVALID_INSTRUMENT')
+    except (ValueError,TypeError,ArithmeticError,OSError):
+        return FundingDisplay(Decimal(0),None,False,True)
+    fallback = False
+    try:
+        snap = load_funding(path,instrument,created_at,terminal=False)
+        if snap is not None:
+            require(snap.synced_ms <= now, 'FUTURE_SYNC_TIME')
+            _LAST_GOOD[key] = snap
+            _LAST_GOOD.move_to_end(key)
+            while len(_LAST_GOOD)>256:
+                _LAST_GOOD.popitem(last=False)
+        else:
+            fallback = True
+    except (OSError,sqlite3.Error,ValueError,TypeError,KeyError,ArithmeticError):
+        snap = None
+        fallback = True
+    if snap is None:
+        snap = _LAST_GOOD.get(key)
+        if snap is not None and snap.synced_ms > now:
+            snap = None
+    last_complete = (snap.synced_ms if snap.complete else snap.last_complete_ms) if snap else None
+    return FundingDisplay(snap.amount if snap else Decimal(0), snap,
+                          now-(last_complete if last_complete is not None else created)>WARNING_MS, fallback)

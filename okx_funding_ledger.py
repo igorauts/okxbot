@@ -256,6 +256,15 @@ def apply_complete_windows(path, windows, inventory, synced_ms, *, reconciled_ms
                     total += money(amount)
                     last = ts
                 complete = fully_covered(intervals, created, covered_until) and not db.execute('SELECT 1 FROM discrepancy WHERE inst_id=? AND ts_ms>=? LIMIT 1',(inst,created)).fetchone()
+                # Track last complete history verification per identity without a schema migration.
+                # Never reset the clock merely because an incomplete snapshot is refreshed.
+                key = f'complete_at:{inst}:{created}'
+                if complete:
+                    db.execute('INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', (key,str(synced_ms)))
+                else:
+                    old_complete = db.execute('SELECT synced_ms FROM snapshot WHERE inst_id=? AND created_ms=? AND complete=1',(inst,created)).fetchone()
+                    if old_complete is not None:
+                        db.execute('INSERT OR IGNORE INTO meta VALUES (?,?)',(key,str(old_complete[0])))
                 published.append((inst, created, canonical(total), last, synced_ms, int(complete)))
         # Preserve blocked instruments' last good snapshot (identity checked by reader).
         # Drop retired/removed identities, never modify any bot or archive file.
@@ -263,6 +272,10 @@ def apply_complete_windows(path, windows, inventory, synced_ms, *, reconciled_ms
             if inst not in blocked:
                 db.execute('DELETE FROM snapshot WHERE inst_id=?',(inst,))
         db.executemany('INSERT INTO snapshot VALUES (?,?,?,?,?,?)', published)
+        live_keys = {f'complete_at:{inst}:{created}' for inst,created in bots.items()}
+        for (key,) in db.execute("SELECT key FROM meta WHERE key LIKE 'complete_at:%'").fetchall():
+            if key not in live_keys:
+                db.execute('DELETE FROM meta WHERE key=?',(key,))
         db.execute("INSERT INTO meta VALUES ('synced_ms',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(synced_ms),))
         db.execute("INSERT INTO meta VALUES ('covered_until_ms',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(covered_until),))
         if reconciled_ms is not None:
@@ -275,7 +288,12 @@ def read_snapshot(path, inst, created_at):
     with closing(sqlite3.connect(Path(path).resolve().as_uri()+'?mode=ro', uri=True, timeout=0.1)) as db:
         db.execute('PRAGMA query_only=ON')
         require(db.execute('PRAGMA user_version').fetchone()[0] == SCHEMA, 'UNSUPPORTED_SCHEMA')
+        # Same read transaction pins the snapshot and completeness watermark.
+        db.execute('BEGIN')
         row = db.execute('SELECT amount,last_bill_ms,synced_ms,complete FROM snapshot WHERE inst_id=? AND created_ms=?', (inst,created)).fetchone()
+        mark = db.execute('SELECT value FROM meta WHERE key=?',(f'complete_at:{inst}:{created}',)).fetchone()
     if row is None:
         return None
-    return dict(zip(('amount','last_bill_ms','synced_ms','complete'), row))
+    result = dict(zip(('amount','last_bill_ms','synced_ms','complete'), row))
+    result['last_complete_ms'] = row[2] if row[3] else (int(mark[0]) if mark is not None else None)
+    return result

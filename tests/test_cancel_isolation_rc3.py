@@ -100,6 +100,6 @@ class Cases(unittest.TestCase):
  def test_rest_in_flight_blocks_strategy_even_if_live(self):
   s=SOURCE.read_text()
   self.assertIn('if elective_cancel_transport.busy:\n                all_resolved=False',s)
-  self.assertLess(s.index('if elective_cancel_transport.busy:\n                all_resolved=False'),s.index('if not all_resolved:\n                buy_cancel_count'))
+  self.assertLess(s.index('if elective_cancel_transport.busy:\n                all_resolved=False'),s.index('if not all_resolved and not isolated_run:\n                buy_cancel_count'))
 
 if __name__=='__main__':unittest.main(verbosity=2)

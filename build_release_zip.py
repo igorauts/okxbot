@@ -18,7 +18,7 @@ EXECUTABLES = ('okxbot.py','okx_live_upgrade.py','rollout_preflight.py',
 
 
 def build(out=None):
-    syntax = ast.parse((SOURCE/'okx_version.py').read_text(encoding='utf-8'))
+    syntax = ast.parse((SOURCE/'okx_manager_version.py').read_text(encoding='utf-8'))
     metadata = {}
     for stmt in syntax.body:
         if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Constant):

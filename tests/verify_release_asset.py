@@ -16,12 +16,35 @@ def allowed_package_member(name):
     if name.startswith('.') and name not in ('.gitignore','.env.example'):
         return False
     if len(parts)==1:return True
-    if len(parts)==2:return parts[0] in ('tests','historical')
+    if len(parts)==2 and parts[0] in ('tests','historical'):return True
     if len(parts)==3 and parts[:2]==('deploy','reader'):
         return True
     # Imported, BYTE-PINNED offline regression fixtures only. These are not
     # deployed into a trading-bot runtime; reject arbitrary nested ZIP paths.
-    if parts==('tests','fixtures','okx_bot_original_full_v0760.py.gz'):
+    if name in (
+        'deploy/reader_pacing/okx_reader_230_plus1_readonly_audit.py',
+        'deploy/reader_pacing/okx_reader_pacing_230_plus1_install.py',
+        'deploy/resources/README.md',
+        'deploy/resources/collector.py',
+        'deploy/resources/http429_audit.py',
+        'funding/README.md',
+        'funding/benchmark_funding.py',
+        'funding/f1_bills_fixture.json',
+        'funding/okx_funding_backup.py',
+        'funding/okx_funding_collector.py',
+        'funding/okx_funding_ledger.py',
+        'funding/okx_funding_view.py',
+        'funding/systemd/okx-funding-collector.service',
+        'funding/systemd/okx-funding-collector.timer',
+        'funding/systemd/paths.conf.example',
+        'funding/test_funding_collector.py',
+        'funding/test_funding_f6.py',
+        'funding/test_funding_f61.py',
+        'funding/test_funding_ledger.py',
+        'funding/test_funding_view_backup.py',
+    ):return True
+    if parts in (('tests','fixtures','okx_bot_original_full_v0760.py.gz'),
+                 ('tests','fixtures','okx_bot_v0780_baseline.py.gz')):
         return True
     if (len(parts)==5 and parts[:2]==('tests','stats_v2_original')
         and parts[2] in ('stats_v2_release_work','stats_v2_prod_candidate')
@@ -81,9 +104,44 @@ def verify(zip_path):
         actual=hashlib.sha256(z.read('okx_bot.py')).hexdigest()
         expected=manifest['engines'][engine]['sha256']
         if actual!=expected:raise ValueError('Engine checksum mismatch')
+        # Check source-bundle identity and every pin against the actual ZIP,
+        # not merely the engine digest. This also gates maintenance releases.
+        manager_fields={}
+        for node in ast.parse(z.read('okx_manager_version.py').decode()).body:
+            if isinstance(node,ast.Assign) and isinstance(node.value,ast.Constant):
+                for target in node.targets:
+                    if isinstance(target,ast.Name): manager_fields[target.id]=node.value.value
+        manager_release=manager_fields.get('RELEASE_VERSION')
+        manager_kind=manager_fields.get('RELEASE_KIND')
+        if not isinstance(manager_release,str) or not re.fullmatch(r'\d+\.\d+\.\d+',manager_release):
+            raise ValueError('Invalid manager release identity')
+        if not ((manager_kind=='engine' and manager_release==engine) or
+                (manager_kind=='maintenance' and tuple(map(int,manager_release.split('.')))>tuple(map(int,engine.split('.'))))):
+            raise ValueError('Invalid manager release mode')
+        bundle=json.loads(z.read('okx_source_bundle.json'))
+        entry=manifest['engines'][engine]
+        deps=entry['dependencies']
+        required=set(deps)|{'okx_bot.py','okxbot.py','okx_setup.py','okx_version.py',
+                          'okx_manager_version.py','okx_source_attestation.py','engine_manifest.json','requirements.txt'}
+        if (bundle.get('schema')!=1 or bundle.get('release_version')!=manager_release or
+            bundle.get('engine_version')!=engine or bundle.get('state_schema')!=fields['STATE_SCHEMA'] or
+            bundle.get('engine_dependencies')!=deps or set(bundle.get('files',{}))!=required):
+            raise ValueError('Source bundle identity/file set mismatch')
+        for name,digest in bundle['files'].items():
+            if name not in names or hashlib.sha256(z.read(name)).hexdigest()!=digest:
+                raise ValueError('Source bundle checksum mismatch: '+name)
+        if entry.get('dependency_sha256') and any(entry['dependency_sha256'].get(name)!=bundle['files'][name] for name in deps):
+            raise ValueError('Engine dependency pins disagree with source bundle')
+        module_pins=manifest.get('source_modules_sha256')
+        root_modules={n for n in names if '/' not in n and n.endswith('.py')}
+        if not isinstance(module_pins,dict) or set(module_pins)!=root_modules:
+            raise ValueError('Source package module inventory mismatch')
+        for name,digest in module_pins.items():
+            if hashlib.sha256(z.read(name)).hexdigest()!=digest:
+                raise ValueError('Source package module checksum mismatch: '+name)
         if b'def audit_output_complete(' not in z.read('okx_live_upgrade.py'):
             raise ValueError('Missing financial audit completion guard')
-    return release, engine, actual
+    return manager_release, engine, actual
 
 if __name__=='__main__':
     if len(sys.argv)!=2:raise SystemExit('Usage: python3 tests/verify_release_asset.py FILE.zip')

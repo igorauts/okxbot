@@ -115,9 +115,7 @@ class Maintenance0729(unittest.TestCase):
                 (root/'state'/'stats_financial_anchor.json').write_text(json.dumps({'schema':1,
                     'instrument':inst,'at':str(generated),'total_pnl_usdt':str(dec)}))
                 pairs.append((name,root))
-            total=monitor._account_total_pnl(pairs)
-            self.assertEqual(total,Decimal('-2.5749'))
-            line=monitor._account_total_line(pairs)
+            line=monitor._account_total_line(pairs,rendered_totals=[Decimal("1.2511"),Decimal("-3.8260")])
             self.assertEqual(line,'<b>🟥 ACCOUNT TOTAL PnL: −$2.57 🟥</b>')
             dispatched=[]
             class FakeApi:
@@ -125,7 +123,7 @@ class Maintenance0729(unittest.TestCase):
                     dispatched.append((message,parse_mode))
             with patch.object(monitor,'refresh_bots'),\
                  patch.object(monitor,'_active_service',return_value=True),\
-                 patch.object(monitor,'mode_and_stats',side_effect=lambda n:'STAT '+n),\
+                 patch.object(monitor,'mode_and_stats',side_effect=lambda n, total_sink=None: (total_sink.append(dict(b1=Decimal('1.2511'),b2=Decimal('-3.8260'))[n]) or 'STAT '+n)),\
                  patch.object(monitor,'BOT_DIRS',{n:str(r) for n,r in pairs}):
                 monitor.send_report(FakeApi(),monitor.status_report(include_account=True))
             self.assertTrue(dispatched)
@@ -133,7 +131,7 @@ class Maintenance0729(unittest.TestCase):
             self.assertEqual(dispatched[-1][1],'HTML')
             # Missing input must not swallow /status.
             (pairs[0][1]/'state'/'stats_financial_anchor.json').unlink()
-            self.assertIn('н/д',monitor._account_total_line(pairs))
+            self.assertIn('н/д',monitor._account_total_line(pairs,rendered_totals=[None,Decimal('-3.8260')]))
 
     def test_uptime_process_separate(self):
         with tempfile.TemporaryDirectory() as tmp:
