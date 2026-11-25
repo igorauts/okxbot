@@ -435,12 +435,12 @@ def _historical_max_position(root, instrument):
         return 'н/д'
 
 
-def mode_and_stats(name):
+def mode_and_stats(name, *, total_sink=None):
     root=Path(BOT_DIRS[name])
     stats=json.loads((root/'state/stats.json').read_text()) if (root/'state/stats.json').is_file() else {}
     values=_report_values(stats.get('report',''))
     age=_age_label(_launch_epoch(root,values))
-    return status_one(name,root,age)
+    return status_one(name,root,age,funding_loader=_status_funding_amount,total_sink=total_sink)
 
 # Account summary is a read-only sum of verified bot snapshots.
 
@@ -556,22 +556,56 @@ def _display_money(value, *, signed=False, symbol=True):
     return prefix+('$' if symbol else '')+f'{abs(q):,.2f}'
 
 
-def _grid_formula(net, grid, floating):
-    """Keep the equation true at displayed cent precision.
+def _status_funding_amount(cfg):
+    """Reuse the manager read API. Missing/unreadable funding is not zero."""
+    import sqlite3
+    try:
+        # The existing monitor already searches its own and shared directories.
+        # Collector-only installations may expose the same reader here instead.
+        funding_dir='/opt/okx-funding'
+        if funding_dir not in sys.path:
+            sys.path.append(funding_dir)
+        from okx_funding_view import load_funding
+        funding=load_funding(Path('/srv/okx-funding/funding.sqlite'),
+                             cfg['instrument'],cfg['created_at'],terminal=False)
+        return funding.amount if funding is not None else None
+    except (OSError,sqlite3.Error,ValueError,TypeError,KeyError,ArithmeticError,ImportError):
+        return None
 
-    Other realized components (open-cycle fees, partial MARKET exits) are
-    not silently called floating. Add an explicit third term when needed.
+
+def _grid_formula(net, grid, funding):
+    """Three terms; fold all non-grid engine PnL into display-only FLOAT.
+    Preserve the visible cent identity using the rounded residual for FLOAT.
+    Missing funding remains unknown, while verified grid/float stay visible.
     """
-    n=net.quantize(_CENT, rounding=ROUND_HALF_UP)
-    g=grid.quantize(_CENT, rounding=ROUND_HALF_UP)
-    f=floating.quantize(_CENT, rounding=ROUND_HALF_UP)
-    extra=n-g-f
-    first=('−' if g<0 else '')+f'{abs(g):,.2f}'
-    second=('−' if f<0 else '+')+f'{abs(f):,.2f}'
-    third=''
-    if extra:
-        third=('−' if extra<0 else '+')+f'{abs(extra):,.2f}'
-    return _display_money(n,signed=True), first+second+third
+    from decimal import localcontext
+    with localcontext() as ctx:
+        ctx.prec=400
+        g=grid.quantize(_CENT, rounding=ROUND_HALF_UP)
+        if funding is None:
+            n=None
+            h=None
+            f=(net-grid).quantize(_CENT, rounding=ROUND_HALF_UP)
+        else:
+            n=(net+funding).quantize(_CENT, rounding=ROUND_HALF_UP)
+            h=funding.quantize(_CENT, rounding=ROUND_HALF_UP)
+            f=n-g-h
+        first=('−' if g<0 else '')+f'{abs(g):,.2f}'
+        def signed(v):
+            if v is None:
+                return '+н/д'
+            return ('−' if v<0 else '+')+f'{abs(v):,.2f}'
+        return ('н/д' if n is None else signed(n)), ' '.join((first,signed(h),signed(f)))
+
+
+def _status_entry_total(entries):
+    """Sum the exact values already verified and rendered in this report."""
+    from decimal import localcontext
+    if not entries or any(e['net'] is None for e in entries):
+        return None
+    with localcontext() as ctx:
+        ctx.prec=400
+        return sum((e['net'] for e in entries),Decimal(0))
 
 
 def _precise_quantity(value, cfg):
@@ -590,15 +624,20 @@ def _precise_quantity(value, cfg):
 
 
 def _precise_bid(value, cfg):
+    """Display-only BID: at most five significant digits, truncate, no exponent."""
+    from decimal import ROUND_DOWN, localcontext
     tick=number(cfg.get('tick_size'))
-    if tick is None or tick<=0:
+    if tick is None or tick<=0 or not value.is_finite() or value<=0:
         return 'н/д'
-    # Use original exchange precision, including trailing zeros in tickSz.
     raw=str(cfg.get('tick_size')).lower()
     digits=max(0,-Decimal(raw).as_tuple().exponent)
     if digits>18:
         return 'н/д'
-    return f'{value:,.{digits}f}'
+    with localcontext() as ctx:
+        ctx.prec=max(28,len(value.as_tuple().digits)+5)
+        shown=value.quantize(Decimal('1').scaleb(value.adjusted()-4),rounding=ROUND_DOWN)
+    text=f'{shown:,f}'
+    return text.rstrip('0').rstrip('.') if '.' in text else text
 
 
 def _compact_bot_row(name,root,now):
@@ -647,21 +686,30 @@ def _compact_bot_row(name,root,now):
     occupied=sum(c['state'] not in _TERMINAL_GRID_STATES for c in cycles.values())
     if occupied>cap:
         raise ValueError('grid over capacity')
-    pct=(Decimal(occupied)*100/Decimal(cap)).quantize(Decimal('1'),rounding=ROUND_HALF_UP)
     coin=str(cfg.get('instrument') or '').split('-')[0]
     if not re.fullmatch(r'[A-Z0-9]{2,20}',coin):
         raise ValueError('invalid coin')
-    net=values['total_pnl'];grid=values['grid_profit'];floating=values['floating_pnl']
-    left,expr=_grid_formula(net,grid,floating)
-    return {'name':name,'marker':'🟢' if net>=0 else '🔴',
-        'left':left,'expr':expr,'sort':grid,'stamp':float(generated),
+    from decimal import localcontext
+    net=values['total_pnl'];grid=values['grid_profit']
+    funding=_status_funding_amount(cfg)
+    with localcontext() as ctx:
+        ctx.prec=400
+        adjusted=net+funding if funding is not None else None
+    left,expr=_grid_formula(net,grid,funding)
+    volume=_account_number(perf.get('volume'))
+    if volume is None or volume<0:
+        volume_text='н/д'
+    else:
+        volume_text=f"{volume.quantize(Decimal('1'),rounding=ROUND_HALF_UP):,f}"
+    return {'name':name,'marker':'⚪' if adjusted is None else ('🟢' if adjusted>=0 else '🔴'),
+        'left':left,'expr':expr,'sort':grid,'stamp':float(generated),'net':adjusted,
         'position':_precise_quantity(values['open_base'],cfg)+' '+coin,
-        'grid':f'{occupied}/{cap} ({pct}%)',
-        'bid':_precise_bid(bid,cfg)}
+        'grid':f'{occupied}/{cap}',
+        'bid':_precise_bid(bid,cfg),'volume':volume_text}
 
 
 def compact_status_report():
-    """One physical message, one logical row per active bot, no unverified $0."""
+    """One physical message, two compact lines per active bot, no unverified $0."""
     refresh_bots(force=True)
     entries=[];failed=[];active=[]
     now=time.time()
@@ -687,21 +735,16 @@ def compact_status_report():
            if entries and not failed else 'н/д')
     header=f'<b>Активных ботов: {len(active)}/{total} · {stamp} UTC</b>'
     entries.sort(key=lambda e:(-e['sort'],e['name']))
-    leftwidth=max((len(e['left']) for e in entries),default=0)
-    exprwidth=max((len(e['expr']) for e in entries),default=0)
-    poswidth=max((len(e['position']) for e in entries),default=0)
-    gridwidth=max((len(e['grid']) for e in entries),default=0)
-    lines=[header]
+    lines=[header,'']
     for entry in entries:
-        # The '=' and all subsequent column starts align in monospace.
-        row=(f"{entry['left']:>{leftwidth}}={entry['expr']:<{exprwidth}}  "
-             f"{entry['position']:<{poswidth}}  {entry['grid']:<{gridwidth}}  {entry['bid']}")
-        lines.append(entry['marker']+' <code>'+html.escape(row)+'</code>')
+        first=f"{entry['left']} = {entry['expr']}"
+        second=f"{entry['bid']} {entry['position']} {entry['grid']} {entry['volume']}"
+        lines.extend((entry['marker']+' <code>'+html.escape(first)+'</code>',
+                      '<code>'+html.escape(second)+'</code>',''))
     for name,reason in failed:
-        lines.append('⚪ <code>'+html.escape(name+' — н/д ('+reason+')')+'</code>')
-    lines.append('')
-    # Total PnL is verified bot sum; NOT account equity or OKX balance.
-    acc=_account_total_pnl(active) if not failed else None
+        lines.extend(('⚪ <code>'+html.escape(name+' — н/д ('+reason+')')+'</code>',''))
+    # Same verified snapshots and funding amounts as the individual rows.
+    acc=_status_entry_total(entries) if not failed and len(entries)==len(active) else None
     if acc is None:
         lines.append('<b>⬜ TOTAL PnL: н/д</b>')
     else:
@@ -721,11 +764,15 @@ def compact_status_report():
     return text
 
 
-def _account_total_line(active):
-    # An account aggregation fault must not suppress the complete /status.
+def _account_total_line(active, *, rendered_totals):
+    # Sum the very same verified values rendered by /full; no second read.
     try:
-        total=_account_total_pnl(active)
-    except Exception:
+        from decimal import localcontext
+        with localcontext() as ctx:
+            ctx.prec=400
+            total=(sum(rendered_totals,Decimal(0)) if rendered_totals and
+                   len(rendered_totals)==len(active) and all(x is not None for x in rendered_totals) else None)
+    except (ArithmeticError,TypeError):
         total=None
     if total is None:
         return '<b>⬜ ACCOUNT TOTAL PnL: н/д (нет полной свежей сверки)</b>'
@@ -744,18 +791,19 @@ def status_report(requested=None, *, include_account=False):
         return 'Бот '+html.escape(str(requested))+' не найден.'
     out=[]
     active=[]
+    rendered_totals=[]
     for name in BOT_DIRS:
         if not _active_service(name): continue
         root=Path(BOT_DIRS[name])
         if (root/'state/final_stats.json').exists(): continue
         active.append((name,root))
-        try: out.append(mode_and_stats(name))
+        try: out.append(mode_and_stats(name,total_sink=rendered_totals))
         except (OSError,ValueError,KeyError,TypeError):
             out.append('<b>'+html.escape(name)+'</b>\n⚠️ Статистика недоступна')
     if not out:
         return 'Нет активных ботов.'
     if include_account:
-        out[-1] = out[-1]+'\n\n'+_account_total_line(active)
+        out[-1] = out[-1]+'\n\n'+_account_total_line(active,rendered_totals=rendered_totals)
     return ('\n'+LINE+'\n').join(out)
 
 def send_report(api,report):
@@ -938,7 +986,7 @@ def _latency_console_start(api, minutes):
 
 
 _TELEGRAM_COMMANDS = (
-    {'command':'status','description':'Кратко: PnL, позиция, сетка, BID'},
+    {'command':'status','description':'Кратко: PnL, позиция, сетка, BID, объём'},
     {'command':'full','description':'Подробная статистика и общий PnL'},
     {'command':'latency','description':'Скорость торговли за 60 минут'},
     {'command':'help','description':'Список команд'},
@@ -975,7 +1023,7 @@ def _dispatch_command(api, msg):
             send_report(api,status_report(parts[1] if len(parts)==2 else None,
                                           include_account=True))
     elif cmd=='/help':
-        api.send('📊 /status — деньги и позиции одной строкой на бот'
+        api.send('📊 /status — деньги и торговая статистика, две строки на бот'
                  '\n📋 /full — полный отчёт и TOTAL PnL'
                  '\n⚡ /latency — последние 60 минут'
                  '\n/help — список команд')

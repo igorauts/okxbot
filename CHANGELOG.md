@@ -1,3 +1,21 @@
+# Changelog
+
+## v0.7.80 — 2026-11-24 UTC — Telegram Funding UI maintenance (engine 0.7.78)
+
+- `/status`: two lines per active bot; sort by GRID PROFIT, then existing name tie-break. `TOTAL = GRID PROFIT + FUNDING + adjusted FLOAT`; fold partial exits and realized open-cycle components into the report-only residual, reconcile displayed cents, sum exact verified totals. No accounting or strategy change in the engine.
+- Second line: BID, base position + ticker, occupied/max grid without percentage, cumulative trading volume in whole USDT. No indentation, one space between fields, no fleet-wide alignment. BID truncated to at most five significant digits, preserving leading fractional zeros; no order-price changes.
+- `/full` / `/full NAME`: add `Funding: +$5.25` directly after Floating PnL, two decimals; include funding in individual and aggregate totals and update the existing total percentage from 1x. Preserve raw floating PnL and the existing other fields in `/full`.
+- Read existing local Funding snapshots only; unknown funding is not zero. Fail closed for missing, stale or inconsistent financial data. Aggregate the same verified values used for rendering; keep account equity/balance separate. Existing account GET-only path, command handling and edit behavior are retained.
+- Manager/package version 0.7.80, trading engine 0.7.78. No changes to engine dependencies, Reader, Governor, Funding Collector, TP/SL, orders or persisted trading state.
+- Targeted offline contracts passed for both reports, funding loader (eight live snapshots at stage), precision, missing data and accounting; final BID display covered 13 cases. Initial LIVE installer verified unchanged trading/Reader PIDs; operator subsequently confirmed the final refined `/status` in Telegram. Full repository regression suite not rerun as part of publication.
+- Publication uses pinned final LIVE source and the prior verified release baseline; no service restarts, OKX/Telegram requests or LIVE writes by the publisher.
+
+## v0.7.79 — 2026-11-24 UTC — Funding Collector (engine 0.7.78)
+
+- Account-wide GET-only Funding Collector: hourly updates, historical backfill, daily reconciliation, Decimal ledger, deduplication and atomic snapshots.
+- Manager incorporates funding into total PnL with signed amount and snapshot age; no funding-driven TP/SL or trading-engine changes.
+- See [release notes](RELEASE_NOTES_FUNDING.md) and [GitHub release](https://github.com/igorauts/okxbot/releases/tag/v0.7.79).
+
 ## v0.7.64 — 2026-11-07 UTC — Eager archive / legitimate pending (engine 0.7.64)
 - Durable `terminal_seen` and 900-second guarded eager archive for safely settled CLOSED/EXITED cycles in the existing fully reconciled 30-second tick; existing compaction, no monetary freeze-rule changes.
 - Keep active TP, manual cleanup, unresolved fills/ledger, escape, incomplete aggregate/partial exits and exchange-pending order identities out of eager archive (including legacy attached TP IDs).

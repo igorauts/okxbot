@@ -154,7 +154,58 @@ def highest_open_filled_buy_price(root, cfg):
     return '$' + human_amount(max(prices), price_digits(cfg)) if prices else '—'
 
 
-def status_one(name, root, age_text='н/д'):
+def _full_verified_total(root, cfg, stats, generated):
+    """Verify the same financial snapshot used by the full report, no grid-state dependency."""
+    perf=stats.get('performance') or stats.get('performance_v0724')
+    if not isinstance(perf,dict) or perf.get('schema')!=1:
+        return None
+    def strict(raw):
+        if raw is None or isinstance(raw,bool):return None
+        try:
+            n=Decimal(str(raw))
+            return n if n.is_finite() else None
+        except (ValueError,TypeError,ArithmeticError):return None
+    fields=('total_pnl','grid_profit','limit_tp_net','market_tp_net',
+            'partial_exit_net','floating_pnl','realized_open_components')
+    v={k:strict(perf.get(k)) for k in fields}
+    if any(x is None for x in v.values()):return None
+    if (abs(v['limit_tp_net']+v['market_tp_net']-v['grid_profit'])>Decimal('0.00000001')
+        or abs(v['grid_profit']+v['partial_exit_net']+v['floating_pnl']+
+               v['realized_open_components']-v['total_pnl'])>Decimal('0.00000001')):
+        return None
+    a=read_json(root/'state/stats_financial_anchor.json')
+    at=strict(a.get('at'))
+    if (a.get('schema')!=1 or a.get('instrument')!=cfg.get('instrument') or
+        at is None or abs(at-generated)>Decimal('0.5') or
+        strict(a.get('total_pnl_usdt'))!=v['total_pnl']):return None
+    return v['total_pnl']
+
+
+def _full_funding_fields(root,cfg,stats,generated,subtotal,funding_loader):
+    from decimal import localcontext
+    funding=None if funding_loader is None or (root/'state/final_stats.json').exists() else funding_loader(cfg)
+    base=_full_verified_total(root,cfg,stats,generated)
+    with localcontext() as ctx:
+        ctx.prec=400
+        total=base+funding if base is not None and funding is not None else None
+        funding_text=('н/д' if funding is None else
+                      ('−' if funding<0 else '+')+'$'+f'{abs(funding).quantize(Decimal(".01"),rounding=ROUND_HALF_UP):,.2f}')
+        if total is None:return funding_text,'н/д',None
+        # Preserve the original subtotal suffix; recompute its percent if shown.
+        # Do not add funding to an already rounded string or to an existing percent.
+        amount=money(total,sign=True)
+        m=re.search(r'[+−-]?\$?[\d,.]+',subtotal)
+        if m is None:return funding_text,amount,total
+        suffix=subtotal[m.end():]
+        if '%' in suffix:
+            perf=stats.get('performance') or stats.get('performance_v0724')
+            capital=number(perf.get('capital'))
+            pct=human_amount(total*100/capital,2,sign=True)+'%' if capital is not None and capital>0 else 'н/д'
+            suffix=re.sub(r'[+−-]?[\d,.]+%',lambda _:pct,suffix,count=1)
+        return funding_text,subtotal[:m.start()]+amount+suffix,total
+
+
+def status_one(name, root, age_text='н/д', *, funding_loader=None, total_sink=None):
     root = Path(root)
     stats = read_json(root/'state/stats.json')
     cfg = read_json(root/'config.json')
@@ -187,7 +238,7 @@ def status_one(name, root, age_text='н/д'):
     if p and number(p.group(1)) is not None:
         pos = format(number(p.group(1)), 'f').rstrip('0').rstrip('.') + ' ' + p.group(2) if '.' in format(number(p.group(1)), 'f') else format(number(p.group(1)), 'f') + ' ' + p.group(2)
     subtotal = fmt_source(value(values,'ИТОГОВЫЙ PnL'))
-    sub_n = number(re.search(r'[+\-−]?\$?([\d,.]+)',subtotal.replace('−','-')).group(0).replace('$','')) if re.search(r'[+\-−]?\$?([\d,.]+)',subtotal.replace('−','-')) else None
+    funding_text,subtotal,sub_n = _full_funding_fields(root,cfg,stats,generated,subtotal,funding_loader)
     icon = '⚪' if sub_n is None else '🟢' if sub_n >= 0 else '🔴'
     # Read the authoritative local 5s DD record, not a stale 10-minute report.
     # No exchange requests; schema/instrument checked before displaying.
@@ -220,10 +271,12 @@ def status_one(name, root, age_text='н/д'):
         row('Прибыль за последние 24ч',fmt_source(value(values,'Прибыль за последние 24ч'))),
         row('Открытая позиция',pos),
         row('Floating PnL',fmt_source(value(values,'Нереализованный PnL'))),
+        row('Funding',funding_text),
     ]
     parts = ['<b>'+html.escape(first)+'</b>', '\n'.join('<code>'+html.escape(line)+'</code>' for line in main),
              '<b>'+icon+' Итоговый PnL: '+html.escape(subtotal)+' '+icon+'</b>',
              '<code>'+html.escape('Максимальная просадка бота: '+dd)+'</code>']
+    if total_sink is not None:total_sink.append(sub_n)
     return '\n\n'.join(parts)
 
 
