@@ -27,6 +27,7 @@ import http.client
 import ssl
 import html
 from okx_telegram_views import status_one, latency_report, read_json, LINE, verified_snapshot_bid, snapshot_anchor, number
+from okx_stats_ui import tp_reserve_text
 from okx_telegram_events import (one, event_alert, market_event, market_process, zero_buy_scan, observer_fault_scan, gate_alert_scan)
 from okx_telegram_followups import partial_scan, panic_scan
 from okx_telegram_delivery import persist as durable_save, drain as alert_drain
@@ -656,6 +657,7 @@ def _compact_bot_row(name,root,now):
         'position':_precise_quantity(values['open_base'],cfg)+' '+coin,
         'grid':f'{occupied}/{cap}',
         'bid':_precise_bid(bid,cfg),'volume':volume_text,
+        'tp_reserve':tp_reserve_text(root,cfg.get('instrument'),state=state,now=now),
         'funding_estimated':funding_display is None or funding_display.estimated,
         'funding_warning':funding_display is not None and funding_display.warning}
 
@@ -663,7 +665,7 @@ def _compact_bot_row(name,root,now):
 def compact_status_report():
     """One physical message, two compact lines per active bot, no unverified $0."""
     refresh_bots(force=True)
-    entries=[];failed=[];active=[]
+    entries=[];failed=[];active=[];failed_reserves=[]
     now=time.time()
     for name in BOT_DIRS:
         if not _active_service(name):continue
@@ -677,6 +679,8 @@ def compact_status_report():
             at=_account_number(report.get('generated_at_unix'))
             stale=(at is not None and now-float(at)>900)
             failed.append((name,'статистика устарела' if stale else 'снимок не подтверждён'))
+            reserve=tp_reserve_text(root,read_json(root/'config.json').get('instrument'),now=now)
+            if reserve:failed_reserves.append(name+' '+reserve)
     total=len(BOT_DIRS)
     if not BOT_DIRS:
         return '<b>⚠️ /status: монитор не может подтвердить обнаружение ботов; 0/0 недостоверно.</b>'
@@ -693,6 +697,9 @@ def compact_status_report():
         second=f"{entry['bid']} {entry['position']} {entry['grid']} {entry['volume']}"
         lines.extend((entry['marker']+' <code>'+html.escape(first)+'</code>',
                       '<code>'+html.escape(second)+'</code>',''))
+    reserves=[e['name']+' '+e['tp_reserve'] for e in entries if e.get('tp_reserve')]+failed_reserves
+    if reserves:
+        lines.extend(('⚠ TP reserve: '+html.escape('; '.join(reserves)),''))
     estimated=[e['name'] for e in entries if e.get('funding_estimated')]
     warnings=[e['name'] for e in entries if e.get('funding_warning')]
     if estimated:

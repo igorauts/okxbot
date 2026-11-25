@@ -7,6 +7,7 @@ import threading
 import time
 import unittest
 from decimal import Decimal
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,7 +17,9 @@ from okx_strategy import build_grid_rules
 ROOT=Path(__file__).resolve().parents[1]
 NAMES={'D','track','tp_records','cycle_sell_fill','remaining_tp','active_tp_records',
        'virtual_cycles','unprotected_partial_buy','unresolved_aggregate','real_tp_active',
-       'active_buy','count','parent_tp_failure','partial_attached_isolatable',
+       'active_buy','count','parent_tp_failure','partial_attached_isolatable','partial_attached_parent_proof',
+       'paged_order','position_retry_delay','panic_executions','reconcile_panic_orders','panic_retry_delay',
+       'place_panic_sell','cancel_tp','cancel_lowest_specific',
        'isolated_partial_coverage','tp_record_update','verify_existing',
        'register_cancel_attached','resolve_partial_cancel','reconcile_position',
        'record_attached_tp_failure','safe_tp_during_buy_wait','partial_cleanup_action',
@@ -96,11 +99,15 @@ class Cases(unittest.TestCase):
                  'new_request_deadline_ms':lambda:1795619000000,
                  'CoverageMismatch':Temporary,
                  'OrderExpiredBeforeSend':type('OrderExpiredBeforeSend',(Exception,),{}),
-                 'REAL_TP_MAX':100,'BUY_MAX':8,'TP_ACTIONS_PER_PASS':5,
+                 'REAL_TP_MAX':100,'BUY_MAX':8,'TP_ACTIONS_PER_PASS':5,'EX_CAP':500,
+                 'CONTRACT_MIN':Decimal(1),'CONTRACT_LOT':Decimal(1),'datetime':datetime,'timezone':timezone,
+                 'PANIC_MAX_POST_ATTEMPTS':3,'PANIC_RETRY_BACKOFF_SEC':30,
                  'TP_BUFFER_COOLDOWN':12,'CLEANUP_LAST_FILL_AT':time.monotonic(),
                  'virtual_escape':lambda *a:self.fail('unexpected market exit'),
                  'market_exit_partial':lambda *a:self.fail('unexpected partial exit')}
         exec(CODE,self.ns)
+        self.real_paged_order=self.ns['paged_order']
+        self.ns['paged_order']=lambda cid:None
     @property
     def rec(self):return self.st['cycles']['0.3954']['tpOrders'][0]
     def pass_(self,**kwargs):
@@ -109,13 +116,13 @@ class Cases(unittest.TestCase):
     def test_exact_enso_621_reservation_and_restart(self):
         original=copy.deepcopy(self.rec)
         result,out=self.pass_();self.assertEqual(result,(self.pending,False,Decimal(621)))
-        self.assertEqual(out,{id(self.rec)})
+        self.assertEqual(out,{TPID})
         self.assertEqual(self.rec['phase'],'PENDING');self.assertEqual(self.rec['ordId'],'')
         self.assertEqual(self.rec['sz'],'2');self.assertNotIn('failCode',self.rec)
         self.assertEqual(self.ns['count'](self.st),156)
         self.assertEqual(self.ns['safe_tp_during_buy_wait'](self.st,self.pending,self.pos),'TP_LIMIT_RESERVED')
         self.st=json.loads(json.dumps(self.st));result,out=self.pass_()
-        self.assertEqual(out,{id(self.rec)});self.assertEqual(result[1],False)
+        self.assertEqual(out,{TPID});self.assertEqual(result[1],False)
         self.assertEqual(self.rec['clOrdId'],original['clOrdId'])
     def test_upgrade_audit_explicit_isolation_and_strict_default(self):
         import io
@@ -232,17 +239,140 @@ class Cases(unittest.TestCase):
         self.assertTrue(posts[0][2]['body']['reduceOnly'])
         self.assertNotIn(CID,[r['cycleId'] for r in self.st['aggregate_exits'][0]['plan']])
         self.assertEqual(self.rec['phase'],'PENDING')
-    def test_maintenance_reservation_counts_in_target(self):
+    def test_maintenance_reservation_does_not_reduce_target(self):
         result,out=self.pass_();self.assertTrue(out)
         self.ns['REAL_TP_TARGET']=4
         self.assertEqual(self.ns['maintain_virtual_tp'](self.st,self.pending,self.pos,Decimal('.4131'),
                          reserved_qty=Decimal(2),reserved_count=1),'RESTORE')
-        self.assertEqual(len(self.sells),1);self.assertNotIn(CID,self.sells)
+        self.assertEqual(len(self.sells),2);self.assertNotIn(CID,self.sells)
         self.ns['REAL_TP_TARGET']=3;self.sells.clear()
         self.assertEqual(self.ns['maintain_virtual_tp'](self.st,self.pending,self.pos,Decimal('.4131'),
                          tp_buffer=SimpleNamespace(observe=lambda *a:None,quiet_since=time.monotonic(),overflow_notified=False),
-                         reserved_qty=Decimal(2),reserved_count=1),'NONE')
+                         reserved_qty=Decimal(2),reserved_count=1),'RESTORE')
+        self.assertEqual(len(self.sells),1)
+        self.sells.clear()
+        self.assertEqual(self.ns['maintain_virtual_tp'](self.st,self.pending,self.pos,Decimal('.4131'),
+                         reserved_qty=Decimal(2),reserved_count=98),'NONE')
         self.assertFalse(self.sells)
+    def install_real_history(self,rows=1300):
+        calls=[];api=self.ns['A'];real_order=api.order
+        def order(*a,**kw):
+            calls.append(('order',kw));return real_order(*a,**kw)
+        def request(method,path,params):
+            self.assertEqual(method,'GET');self.assertEqual(path,'/api/v5/trade/orders-history')
+            calls.append(('history',dict(params)))
+            start=0 if not params.get('after') else int(params['after'])+1
+            return [{'ordId':str(i),'side':'buy','clOrdId':'other-'+str(i)}
+                    for i in range(start,min(rows,start+100))]
+        api.order=order;api.req=request;self.ns['paged_order']=self.real_paged_order
+        return calls
+    def test_real_pagination_is_throttled_not_position_or_pending(self):
+        calls=self.install_real_history();poll={};snapshots=[]
+        self.ns['A'].pending=lambda:snapshots.append('pending') or self.pending
+        self.ns['A'].positions=lambda:snapshots.append('position') or [{'instId':INST,'posSide':'net','pos':str(self.pos)}]
+        self.assertEqual(self.pass_(reservation_poll=poll)[1],{TPID})
+        self.assertEqual(len(calls),14);self.assertEqual(sum(k=='history' for k,_ in calls),12)
+        for _ in range(10):self.assertEqual(self.pass_(reservation_poll=poll)[1],{TPID})
+        self.assertEqual(len(calls),14);self.assertEqual(snapshots,['pending','position']*11)
+        poll[TPID]-=61
+        self.assertEqual(self.pass_(reservation_poll=poll)[1],{TPID});self.assertEqual(len(calls),28)
+    def test_real_history_small_and_medium_page_counts(self):
+        for rows,total in ((50,3),(450,7)):
+            with self.subTest(rows=rows):
+                self.setUp();calls=self.install_real_history(rows)
+                self.assertEqual(self.pass_(reservation_poll={})[1],{TPID});self.assertEqual(len(calls),total)
+    def test_durable_parent_survives_restart_and_expiry(self):
+        poll={};self.assertEqual(self.pass_(reservation_poll=poll)[1],{TPID})
+        self.assertIn('partialParentProof',self.rec)
+        self.st=json.loads(json.dumps(self.st));self.parent=None
+        self.assertEqual(self.pass_(reservation_poll={})[1],{TPID})
+        self.assertEqual(self.rec['phase'],'PENDING');self.assertNotIn('failCode',self.rec)
+        # Stored identity must match the exact current cycle.
+        self.rec['partialParentProof']['parent']['ordId']='wrong'
+        with self.assertRaises(Unresolved):self.pass_(reservation_poll={})
+    def test_contradictory_parent_is_not_forgotten_on_next_absent_get(self):
+        self.assertEqual(self.pass_(reservation_poll={})[1],{TPID})
+        self.parent['attachAlgoOrds'][0]['attachAlgoId']='conflicting'
+        with self.assertRaises(Unresolved):self.pass_(reservation_poll={})
+        self.assertTrue(self.rec['partialParentProofBlocked'])
+        self.parent=None
+        with self.assertRaises(Unresolved):self.pass_(reservation_poll={})
+    def test_mismatch_forces_full_probe_and_late_child_fill(self):
+        calls=self.install_real_history();poll={}
+        self.assertEqual(self.pass_(reservation_poll=poll)[1],{TPID});self.assertEqual(len(calls),14)
+        self.child={'instId':INST,'ordId':'late','clOrdId':TPID,'side':'sell','state':'filled',
+                    'px':'0.3960','sz':'2','accFillSz':'2','reduceOnly':'true'}
+        self.pos=Decimal(619)
+        # First pass skips extra GETs but detects mismatch; second pass is forced.
+        out=set();result=self.ns['reconcile_position'](self.st,timeout=2,pause=.01,
+                run_isolation=out,reservation_poll=poll)
+        self.assertTrue(result[1]);self.assertFalse(out);self.assertEqual(len(calls),15)
+        self.assertEqual(self.rec['phase'],'FILLED');self.assertNotIn(TPID,poll)
+    def test_pending_child_immediately_overrides_fast_path(self):
+        calls=self.install_real_history();poll={};self.assertTrue(self.pass_(reservation_poll=poll)[1])
+        self.child={'instId':INST,'ordId':'late','clOrdId':TPID,'side':'sell','state':'live',
+                    'px':'0.3960','sz':'2','accFillSz':'0','reduceOnly':'true'}
+        self.pending.append(self.child);result,out=self.pass_(reservation_poll=poll)
+        self.assertTrue(result[1]);self.assertFalse(out);self.assertEqual(len(calls),14)
+        self.assertNotIn(TPID,poll)
+    def test_exact_live_elective_cancel_combines_with_reservation(self):
+        row=self.pending[0]
+        c=next(c for c in self.st['cycles'].values() if any(r.get('ordId')==row['ordId'] for r in c['tpOrders']))
+        c['tpOrders'][0].update(phase='CANCELING',electiveCancel=True,cancelAt=time.time())
+        buy={'cycleId':'buy-cancel','state':'CANCELING','buyPx':'0.30','tpPx':'0.31','sz':'4',
+             'ordId':'buy-cancel','clOrdId':'cbuy-cancel','filledBuy':'0','filledTP':'0','tpOrders':[],
+             'electiveCancel':True,'cancelAt':time.time()}
+        b={'instId':INST,'ordId':buy['ordId'],'clOrdId':buy['clOrdId'],'side':'buy','state':'live',
+           'px':'0.30','sz':'4','accFillSz':'0','reduceOnly':'false'}
+        self.st['cycles']['0.30']=buy;self.pending.append(b)
+        self.assertEqual(self.pass_(reservation_poll={})[1],{TPID})
+        self.pending.pop();self.extra[b['ordId']]=b
+        self.assertFalse(self.pass_(reservation_poll={})[1])
+    def test_panic_partial_progress_and_late_tp_full_completion(self):
+        self.mode='PANIC';poll={};posts=[];acks=[]
+        self.ns['control_ack']=lambda *a,**kw:acks.append((a,kw))
+        def req(method,route,**kw):
+            self.assertEqual(method,'POST');posts.append((route,kw['body']))
+            if route.endswith('cancel-order'):return [{'sCode':'0','ordId':kw['body']['ordId']}]
+            self.assertTrue(self.st['panic_orders']);return [{'sCode':'0','ordId':'panic-first'}]
+        self.ns['A'].req=req
+        def step():
+            result,out=self.pass_(reservation_poll=poll,emergency_isolation=True)
+            return self.ns['controlled_shutdown'](self.st,*result[:1],result[2],result[1],'PANIC',isolated=out)
+        self.assertFalse(step());self.assertEqual(len(posts),2)
+        self.assertTrue(all(route.endswith('cancel-order') for route,_ in posts))
+        for row in self.pending:self.extra[row['ordId']]=dict(row,state='canceled')
+        self.pending.clear();self.assertFalse(step());self.assertEqual(len(posts),3)
+        self.assertEqual(posts[-1][1]['sz'],'619');self.assertIs(posts[-1][1]['reduceOnly'],True)
+        e=self.st['panic_orders'][0]
+        self.extra[e['ordId']]={'instId':INST,'ordId':e['ordId'],'clOrdId':e['clOrdId'],
+            'side':'sell','ordType':'market','reduceOnly':True,'sz':'619','accFillSz':'619','state':'filled'}
+        self.pos=Decimal(2);self.assertFalse(step());self.assertEqual(len(posts),3)
+        self.assertEqual(acks[-1][0][1],'WAIT_RESERVED_TP');self.assertNotIn('terminal_mode',self.st)
+        self.assertEqual(self.rec['phase'],'PENDING')
+        # Restart, parent aged out, retain the same reservation and do not re-POST.
+        self.st=json.loads(json.dumps(self.st));self.parent=None;poll.clear()
+        self.assertFalse(step());self.assertEqual(len(posts),3)
+        self.child={'instId':INST,'ordId':'late','clOrdId':TPID,'side':'sell','state':'filled',
+                    'px':'0.3960','sz':'2','accFillSz':'2','reduceOnly':'true'}
+        self.pos=Decimal(0);poll.clear()
+        self.assertTrue(step());self.assertEqual(len(posts),3);self.assertEqual(self.st['terminal_mode'],'PANIC_DONE')
+    def test_hard_cancels_known_orders_but_never_market_or_false_terminal(self):
+        self.mode='HARD';posts=[];acks=[]
+        self.ns['control_ack']=lambda *a,**kw:acks.append((a,kw))
+        def req(method,route,**kw):
+            self.assertEqual(route,'/api/v5/trade/cancel-order');posts.append(kw['body'])
+            return [{'sCode':'0','ordId':kw['body']['ordId']}]
+        self.ns['A'].req=req
+        def step():
+            result,out=self.pass_(emergency_isolation=True)
+            return self.ns['controlled_shutdown'](self.st,result[0],result[2],result[1],'HARD',isolated=out)
+        self.assertFalse(step());self.assertEqual(len(posts),2)
+        for row in self.pending:self.extra[row['ordId']]=dict(row,state='canceled')
+        self.pending.clear();self.assertFalse(step());self.assertEqual(acks[-1][0][1],'WAIT_RESERVED_TP')
+        self.assertNotIn('terminal_mode',self.st);self.assertEqual(len(posts),2)
+        self.parent['attachAlgoOrds'][0]['failCode']='51006'
+        self.assertTrue(step());self.assertEqual(self.st['terminal_mode'],'RETIRED');self.assertEqual(len(posts),2)
     def live_case(self,*,ws=True,cap=200,mode='RUN'):
         h=Harness(allow_buy=True);h.state=self.st;h.mode=mode;self.mode=mode
         h.max_reconciles=1;h.watcher._healthy=ws;h.market.get_bid=lambda:Decimal('0.4131')
@@ -266,7 +396,7 @@ class Cases(unittest.TestCase):
             maintain_virtual_tp=lambda *a,**kw:'NONE',
             required_safe_tp=lambda *a:Decimal('0'),TP=Decimal('.0006'),
             CAP=cap,TARGET=3,REAL_TP_TARGET=3,BUY_MAX=8,
-            controlled_shutdown=lambda st,pending,actual,resolved,mode,*a:
+            controlled_shutdown=lambda st,pending,actual,resolved,mode,*a,**kw:
                  self.assertFalse(resolved) or False)
         h.run();return h
     def test_actual_live_loop_buy_only_other_level(self):

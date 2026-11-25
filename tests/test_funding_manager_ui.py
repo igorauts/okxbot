@@ -53,7 +53,7 @@ class FundingManagerUI(unittest.TestCase):
     def test_read_error_keeps_existing_total(self):
         with patch('okx_funding_view.load_funding',side_effect=sqlite3.OperationalError('busy')):
             text=self.render()
-        self.assertIn('FUNDING: +0.000000, ещё не обновлялся · ⚠ Funding:',text); self.assertIn('ИТОГОВЫЙ PnL: +$20.00000000',text)
+        self.assertIn('FUNDING: +0.000000, нет данных (база недоступна) · ⚠ Funding:',text); self.assertIn('ИТОГОВЫЙ PnL: +$20.00000000',text)
     def test_existing_reconciliation_not_bypassed(self):
         self.put('5'); self.payload['total_pnl']='21'
         with self.assertRaises(ValueError): self.render()

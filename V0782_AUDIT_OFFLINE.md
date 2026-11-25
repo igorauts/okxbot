@@ -1,0 +1,7 @@
+# v0.7.82 — OFFLINE audit candidate
+
+- Initial full attached-TP probe; subsequent stable passes retain a reservation with fresh independent pending/position/coverage checks. Full probe at most once per 60 seconds in the stable case, forced after mismatch or order evidence. Never infer terminal child from missing history. Durable validated terminal parent proof survives restart and parent retention; contradictions revoke it. Existing isolated cycles require a fresh parent proof on migration.
+- Exact known elective cancellations may coexist; ambiguous placement/cancel transport and other unknown orders still block new BUY. Stable client identities and hold reason telemetry. Real TP target excludes reservation; hard limits include it.
+- HARD cancels known orders and never sells position; PANIC may reduce only independently proven free volume after known cancellations; both remain unfinished while the reserved child is unknown. Durable market intents and terminal accounting remain authoritative. No synthetic failure code or timeout release.
+- Manager and Telegram show reserve count and quantity, full reports include age. Missing funding database distinguished from never-synced data. Restore executable mode for dependency attestation.
+- Tests exercise actual paginated history, parent retention, mismatch and late child scenarios, emergency progress, and UI. No change to Reader, broker, strategy parameters, HTTP policy, TP/SL, archive accounting or funding settlement. No LIVE installation or exchange requests.

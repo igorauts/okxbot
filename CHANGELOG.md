@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.7.82 — 2026-11-25 UTC — Bounded attached TP reconciliation and emergency progress
+
+- Durable terminal parent proof, bounded history probes, fresh independent reconciliation; stable reserve identity and hold telemetry.
+- Independent emergency progress without falsely completing unresolved reserve; separate real TP target and hard caps.
+- Reserve reporting, funding availability and installer fixture compatibility.
+- Final CANARY_FIXED archive: 988 offline tests; LIVE canary and fleet rollout verified by operator. See [release notes](RELEASE_NOTES_V0782.md).
+
 ## v0.7.81 — 2026-11-25 UTC — Attached TP isolation and audit corrections
 
 - Isolate unresolved attached TP after confirmed canceled partial BUY; retain reserved quantity and occupied level, permit independently reconciled trading, preserve strict terminal protection.

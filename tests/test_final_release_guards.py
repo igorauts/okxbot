@@ -71,6 +71,23 @@ class ReleaseSafety(unittest.TestCase):
                 self.assertFalse(U.allowed_package_member(path))
                 self.assertFalse(verifier_member_allowed(path))
 
+    def test_installer_accepts_every_packaged_source_member(self):
+        # Same source inventory as the offline builder, no runtime artifacts.
+        for p in R.rglob('*'):
+            rel=p.relative_to(R)
+            if (not p.is_file() or p.is_symlink() or p.name.endswith('.pyc')
+                or any(x in ('__pycache__','.git') for x in rel.parts)
+                or p.name in ('checks_full.log','checks_full.rc')):
+                continue
+            name=rel.as_posix()
+            with self.subTest(name=name):
+                self.assertTrue(verifier_member_allowed(name))
+                self.assertTrue(U.allowed_package_member(name))
+        for name in ('tests/fixtures/unreviewed.py.gz',
+                     'tests/fixtures/.env','tests/fixtures/../../bad'):
+            self.assertFalse(U.allowed_package_member(name))
+            self.assertFalse(verifier_member_allowed(name))
+
     def test_zip_member_types_must_be_regular(self):
         with tempfile.TemporaryDirectory() as td:
             p=Path(td)/'z.zip'

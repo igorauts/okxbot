@@ -14,7 +14,8 @@ from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parent
 EXECUTABLES = ('okxbot.py','okx_live_upgrade.py','rollout_preflight.py',
-               'run_checks.sh','okx_shared_runtime_deploy.py','build_release_zip.py')
+               'run_checks.sh','okx_shared_runtime_deploy.py','build_release_zip.py',
+               'okx_dependency_attestation.py')
 
 
 def build(out=None):

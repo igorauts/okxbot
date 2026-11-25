@@ -189,6 +189,7 @@ python3 -B -m unittest tests.test_ui_engine_version_display -q
 python3 -B -m unittest tests.test_funding_manager_ui -q
 python3 -B -m unittest tests.test_funding_color -q
 python3 -B -m unittest tests.test_v0781_audit -q
+python3 -B -m unittest tests.test_v0782_audit -q
 
 # Standalone funding collector regression suite (offline).
 (cd funding && python3 -B -m unittest discover -v)

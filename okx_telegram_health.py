@@ -671,8 +671,10 @@ def panic_ack_check(api, st, services, roots):
         except (OSError,ValueError):continue  # No fake healthy indication.
         if not isinstance(ack,dict):continue
         phase=str(ack.get('phase') or '')
-        if ack.get('mode')!='PANIC' or phase not in (
-                'PANIC_MANUAL_REVIEW','PANIC_RETRY_EXHAUSTED'):
+        mode=ack.get('mode')
+        reserved_wait=mode in ('PANIC','HARD') and phase=='WAIT_RESERVED_TP'
+        if not reserved_wait and (mode!='PANIC' or phase not in (
+                'PANIC_MANUAL_REVIEW','PANIC_RETRY_EXHAUSTED')):
             notified.pop(name,None)  # New event can create a NEW episode.
             continue
         previous=notified.get(name)
@@ -680,10 +682,17 @@ def panic_ack_check(api, st, services, roots):
             continue
         stamp=str(ack.get('updated_at') or 'unknown')[:64]
         remaining=str(ack.get('remaining_position') or 'н/д')[:60]
-        one(api,st,f'panic/ack/{name}/{phase}/{stamp}',
-            f'🚨 PANIC {phase} | {name}\n'
-            f'Остаток позиции: {remaining}\n'
-            'Автоматическое закрытие НЕ подтверждено. Нужен ручной разбор.')
+        if reserved_wait:
+            reserved=str(ack.get('reserved_contracts') or 'н/д')[:60]
+            one(api,st,f'panic/ack/{name}/{phase}/{stamp}',
+                f'🚨 {mode} WAIT_RESERVED_TP | {name}\n'
+                f'Остаток позиции: {remaining} контр.; неизвестный TP: {reserved} контр.\n'
+                'Завершение НЕ подтверждено. Движок ждёт положительного подтверждения TP.')
+        else:
+            one(api,st,f'panic/ack/{name}/{phase}/{stamp}',
+                f'🚨 PANIC {phase} | {name}\n'
+                f'Остаток позиции: {remaining}\n'
+                'Автоматическое закрытие НЕ подтверждено. Нужен ручной разбор.')
         notified[name]={'phase':phase,'stamp':stamp}
 
 

@@ -75,6 +75,46 @@ def base_quantity(value, config):
     return out.rstrip('0').rstrip('.') if '.' in out else out
 
 
+def tp_reserve_text(root, instrument, *, state=None, now=None, include_age=False):
+    """Presentation only: unknown canceled-partial attached SELL reservations.
+
+    Display retained volume even during a temporary admission HOLD. Never
+    infer trading permission from this field or the age of the reservation.
+    """
+    if state is None:
+        try:
+            from okx_paths import state_file
+            state=json.loads(state_file(Path(root)).read_text(encoding='utf-8'))
+        except (OSError,ValueError,TypeError):return None
+    if not isinstance(state,dict) or state.get('instrument') not in (None,instrument):return None
+    cycles=state.get('cycles')
+    if not isinstance(cycles,dict):return None
+    count=0;qty=Decimal(0);seen=set();stamps=[]
+    now=time.time() if now is None else float(now)
+    for c in cycles.values():
+        if not isinstance(c,dict) or c.get('state')!='TP_WAIT' or not c.get('partial_cleanup'):continue
+        records=c.get('tpOrders')
+        if not isinstance(records,list):continue
+        for r in records:
+            if (not isinstance(r,dict) or r.get('source')!='attached'
+                    or r.get('phase')!='PENDING' or r.get('ordId')):continue
+            cid=r.get('clOrdId');size=dec(r.get('sz'));filled=dec(r.get('filled'))
+            if (not cid or cid in seen or cid!=c.get('tpClOrdId') or size is None or filled is None
+                    or not 0<=filled<size):return 'н/д (состояние резерва не подтверждено)'
+            seen.add(cid);count+=1;qty+=size-filled
+            try:
+                stamp=float(r.get('placedAt'))
+                if math.isfinite(stamp) and 0<stamp<=now+1:stamps.append(stamp)
+            except (ValueError,TypeError,OverflowError):pass
+    if not count:return None
+    q=format(qty,'f')
+    if '.' in q:q=q.rstrip('0').rstrip('.')
+    result=f'{count} / {q} контр.'
+    if include_age:
+        result+=' · '+(run_time(now-min(stamps)) if len(stamps)==count else 'возраст н/д')
+    return result
+
+
 def peak_line(root, instrument):
     """Read SQLite in query_only mode; never write a peak cache on UI repaint."""
     try:
@@ -139,6 +179,8 @@ def format_stats(root, instrument, payload, *, bot_active=False,
         if ack.get('mode')=='RUN' and ack.get('phase') in (
                 'BUY_HOLD_TP_FAILURE','BUY_HOLD_RECONCILIATION'):
             trade_hold=ack['phase']
+        if ack.get('mode') in ('HARD','PANIC') and ack.get('phase')=='WAIT_RESERVED_TP':
+            trade_hold=ack['mode']+' WAIT_RESERVED_TP'
     except (OSError, ValueError, TypeError, KeyError):
         pass
     if trade_hold:active=False
@@ -214,6 +256,8 @@ def format_stats(root, instrument, payload, *, bot_active=False,
         '  средняя цена: '+usd(payload.get('grid_average'),digits),
         '',
     ]
+    reserve=tp_reserve_text(root,instrument,now=now,include_age=True)
+    if reserve is not None:lines.append('⚠ TP reserve: '+reserve)
     lines.extend(drawdown_lines(root,instrument,capital,now))
     lines.append(peak_line(root,instrument))
     lines.append('✅ Все закрытые циклы сопоставлены.')

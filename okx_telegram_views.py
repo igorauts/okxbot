@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from okx_paths import state_file, pnl_db, fills_db, cycles_db, observer_dir
+from okx_stats_ui import tp_reserve_text
 
 LINE = '────────────────────────'
 COUNTS = re.compile(r'\bBUY\s+(\d+)/(\d+)\s*\|\s*TP\s+(\d+)\s*\(реальных\s+(\d+)\)')
@@ -289,6 +290,8 @@ def status_one(name, root, age_text='н/д', *, funding_loader=None, total_sink=
         row('Floating PnL',fmt_source(value(values,'Нереализованный PnL'))),
         row('Funding',funding_text),
     ]
+    reserve=tp_reserve_text(root,cfg.get('instrument'),include_age=True)
+    if reserve is not None:main.append('⚠ TP reserve: '+reserve)
     parts = ['<b>'+html.escape(first)+'</b>', '\n'.join('<code>'+html.escape(line)+'</code>' for line in main),
              '<b>'+icon+' Итоговый PnL: '+html.escape(subtotal)+' '+icon+'</b>',
              '<code>'+html.escape('Максимальная просадка бота: '+dd)+'</code>']

@@ -87,6 +87,7 @@ class FundingDisplay:
     snapshot: Optional[FundingValue]
     warning: bool
     fallback: bool
+    unavailable: bool = False
 
     @property
     def estimated(self):
@@ -94,7 +95,9 @@ class FundingDisplay:
 
     def note(self):
         if self.warning:
-            return '⚠ Funding: нет полной актуальной сверки >8ч'
+            return '⚠ Funding: нет полной актуальной сверки >8ч'+(' (база недоступна)' if self.unavailable else '')
+        if self.unavailable:
+            return 'база недоступна; последний доступный снимок' if self.snapshot is not None else 'нет данных (база недоступна)'
         if self.snapshot is None:
             return 'пока нет данных'
         if self.fallback:
@@ -105,7 +108,8 @@ class FundingDisplay:
 
     def manager_line(self, now_ms):
         if self.snapshot is None:
-            line = initial_line()
+            line = ('FUNDING: +0.000000, нет данных (база недоступна)'
+                    if self.unavailable else initial_line())
         else:
             line = self.snapshot.line(now_ms)
         note = self.note()
@@ -128,6 +132,7 @@ def display_funding(path, instrument, created_at, *, now_ms=None):
     except (ValueError,TypeError,ArithmeticError,OSError):
         return FundingDisplay(Decimal(0),None,False,True)
     fallback = False
+    unavailable = False
     try:
         snap = load_funding(path,instrument,created_at,terminal=False)
         if snap is not None:
@@ -138,13 +143,16 @@ def display_funding(path, instrument, created_at, *, now_ms=None):
                 _LAST_GOOD.popitem(last=False)
         else:
             fallback = True
+            db=Path(path)
+            unavailable=not db.is_file() or db.is_symlink()
     except (OSError,sqlite3.Error,ValueError,TypeError,KeyError,ArithmeticError):
         snap = None
         fallback = True
+        unavailable = True
     if snap is None:
         snap = _LAST_GOOD.get(key)
         if snap is not None and snap.synced_ms > now:
             snap = None
     last_complete = (snap.synced_ms if snap.complete else snap.last_complete_ms) if snap else None
     return FundingDisplay(snap.amount if snap else Decimal(0), snap,
-                          now-(last_complete if last_complete is not None else created)>WARNING_MS, fallback)
+                          now-(last_complete if last_complete is not None else created)>WARNING_MS, fallback, unavailable)

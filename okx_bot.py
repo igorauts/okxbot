@@ -1378,36 +1378,56 @@ def place_panic_sell(st, remaining):
     log('PANIC_ACCEPTED',clOrdId=cid,ordId=rec['ordId'])
 
 
-def controlled_shutdown(st, pending, actual, resolved, mode, terminal_bid=None):
+def controlled_shutdown(st, pending, actual, resolved, mode, terminal_bid=None, *, isolated=None):
     """Persistent, idempotent, multi-pass liquidation state machine.
 
     HARD/PANIC: cease BUYs, cancel all our BUYs and TP orders, wait for
     confirmed final states, then retire; PANIC alone additionally market
     closes the reconciled bot net position. Never call normal TP rearming.
     """
-    # Early owner-verified BUY cancels are handled before position reconciliation
-    # in live_loop(). Never bypass the fresh full pass for TP cancellation or SELL.
+    # Early owner-verified BUY cancels are handled before position reconciliation.
+    # Only a fresh isolated coverage proof from this pass permits progress on
+    # independent orders. An isolated attachment can NEVER authorize finalization.
+    reserved=Decimal(0)
     if not resolved:
-        control_ack(mode,'WAIT_RECONCILIATION')
-        return False
+        if not isolated or mode not in ('HARD','PANIC'):
+            control_ack(mode,'WAIT_RECONCILIATION')
+            return False
+        records=[(c,r) for c in st['cycles'].values() for r in tp_records(c)
+                 if r.get('clOrdId') in isolated]
+        if (len(records)!=len(isolated) or {r['clOrdId'] for _,r in records}!=isolated
+                or any(partial_attached_parent_proof(c,r) is None for c,r in records)):
+            raise ExchangeUnresolved('Emergency isolated reservation proof unavailable')
+        reserved=sum((D(r['sz'])-D(r.get('filled')) for _,r in records),Decimal(0))
+        if not 0<reserved<=actual:
+            raise ExchangeUnresolved('Emergency isolated reservation exceeds position')
+        if control_mode()!=mode:
+            return False
     active=active_buy(st)
     if active:
         # Cancel only individually confirmed live BUYs; no bulk cancellations
         # that could accidentally cancel other bots' orders.
         for c in active[:5]:
             if c['state'] not in ('BUY_LIVE','BUY_PARTIAL'):
+                if reserved and c['state']=='CANCELING':continue
                 die('Cannot stop safely with unsettled BUY '+str(c.get('buyPx')))
             cancel_lowest_specific(st,c)
         control_ack(mode,'CANCEL_BUYS')
         return False
     sell_orders=real_tp_active(st)
     if sell_orders:
-        for _,c,rec in sell_orders[:5]:cancel_tp(st,c,rec)
+        for _,c,rec in sell_orders[:5]:
+            if reserved and rec['phase']=='CANCELING':continue
+            cancel_tp(st,c,rec)
         control_ack(mode,'CANCEL_TPS')
         return False
     if pending:
         # At this point no orders should remain in the exchange pending list.
         die('Unexpected pending OKX order during shutdown; refuse to finalize')
+    if reserved and mode=='HARD':
+        control_ack(mode,'WAIT_RESERVED_TP',remaining_position=str(actual),
+                    reserved_contracts=str(reserved),reserved_count=len(isolated))
+        return False
     if mode=='HARD':
         st['terminal_snapshot']={'mode':'RETIRED','at_unix':time.time(),
             'at_utc':datetime.now(timezone.utc).isoformat(),
@@ -1436,6 +1456,14 @@ def controlled_shutdown(st, pending, actual, resolved, mode, terminal_bid=None):
         return True
     if actual < 0:
         die('PANIC refused: net position is short')
+    # PANIC may flatten the independently reconciled portion, never the
+    # reserved contracts. A later child fill or confirmed failure enters the
+    # ordinary strict path; terminal state is forbidden until then.
+    remaining=actual-reserved
+    if reserved and remaining==0:
+        control_ack(mode,'WAIT_RESERVED_TP',remaining_position=str(actual),
+                    reserved_contracts=str(reserved),reserved_count=len(isolated))
+        return False
     # Resend only after a definitive rejection/expiry or confirmed final fill,
     # bounded by a durable retry count and with a fresh reconciled position.
     delay=panic_retry_delay(st)
@@ -1448,7 +1476,9 @@ def controlled_shutdown(st, pending, actual, resolved, mode, terminal_bid=None):
     if delay>0:
         control_ack(mode,'WAIT_PANIC_RETRY',retry_after_sec=round(delay,1))
         return False
-    place_panic_sell(st,actual)
+    if reserved:
+        log('PANIC_INDEPENDENT_EXIT',qty=str(remaining),reserved=str(reserved))
+    place_panic_sell(st,remaining)
     control_ack(mode,'WAIT_PANIC_ORDER')
     return False
 
@@ -1746,7 +1776,32 @@ def verify_existing(st,pending):
         if o.get('ordId') not in known and o.get('clOrdId') not in known_cls:
             die('Unrecognized pending OKX order: '+str(o.get('ordId')))
 
-def parent_tp_failure(c, rec, *, isolation=None):
+def partial_attached_parent_proof(c,rec):
+    """Read previously persisted terminal parent evidence; never prove child absence.
+
+    Revalidate against the exact current cycle on every use. A contradicted
+    proof cannot authorize isolation merely because a later GET is absent.
+    """
+    try:
+        proof=rec.get('partialParentProof')
+        if not isinstance(proof,dict) or rec.get('partialParentProofBlocked'):
+            return None
+        parent=proof['parent']; attachments=parent['attachAlgoOrds']
+        if (proof['cycleId']!=c['cycleId'] or not isinstance(attachments,list)
+                or len(attachments)!=1 or not 0<float(proof['recordedAt'])<=time.time()+1
+                or parent.get('instId')!=INST or parent.get('ordId')!=c.get('ordId')
+                or parent.get('side')!='buy' or parent.get('clOrdId')!=c.get('clOrdId')
+                or D(parent.get('accFillSz'))!=D(c.get('filledBuy'))):return None
+        a=attachments[0]
+        if (a.get('attachAlgoClOrdId')!=rec.get('clOrdId')
+                or D(a.get('tpOrdPx'))!=D(c['tpPx'])
+                or str(a.get('failCode') or '') not in ('','0')):return None
+        return parent if partial_attached_isolatable(c,rec,parent,a) else None
+    except (KeyError,TypeError,ValueError,ArithmeticError,AttributeError):
+        return None
+
+
+def parent_tp_failure(c, rec, *, isolation=None, st=None):
     """Authoritative *failed* attached TP, matched to exact filled parent.
 
     Absence of an order alone is never a failure proof. Parent failCode is
@@ -1755,9 +1810,17 @@ def parent_tp_failure(c, rec, *, isolation=None):
     """
     if rec.get('source')!='attached' or rec.get('clOrdId')!=c.get('tpClOrdId'):
         die('Attached TP identity mismatch: '+str(c.get('cycleId')))
+    prior=partial_attached_parent_proof(c,rec) if st is not None else None
     parent=A.order(oid=c['ordId'])
     if parent is None:
+        if isolation is not None and prior is not None:
+            isolation.add(rec['clOrdId'])
+            return None
         raise ExchangeUnresolved('Parent BUY unknown; attached TP still reserved')
+    # A *returned* contradictory parent is different from historical absence.
+    # Until it passes the checks below, invalidate fast reuse and absence fallback.
+    if st is not None and rec.get('partialParentProof') and not rec.get('partialParentProofBlocked'):
+        rec['partialParentProofBlocked']=True;save(st)
     if (parent.get('instId')!=INST or parent.get('ordId')!=c.get('ordId')
             or parent.get('side')!='buy' or parent.get('clOrdId')!=c.get('clOrdId')):
         die('Attached TP parent BUY identity mismatch')
@@ -1776,15 +1839,33 @@ def parent_tp_failure(c, rec, *, isolation=None):
     if len(matches)>1:die('Duplicate attached TP identity on parent')
     if not matches:return None
     a=matches[0]
+    if st is not None and rec.get('partialParentProof'):
+        try:
+            old_attachment=rec['partialParentProof']['parent']['attachAlgoOrds'][0]
+            if a.get('attachAlgoId')!=old_attachment.get('attachAlgoId'):
+                raise ExchangeUnresolved('Attached TP parent evidence changed attachment ID')
+        except (KeyError,IndexError,TypeError,AttributeError) as exc:
+            raise ExchangeUnresolved('Invalid stored parent evidence') from exc
     if a.get('tpOrdKind') not in ('limit',None,'') or D(a.get('tpOrdPx'))!=D(c['tpPx']):
         die('Attached TP identity/target does not match original BUY')
     code=str(a.get('failCode') or '')
     if code in ('','0'):
         # No claim of nonexistence. This is evidence ONLY for keeping a
         # precisely bounded reservation while independently trading other levels.
-        # The same parent must be verified on every fresh reconciliation.
-        if isolation is not None and partial_attached_isolatable(c,rec,parent,a):
-            isolation.add(id(rec))
+        # Retain the exact positive terminal parent fact across history expiry.
+        if (isolation is not None or st is not None) and partial_attached_isolatable(c,rec,parent,a):
+            if st is not None:
+                keys=('instId','ordId','clOrdId','side','state','accFillSz','sz','px',
+                      'cancelSource','posSide','reduceOnly','ordType')
+                akeys=('attachAlgoClOrdId','attachAlgoId','tpOrdKind','tpOrdPx','failCode',
+                       'failReason','sz','percent','tpTriggerPx','tpTriggerRatio',
+                       'slTriggerRatio','slTriggerPx','slOrdPx')
+                evidence={k:parent.get(k) for k in keys}
+                evidence['attachAlgoOrds']=[{k:a.get(k) for k in akeys}]
+                rec['partialParentProof']={'cycleId':c['cycleId'],'recordedAt':time.time(),
+                                           'parent':evidence}
+                rec.pop('partialParentProofBlocked',None);save(st)
+            if isolation is not None:isolation.add(rec['clOrdId'])
         return None
     return {'code':code,'reason':str(a.get('failReason') or '')[:180]}
 
@@ -2149,7 +2230,7 @@ def virtual_escape(st,bid,actual,pending,mode, *, reserved_qty=0):
     return 'ACTION'
 
 
-def track(st,pending, *, isolation=None):
+def track(st,pending, *, isolation=None, reservation_poll=None):
     """All TP replacements + fills are tracked under the original CycleID."""
     all_resolved=reconcile_aggregate(st)
     byid={o.get('ordId'):o for o in pending}
@@ -2300,6 +2381,17 @@ def track(st,pending, *, isolation=None):
             if rec['phase'] in ('FILLED','CANCELED','FAILED'):continue
             o=(byid.get(rec.get('ordId')) if rec.get('ordId') else None)
             if o is None:o=bycid.get(rec['clOrdId'])
+            # Cheap path is ONLY for a previously positively proven reservation.
+            # A fresh pending match always wins. This never caches a position,
+            # pending snapshot, fill, or trading permission.
+            if (o is None and isolation is not None and reservation_poll is not None
+                    and rec['clOrdId'] in reservation_poll
+                    and 0<=time.monotonic()-reservation_poll[rec['clOrdId']]<60
+                    and partial_attached_parent_proof(c,rec) is not None):
+                isolation.add(rec['clOrdId'])
+                continue
+            if reservation_poll is not None:
+                reservation_poll.pop(rec['clOrdId'],None)
             if o is None:
                 o=A.order(oid=rec['ordId']) if rec.get('ordId') else A.order(cid=rec['clOrdId'])
             if o is None and rec['phase'] in ('PENDING','PLACING','CANCELING'):
@@ -2308,8 +2400,12 @@ def track(st,pending, *, isolation=None):
             if o is None and rec.get('source')=='attached' and rec['phase'] in ('PENDING','PLACING'):
                 # A confirmed failCode (including 51006) proves no attached TP
                 # exists. Never resolve on absence/timeout alone.
-                failure=(parent_tp_failure(c,rec,isolation=isolation)
-                         if isolation is not None else parent_tp_failure(c,rec))
+                failure=(parent_tp_failure(c,rec,isolation=isolation,st=st)
+                         if isolation is not None or rec.get('partialParentProof')
+                         else parent_tp_failure(c,rec))
+                if (reservation_poll is not None and isolation is not None
+                        and rec['clOrdId'] in isolation):
+                    reservation_poll[rec['clOrdId']]=time.monotonic()
                 if failure:
                     record_attached_tp_failure(st,c,rec,failure)
                     continue
@@ -2341,8 +2437,8 @@ def track(st,pending, *, isolation=None):
                     rec['lastWaitNotice']=time.time();save(st)
                     log('PARTIAL_ATTACHED_TP_DELAYED',price=key,
                         buyPx=c['buyPx'],tpPx=c['tpPx'],cycleId=c['cycleId'],
-                        message='No MARKET until attached TP is positively resolved')
-                if isolation is None or id(rec) not in isolation:
+                        message='Reserved cycle MARKET forbidden; independent actions require fresh proof')
+                if isolation is None or rec['clOrdId'] not in isolation:
                     all_resolved=False
                 continue
             tp_record_update(st,c,rec,o)
@@ -2369,7 +2465,7 @@ def track(st,pending, *, isolation=None):
         elif active:
             for r in active:
                 if r.get('phase') in ('PENDING','PLACING'):
-                    if isolation is None or id(r) not in isolation:
+                    if isolation is None or r['clOrdId'] not in isolation:
                         all_resolved=False
                 elif r.get('phase')=='CANCELING':
                     # Elective CANCEL is isolated only while the exact still-
@@ -2395,6 +2491,11 @@ def track(st,pending, *, isolation=None):
                 c['state']='VIRTUAL_TP';save(st)
                 log('TP_VIRTUAL',price=key,buyPx=c['buyPx'],
                     tpPx=c['tpPx'],cycleId=c['cycleId'],qty=str(bought-filled))
+    if reservation_poll is not None:
+        live_cids={r.get('clOrdId') for c in st['cycles'].values() for r in tp_records(c)
+                   if r.get('phase')=='PENDING' and not r.get('ordId')}
+        for cid in list(reservation_poll):
+            if cid not in live_cids:reservation_poll.pop(cid,None)
     return all_resolved
 
 def real_tp_active(st):
@@ -2425,15 +2526,25 @@ def coverage_audit(st,pending,position):
     return len(active_sells),total,virtual
 
 
-def isolated_partial_coverage(st,pending,positions,actual,isolated):
+def isolated_partial_coverage(st,pending,positions,actual,isolated, *, emergency=False):
     """Fresh full identity and quantity proof for independent RUN only.
 
     Unknown attachment is counted as potential exchange SELL, never virtual.
     Reject all other unresolved intents and incomplete/contradictory snapshots.
     No mutation, no network, no cached admission across passes.
     """
-    if not isolated or not isinstance(pending,list) or st.get('panic_orders') or unresolved_aggregate(st):
+    if not isolated or not isinstance(pending,list) or unresolved_aggregate(st):
         return False
+    # Only PANIC may carry confirmed earlier partial liquidation fills. RUN
+    # can never trade on a state with panic_orders, even if terminal.
+    panic_qty=Decimal(0)
+    if st.get('panic_orders'):
+        if not emergency or control_mode()!='PANIC':return False
+        if any(e.get('state') not in ('filled','canceled','mmp_canceled','rejected','EXPIRED_ABSENT')
+               for e in st['panic_orders']):return False
+        try:panic_qty=panic_executions(st)
+        except (KeyError,TypeError,ValueError,ArithmeticError):return False
+        if not panic_qty.is_finite() or panic_qty<0:return False
     if (len(positions)!=1 or positions[0].get('instId')!=INST
             or positions[0].get('posSide')!='net' or actual<=0):
         return False
@@ -2450,8 +2561,9 @@ def isolated_partial_coverage(st,pending,positions,actual,isolated):
         reserved=Decimal(0); virtual=Decimal(0); partial=Decimal(0); sells=Decimal(0)
         local=Decimal(0); sell_count=0
         reservation_cids=[r.get('clOrdId') for c in st['cycles'].values()
-                          for r in c.get('tpOrders',[]) if id(r) in isolated]
-        if (not all(reservation_cids) or len(set(reservation_cids))!=len(isolated)):
+                          for r in c.get('tpOrders',[]) if r.get('clOrdId') in isolated]
+        if (not all(reservation_cids) or len(reservation_cids)!=len(isolated)
+                or len(set(reservation_cids))!=len(isolated)):
             return False
         reservation_cids=set(reservation_cids)
         def match(oid,cid,side,px,sz,filled):
@@ -2474,8 +2586,6 @@ def isolated_partial_coverage(st,pending,positions,actual,isolated):
             records=c.get('tpOrders',[])
             active=active_tp_records(c)
             if c.get('clOrdId') in reservation_cids:return False
-            if any(r.get('clOrdId') in reservation_cids and id(r) not in isolated for r in records):
-                return False
             for cid in [c.get('clOrdId')]+[r.get('clOrdId') for r in records]:
                 # Aggregate exits legitimately share a client ID across terminal
                 # records; only live/reserved identity ownership is checked below.
@@ -2485,7 +2595,7 @@ def isolated_partial_coverage(st,pending,positions,actual,isolated):
             if status in ('CLOSED','CANCELED','EXITED'):
                 if remainder or active:return False
                 continue
-            if status in ('BUY_LIVE','BUY_PARTIAL'):
+            if status in ('BUY_LIVE','BUY_PARTIAL') or (status=='CANCELING' and c.get('electiveCancel')):
                 if active or records or sold or not match(c.get('ordId'),c.get('clOrdId'),
                         'buy',D(c['buyPx']),original,bought):return False
                 partial+=remainder;continue
@@ -2497,11 +2607,11 @@ def isolated_partial_coverage(st,pending,positions,actual,isolated):
             for r in active:
                 qty=D(r['sz'])-D(r.get('filled'))
                 if qty<=0:return False
-                if id(r) in isolated:
+                if r.get('clOrdId') in isolated:
                     if (r.get('phase')!='PENDING' or r.get('ordId') or r.get('clOrdId') in cids
                             or len(records)!=1 or qty!=remainder):return False
-                    seen_isolated.add(id(r));reserved+=qty
-                elif r.get('phase')=='ACTIVE':
+                    seen_isolated.add(r['clOrdId']);reserved+=qty
+                elif r.get('phase')=='ACTIVE' or (r.get('phase')=='CANCELING' and r.get('electiveCancel')):
                     if not match(r.get('ordId'),r.get('clOrdId'),'sell',D(c['tpPx']),
                                  D(r['sz']),D(r.get('filled'))):return False
                     sells+=qty;sell_count+=1
@@ -2510,7 +2620,9 @@ def isolated_partial_coverage(st,pending,positions,actual,isolated):
             if cycle_covered!=remainder:return False
         return (seen_isolated==isolated and expected_ids==ids
                 and sell_count+len(isolated)<=REDUCE_ONLY_HARD_CAP
-                and local==actual and sells+virtual+partial+reserved==actual)
+                and panic_qty<=virtual and reserved<=actual
+                and local==actual+panic_qty
+                and sells+virtual+partial+reserved==actual+panic_qty)
     except (KeyError,TypeError,ValueError,ArithmeticError):
         return False
 
@@ -2677,10 +2789,10 @@ def partial_cleanup_action(st,bid,actual,mode, *, isolated=None, reserved_qty=0)
         if c['state'] in ('CLOSED','EXITED','CANCELED'):
             continue
         records=active_tp_records(c)
-        if isolated and any(id(rec) in isolated for rec in records):
+        if isolated and any(rec.get('clOrdId') in isolated for rec in records):
             # Leave THIS exact unknown attachment and its BUY level intact.
             # Independently verified partial cycles remain serviceable.
-            if len(records)!=1 or id(records[0]) not in isolated:
+            if len(records)!=1 or records[0].get('clOrdId') not in isolated:
                 die('Invalid partial attachment isolation')
             continue
         for rec in records:
@@ -2956,18 +3068,18 @@ def maintain_virtual_tp(st,pending,position,bid=None,tp_buffer=None,cancel_overr
         die('Invalid TP reservation')
     real,_,_=coverage_audit(st,pending,position-reserved_qty if reserved_qty else position)
     active=real_tp_active(st)
-    real+=reserved_count
+    combined=real+reserved_count
     if tp_buffer is None and real>REAL_TP_TARGET:
         # Offline callers may omit controller.  LIVE loop always passes one
         # persistent scheduler; an implicit one never bypasses the trade-quiet grace.
         tp_buffer=TPBufferScheduler()
     now=time.monotonic()
     if tp_buffer is not None:tp_buffer.observe(active,now)
-    if tp_buffer is not None and real>=REAL_TP_MAX and not tp_buffer.overflow_notified:
-        log('TP_HARD_CAP_REACHED',real=real,maximum=REAL_TP_MAX,
+    if tp_buffer is not None and combined>=REAL_TP_MAX and not tp_buffer.overflow_notified:
+        log('TP_HARD_CAP_REACHED',real=real,reserved=reserved_count,maximum=REAL_TP_MAX,
             reason='No additional BUY capacity; trim surplus one by one')
         tp_buffer.overflow_notified=True
-    elif tp_buffer is not None and real<REAL_TP_MAX:
+    elif tp_buffer is not None and combined<REAL_TP_MAX:
         tp_buffer.overflow_notified=False
     if real>REAL_TP_TARGET:
         # One uncertain elective SELL cancel may remain live and reserved.
@@ -2976,7 +3088,7 @@ def maintain_virtual_tp(st,pending,position,bid=None,tp_buffer=None,cancel_overr
             return 'NONE'
         # Cancel surplus only after trade-quiet interval (or pressure threshold).
         # During active BUY refill, the live loop defers this cleanup.
-        if not tp_buffer.cancel_due(real,now):return 'NONE'
+        if not tp_buffer.cancel_due(combined,now):return 'NONE'
         # Exactly ONE cancel per reconciled REST snapshot, and no faster than
         # 100ms between submissions. Never operate on the nearest 25 real SELL.
         candidates=tp_buffer_candidates(active,bid)
@@ -2986,7 +3098,7 @@ def maintain_virtual_tp(st,pending,position,bid=None,tp_buffer=None,cancel_overr
             if reserved_count:return 'NONE'
             die('TP buffer has no removable surplus')
         _,c,rec=candidates[0]
-        capacity_pressure=(real+BUY_MAX+5>=REAL_TP_MAX)
+        capacity_pressure=(combined+BUY_MAX+5>=REAL_TP_MAX)
         preempt=(getattr(tp_buffer,'critical_preempt',None) if capacity_pressure
                  else getattr(tp_buffer,'preempt',None))
         if callable(preempt) and preempt():return 'NONE'
@@ -3002,9 +3114,9 @@ def maintain_virtual_tp(st,pending,position,bid=None,tp_buffer=None,cancel_overr
         log('TP_BUFFER_CLEANUP',price=c['tpPx'],
             buyPx=c['buyPx'],tpPx=c['tpPx'],cycleId=c['cycleId'],bid=str(bid),
             active_before=real,buffer_before=real-REAL_TP_TARGET,
-            above_max=real>=REAL_TP_MAX,interval_ms=int(1000*TP_BUFFER_CANCEL_INTERVAL),
+            reserved=reserved_count,above_max=combined>=REAL_TP_MAX,interval_ms=int(1000*TP_BUFFER_CANCEL_INTERVAL),
             quiet_ms=quiet_ms,cancel_gap_ms=gap_ms,
-            reason='order_cap' if real>=REAL_TP_MAX else 'cooldown')
+            reason='order_cap' if combined>=REAL_TP_MAX else 'cooldown')
         return 'CANCEL'
     # Quiet grace is ONLY for elective rotation/cleanup, NEVER for
     # replenishing a missing real protective TP below its configured target.
@@ -3052,9 +3164,12 @@ def maintain_virtual_tp(st,pending,position,bid=None,tp_buffer=None,cancel_overr
         # A rejected SELL can be retried only after its cooldown; an
         # ambiguous submission never enters the virtual-only list.
         n=min(TP_ACTIONS_PER_PASS,REAL_TP_TARGET-real)
+        if reserved_count:
+            n=max(0,min(n,REAL_TP_MAX-combined,REDUCE_ONLY_HARD_CAP-combined,
+                        EX_CAP-len(pending)-reserved_count))
         attempted=False
         for _,c in virtual[:n]:
-            if len(real_tp_active(st))+reserved_count>=REAL_TP_TARGET:break
+            if len(real_tp_active(st))>=REAL_TP_TARGET:break
             placed=place_virtual_tp(st,c)
             attempted=attempted or bool(placed)
         return 'RESTORE' if attempted else 'NONE'
@@ -3533,7 +3648,7 @@ def position_retry_delay(retry, pause=0.5):
     return min(float(pause), 0.15 if retry==1 else (0.30 if retry==2 else 0.50))
 
 
-def reconcile_position(st, timeout=30, pause=0.5, *, allow_mismatch=False, run_isolation=None):
+def reconcile_position(st, timeout=30, pause=0.5, *, allow_mismatch=False, run_isolation=None, reservation_poll=None, emergency_isolation=False, isolation_diag=None):
     """Read *fresh* order states and net position until they agree.
 
     Under rapid multiple fills a sequential GET /trade/order pass is not an
@@ -3545,6 +3660,8 @@ def reconcile_position(st, timeout=30, pause=0.5, *, allow_mismatch=False, run_i
     """
     # Output is cleared even on failure; only a complete fresh pass can grant it.
     if run_isolation is not None:run_isolation.clear()
+    if isolation_diag is not None:
+        isolation_diag.clear();isolation_diag['reason']='NO_FRESH_PROOF'
     p=(_ReconProfiler(trace_supplier=getattr(A,'_reader_trace_id',None),
                       trace_sink=LATENCY.record)
        if globals().get('_PERF_RECON_ENABLED',False) else None)
@@ -3565,14 +3682,18 @@ def reconcile_position(st, timeout=30, pause=0.5, *, allow_mismatch=False, run_i
                 else:
                     # Preserve strict result for shutdown, audit and financial workers.
                     # track's optional result excludes ONLY verified reservations.
-                    independent=(p.run('track',lambda:track(st,pending,isolation=isolated))
-                                 if p is not None else track(st,pending,isolation=isolated))
+                    args={'isolation':isolated}
+                    if reservation_poll is not None:args['reservation_poll']=reservation_poll
+                    independent=(p.run('track',lambda:track(st,pending,**args))
+                                 if p is not None else track(st,pending,**args))
                     resolved=independent and not isolated
                 (p.run('verify_existing',verify_existing,st,pending) if p is not None else verify_existing(st,pending))
             # The position GET happens as soon as the confirmed fact batch is
             # reconciled/durable; NEVER fetch positions before inspecting fills.
             if st.get('panic_orders'):
-                resolved=reconcile_panic_orders(st,pending) and resolved
+                panic_resolved=reconcile_panic_orders(st,pending)
+                resolved=panic_resolved and resolved
+                if isolated is not None:independent=independent and panic_resolved
             # B1 requires a complete and durable orders-pending/fills pass.
             # First pass only; mismatches/retries always use NORMAL/EXIT.
             _b1_ctx=getattr(_PERF_LOCAL,'b1_active_context',None)
@@ -3601,12 +3722,27 @@ def reconcile_position(st, timeout=30, pause=0.5, *, allow_mismatch=False, run_i
                 if previous is not None:
                     log('POSITION_SYNC_OK',exchange=str(actual),local=str(expected),
                         retries=previous)
-                if (run_isolation is not None and isolated and independent
-                        and not st.get('panic_orders') and control_mode()=='RUN'
-                        and isolated_partial_coverage(st,pending,positions,actual,isolated)):
-                    run_isolation.update(isolated)
+                reason='NO_RESERVATION'
+                if run_isolation is not None and isolated:
+                    reason='OTHER_INTENT_UNRESOLVED'
+                    if independent:
+                        mode=control_mode();reason='MODE_BLOCKED'
+                        if mode=='RUN' and not st.get('panic_orders'):
+                            reason='COVERAGE_PROOF_FAILED'
+                            if isolated_partial_coverage(st,pending,positions,actual,isolated):
+                                run_isolation.update(isolated);reason='PASS'
+                        elif emergency_isolation and mode in ('PANIC','HARD'):
+                            reason='COVERAGE_PROOF_FAILED'
+                            if isolated_partial_coverage(st,pending,positions,actual,isolated,emergency=True):
+                                run_isolation.update(isolated);reason='PASS'
+                if isolation_diag is not None:isolation_diag['reason']=reason
                 return pending,resolved,actual
             if p is not None:p.mismatches+=1
+            if isolation_diag is not None:isolation_diag['reason']='POSITION_MISMATCH'
+            # Known fills have already been processed. A remaining net mismatch
+            # invalidates cheap polling for the next pass (even after timeout).
+            if reservation_poll is not None and isolated:
+                for cid in isolated:reservation_poll.pop(cid,None)
             remaining=timeout-(time.monotonic()-started)
             if remaining <= 0:
                 if allow_mismatch:
@@ -3658,7 +3794,7 @@ def audit_once(st, *, allow_partial_isolation=False):
         # reconcile_position granted isolation only from a complete fresh pass.
         # Do not make an unknown TP virtual or claim its link resolved.
         reserved=sum((D(r['sz'])-D(r.get('filled')) for c in st['cycles'].values()
-                      for r in tp_records(c) if id(r) in isolated),D(0))
+                      for r in tp_records(c) if r.get('clOrdId') in isolated),D(0))
         sells=[o for o in pending if o.get('side')=='sell']
         real=len(sells)
         covered=sum((D(o['sz'])-D(o.get('accFillSz')) for o in sells),D(0))
@@ -3791,6 +3927,8 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
     sync_warn_level=0
     last_isolated_cancel_ids=()
     last_partial_isolation=False
+    reservation_poll={}
+    reservation_poll_mode=None
     maker_cost=None
     tp_buffer=TPBufferScheduler()
     # Local hint only: it does not authorize trading or consume WS causes.
@@ -3864,7 +4002,10 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             ws_start=time.perf_counter_ns()
             ws_n=0
             while not watcher.events.empty():
-                log('WS_ORDER',**watcher.events.get_nowait())
+                event=watcher.events.get_nowait()
+                reservation_poll.pop(event.get('clOrdId'),None)
+                reservation_poll.pop(event.get('algoClOrdId'),None)
+                log('WS_ORDER',**event)
                 ws_n+=1
             if ws_n:
                 latency_ms('ws_drain',ws_start,count=ws_n)
@@ -3934,10 +4075,15 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                         LATENCY.record('b3_event_to_reconcile',measured_ms,
                             source=source,event_clock='perf_counter_ns')
                     last_b3_event_at_ns=None
-                run_isolation=set()
+                run_isolation=set();isolation_diag={}
+                if mode!=reservation_poll_mode:
+                    reservation_poll.clear();reservation_poll_mode=mode
+                use_isolation=mode in ('RUN','PANIC','HARD')
                 pending,all_resolved,actual=reconcile_position(
                     st,timeout=30,allow_mismatch=(mode in ('SOFT','HARD','PANIC')),
-                    run_isolation=run_isolation if mode=='RUN' else None)
+                    run_isolation=run_isolation if use_isolation else None,
+                    reservation_poll=reservation_poll if use_isolation else None,
+                    emergency_isolation=mode in ('PANIC','HARD'),isolation_diag=isolation_diag)
             finally:
                 if _b1_local is not None:
                     _b1_local.b1_active_context=None
@@ -3947,7 +4093,7 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             # permits only independent grid work; CANCELING stays durable.
             if elective_cancel_transport.busy:
                 all_resolved=False
-                run_isolation.clear()
+                run_isolation.clear();isolation_diag['reason']='CANCEL_TRANSPORT_BUSY'
             isolated_run=bool(run_isolation)
             # Only the uncertain SAME ordId remains reserved. Independent
             # grid writes may resume after FULL position and coverage proof.
@@ -3977,8 +4123,9 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             if all_resolved or isolated_run:
                 if isolated_run:
                     if not last_partial_isolation:
-                        log('PARTIAL_ATTACHED_TP_ISOLATED',count=len(run_isolation),
-                            message='Reserved unknown SELL; independently reconciled grid levels may trade')
+                        log('PARTIAL_ATTACHED_TP_ISOLATED',count=len(run_isolation),mode=mode,
+                            message=('Reserved unknown SELL; independently reconciled grid levels may trade'
+                                     if mode=='RUN' else 'Reserved unknown SELL; independent shutdown actions only'))
                     last_partial_isolation=True
                     # Do not misreport the attachment as resolved.
                     sync_since=None;sync_warn_level=0
@@ -3990,7 +4137,14 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                     sync_since=None;sync_warn_level=0
             else:
                 if last_partial_isolation:
-                    log('PARTIAL_ATTACHED_ISOLATION_HOLD',message='Fresh independent proof unavailable; new BUY blocked')
+                    log('PARTIAL_ATTACHED_ISOLATION_HOLD',
+                        reason=isolation_diag.get('reason','NO_FRESH_PROOF'),
+                        cancel_transport_busy=bool(elective_cancel_transport.busy),
+                        buy_placing=sum(c.get('state')=='PLACING' for c in st['cycles'].values()),
+                        buy_canceling=sum(c.get('state')=='CANCELING' for c in st['cycles'].values()),
+                        tp_pending=sum(r.get('phase') in ('PENDING','PLACING') for c in st['cycles'].values() for r in tp_records(c)),
+                        tp_canceling=sum(r.get('phase')=='CANCELING' for c in st['cycles'].values() for r in tp_records(c)),
+                        message='Fresh independent proof unavailable; new BUY blocked')
                     last_partial_isolation=False
                 if sync_since is None:sync_since=time.monotonic()
                 elapsed=time.monotonic()-sync_since
@@ -4026,8 +4180,18 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                     try:terminal_bid=market.get_bid()  # public quote REST fallback
                     except (ExchangeTemporary,ExchangeUnresolved):
                         log('TERMINAL_BID_UNAVAILABLE',mode='HARD')
-                if controlled_shutdown(st,pending,actual,all_resolved,mode,terminal_bid):
+                shutdown_args={'isolated':run_isolation} if isolated_run else {}
+                if controlled_shutdown(st,pending,actual,all_resolved,mode,terminal_bid,**shutdown_args):
                     return
+                # Nothing left to do until positive child evidence arrives.
+                # Avoid 150ms polling forever; private events wake immediately.
+                if isolated_run and not pending and not active_buy(st) and not real_tp_active(st):
+                    reserved=sum((D(r['sz'])-D(r.get('filled'))
+                                  for c in st['cycles'].values() for r in tp_records(c)
+                                  if r.get('clOrdId') in run_isolation),D(0))
+                    if mode=='HARD' or actual==reserved:
+                        watcher.private_wake.wait(INDEPENDENT_AUDIT_SEC)
+                        continue
                 time.sleep(0.15)
                 continue
             # Re-read latch AFTER REST I/O. A different bot may have tripped
@@ -4057,7 +4221,10 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                         log('TP_FAILURE_BUY_HOLD',reason='UNCLASSIFIED_ATTACHED_TP',
                             cycles=len(holds),code=holds[0][1],severity='CRITICAL')
                 elif isolated_run:
-                    control_ack(mode,'RUNNING',isolated_attached_tp=len(run_isolation))
+                    control_ack(mode,'RUNNING',isolated_attached_tp=len(run_isolation),
+                        reserved_contracts=str(sum((D(r['sz'])-D(r.get('filled'))
+                            for c in st['cycles'].values() for r in tp_records(c)
+                            if r.get('clOrdId') in run_isolation),D(0))))
                 elif not all_resolved and sync_since is not None and time.monotonic()-sync_since>=120:
                     control_ack(mode,'BUY_HOLD_RECONCILIATION',seconds=120)
                 else:
@@ -4126,7 +4293,7 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                 if control_mode()!='RUN':continue
                 reserved_qty=sum((D(r['sz'])-D(r.get('filled'))
                     for c in st['cycles'].values() for r in tp_records(c)
-                    if id(r) in run_isolation),D(0))
+                    if r.get('clOrdId') in run_isolation),D(0))
                 if not 0<reserved_qty<=actual:
                     raise ExchangeUnresolved('Isolation reservation lost')
             partial_action=(partial_cleanup_action(st,bid,actual,mode,
@@ -4144,10 +4311,10 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
             # rearm under-target real protective TP *before* BUY.
             # At target, the farthest-to-nearest TP rotation is elective and
             # now waits until after the BUY refill. Surplus already waits.
-            real_tp_now=len(real_tp_active(st))+len(run_isolation)
+            real_tp_now=len(real_tp_active(st))
             tp_buffer.observe(real_tp_active(st),time.monotonic())
             tp_pressure=(real_tp_now>REAL_TP_TARGET and
-                         real_tp_now+BUY_MAX+5>=REAL_TP_MAX)
+                         real_tp_now+len(run_isolation)+BUY_MAX+5>=REAL_TP_MAX)
             if real_tp_now>=REAL_TP_TARGET and not tp_pressure:
                 tp_action='NONE'
             else:

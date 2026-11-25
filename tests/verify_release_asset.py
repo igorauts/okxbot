@@ -44,7 +44,8 @@ def allowed_package_member(name):
         'funding/test_funding_view_backup.py',
     ):return True
     if parts in (('tests','fixtures','okx_bot_original_full_v0760.py.gz'),
-                 ('tests','fixtures','okx_bot_v0780_baseline.py.gz')):
+                 ('tests','fixtures','okx_bot_v0780_baseline.py.gz'),
+                 ('tests','fixtures','okx_bot_v0781_baseline.py.gz')):
         return True
     if (len(parts)==5 and parts[:2]==('tests','stats_v2_original')
         and parts[2] in ('stats_v2_release_work','stats_v2_prod_candidate')
@@ -80,7 +81,7 @@ def verify(zip_path):
                      'run_checks.sh','tests/test_final_release_guards.py'):
             if name not in names:raise ValueError('Missing: '+name)
         # Git/ZIP must preserve CLI executable modes, not merely shebangs.
-        for executable in ('okxbot.py','okx_live_upgrade.py','rollout_preflight.py'):
+        for executable in ('okxbot.py','okx_live_upgrade.py','rollout_preflight.py','okx_dependency_attestation.py'):
             if executable not in names or (z.getinfo(executable).external_attr>>16)&0o777!=0o755:
                 raise ValueError('CLI executable permission missing: '+executable)
         manifest=json.loads(z.read('engine_manifest.json'))
