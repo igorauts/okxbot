@@ -105,6 +105,7 @@ with tempfile.TemporaryDirectory() as directory:
              'terminal_mode':'PANIC_DONE','terminal_snapshot':{'at_utc':'2026-10-21T12:00:00Z'}} if str(path).endswith('bot_state.json') else {'updated_at':'2026-10-21T12:00:00Z'}), \
          patch.object(followups,'_confirmed_panic',return_value=True), \
          patch.object(followups,'_final_stats',return_value='verified'), \
+         patch.object(followups,'terminal_funding',return_value=type('Funding',(),{'complete':True})()), \
          patch.object(followups,'_panic_message',return_value='🏁 verified'), \
          patch.object(followups,'one',side_effect=lambda api,st,key,msg,**kw: outgoing.append((key,msg))):
         followups.panic_scan(api,st,{'near0721':root})

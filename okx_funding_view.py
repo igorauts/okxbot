@@ -7,7 +7,9 @@ import sqlite3
 from collections import OrderedDict
 import time
 from typing import Optional
-from okx_funding_ledger import read_snapshot, integer_ms, require, creation_ms
+from okx_funding_ledger import (read_snapshot, integer_ms, require, creation_ms,
+    terminal_identity, read_terminal_snapshot_status, terminal_horizon,
+    terminal_env_token, read_terminal_local, terminal_failure, terminal_registry_conflict)
 
 @dataclass(frozen=True)
 class FundingValue:
@@ -156,3 +158,113 @@ def display_funding(path, instrument, created_at, *, now_ms=None):
     last_complete = (snap.synced_ms if snap.complete else snap.last_complete_ms) if snap else None
     return FundingDisplay(snap.amount if snap else Decimal(0), snap,
                           now-(last_complete if last_complete is not None else created)>WARNING_MS, fallback, unavailable)
+
+
+TERMINAL_DB = Path('/srv/okx-funding/funding.sqlite')
+
+@dataclass(frozen=True)
+class TerminalFunding:
+    identity: tuple
+    amount: Decimal
+    complete: bool
+    conflict: bool = False
+
+    def add_to(self, trade):
+        require(self.complete and isinstance(trade,Decimal) and trade.is_finite(),
+                'TERMINAL_FINANCE_NOT_CONFIRMED')
+        with localcontext() as ctx:
+            ctx.prec=320
+            return trade+self.amount
+
+
+def terminal_funding(root, *, path=None):
+    """Local only. Missing, corrupt, or not-yet-covered is never final zero."""
+    try:
+        ident,_=terminal_identity(root)
+        db=TERMINAL_DB if path is None else path
+        row,conflict=read_terminal_snapshot_status(db,ident)
+        if (row is None or not row[3]) and not conflict:
+            # The same previously verified live snapshot already covers the
+            # last settlement. No network, no waiting for the next timer.
+            try:
+                if not terminal_registry_conflict(root,ident):
+                    local=read_terminal_local(db,ident,terminal_env_token(root))
+                    if local is not None:
+                        row=local
+            except (OSError,sqlite3.Error,ValueError,TypeError,KeyError,ArithmeticError):
+                pass
+        if row is None:
+            return None
+        raw,last,synced,complete=row
+        require(isinstance(raw,str) and len(raw)<=320 and
+                re.fullmatch(r'-?[0-9]+(?:\.[0-9]+)?',raw) is not None,'INVALID_TERMINAL_AMOUNT')
+        require(complete in (0,1) and (not complete or integer_ms(synced)>=terminal_horizon(ident)), 'INVALID_TERMINAL_FUNDING_TIME')
+        stop=max(ident[3],terminal_horizon(ident)) if ident[5]=='PANIC_DONE' else ident[3]
+        require(last is None or ident[2]<=integer_ms(last)<stop, 'INVALID_TERMINAL_LAST_BILL')
+        return TerminalFunding(ident,Decimal(raw),bool(complete) and not conflict,conflict)
+    except (OSError,sqlite3.Error,ValueError,TypeError,KeyError,ArithmeticError):
+        return None
+
+
+def terminal_wait(root, *, path=None, now_ms=None):
+    """Return (wait, reason) for a single final PANIC financial report.
+
+    At most one minute tick plus a bounded transport allowance after PANIC,
+    including any remaining settlement minute. Never block Telegram on Funding I/O or retry forever.
+    """
+    db=TERMINAL_DB if path is None else path
+    try:
+        ident,_=terminal_identity(root)
+        token=terminal_env_token(root)
+        if terminal_registry_conflict(root,ident):
+            return False,'OVERLAPPING_INSTRUMENT_LIFETIMES'
+        reason=terminal_failure(db,ident,env_token=token)
+        if reason:
+            return False,reason
+        now=int(time.time()*1000) if now_ms is None else integer_ms(now_ms)
+        deadline=ident[3]+75000
+        return now<deadline,'INCOMPLETE_HISTORY_OR_COLLECTION_TIMEOUT'
+    except (OSError,sqlite3.Error,ValueError,TypeError,KeyError,ArithmeticError) as exc:
+        reason=str(exc)
+        if not re.fullmatch(r'[A-Z0-9_]+',reason):
+            reason='TERMINAL_EVIDENCE_UNAVAILABLE'
+        return False,reason
+
+
+def _terminal_usdt(amount):
+    with localcontext() as ctx:
+        ctx.prec=320
+        return f'{"+" if amount>=0 else "−"}${abs(amount):,.8f}'
+
+
+def terminal_report(root, final, *, path=None):
+    """Render the historical trade report without editing the immutable archive."""
+    text=final['report']
+    # Old engines correctly stored only trading accounting. Preserve it and
+    # replace the display label, not the file, when showing the unified result.
+    text=text.replace('ИТОГОВЫЙ PnL:', 'ТОРГОВЫЙ PnL:')
+    text='\n'.join(line for line in text.splitlines() if not line.startswith('Фандинг не включён.'))
+    funding=terminal_funding(root,path=path)
+    if funding is not None and funding.identity[4]!=final.get('terminal_state_sha256'):
+        funding=None
+    hard_note='\nHARD: позиция может оставаться открытой; Funding после остановки не включён.' if final.get('mode')=='RETIRED' else ''
+    if funding is None or not funding.complete:
+        conflict=funding is not None and funding.conflict
+        wait,reason=(False,'LEDGER_CONTRADICTION') if conflict else terminal_wait(root,path=path)
+        note=('FUNDING: расхождение после финализации; сохранённый результат' if conflict else 'FUNDING: не подтверждён')
+        if not wait:
+            note+=' ('+reason+')'
+        if funding is not None:
+            note+=f' (известно {_terminal_usdt(funding.amount)})'
+        return text+'\n'+note+('\nИТОГОВЫЙ PnL: '+('ожидает финансовой финализации' if wait else 'не подтверждён') if final.get('mode')=='PANIC_DONE' else '')+hard_note
+    text+='\nFUNDING: '+_terminal_usdt(funding.amount)
+    if final.get('mode')=='PANIC_DONE':
+        try:
+            vals=final['values'];trade=Decimal(str(vals['final_trade_pnl']))
+            with localcontext() as ctx:
+                ctx.prec=320
+                require(abs(Decimal(str(vals['grid_profit']))+Decimal(str(vals['other_closed_profit']))+Decimal(str(vals['panic_pnl']))-trade)<=Decimal('0.00000001'), 'INVALID_TRADE_TOTAL')
+            text+='\nИТОГОВЫЙ PnL: '+_terminal_usdt(funding.add_to(trade))
+        except (KeyError,ValueError,TypeError,ArithmeticError):
+            text+='\nИТОГОВЫЙ PnL: не подтверждён'
+    return text+'\nВсе суммы — USDT. Funding ограничен сроком жизни этого экземпляра.'+hard_note

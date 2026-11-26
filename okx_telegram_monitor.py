@@ -341,6 +341,15 @@ def _age_label(start):
 
 def mode_and_stats(name, *, total_sink=None):
     root=Path(BOT_DIRS[name])
+    final=read_json(root/'state/final_stats.json')
+    if (root/'state/final_stats.json').exists():
+        cfg=read_json(root/'config.json')
+        if (final.get('schema_version')!=1 or final.get('complete') is not True or
+            final.get('instrument')!=cfg.get('instrument') or
+            final.get('mode') not in ('PANIC_DONE','RETIRED') or not isinstance(final.get('report'),str)):
+            return '<b>'+html.escape(name)+'</b>\n⚠️ Финальный отчёт не подтверждён'
+        from okx_funding_view import terminal_report
+        return '<b>'+html.escape(name)+'</b>\n'+html.escape(terminal_report(root,final))
     stats=json.loads((root/'state/stats.json').read_text()) if (root/'state/stats.json').is_file() else {}
     values=_report_values(stats.get('report',''))
     age=_age_label(_launch_epoch(root,values))
@@ -723,7 +732,7 @@ def ingest_events(api,st):
     market_process(api,st,{k:Path(v) for k,v in BOT_DIRS.items()})
     names={k:Path(v) for k,v in BOT_DIRS.items() if _active_service(k)}
     observer_fault_scan(api,st,names)
-    panic_scan(api,st,{k:Path(v) for k,v in BOT_DIRS.items()})
+    panic_scan(api,st,{k:Path(v) for k,v in BOT_DIRS.items()},base=BASE)
     partial_scan(api,st,names,{k:Path(v) for k,v in BOT_DIRS.items()})
     zero_buy_scan(api,st,names)
     gate_alert_scan(api,st)

@@ -28,7 +28,7 @@
   ],
   "engine_version": "0.7.85",
   "files": {
-    "engine_manifest.json": "c4ec4c3e3fef82df16f2beaba0d56fff566329ceb4f319d0dac049efcf5bbcae",
+    "engine_manifest.json": "0f80ce47d57fb9b36b5e9849f590125443ba23e5012d16c954c86fdab2563b37",
     "okx_accounting.py": "3773dffc5f70d88a7cf90e664807236fa35f322d8bb78668be4cef9594531d2c",
     "okx_api.py": "cf0dda4ee158d1cbb30ba1c537160b3cd4e5dfdf690284365aa69e1385e1a0ea",
     "okx_bot.py": "c68f370655cb7c59a0741d3089c6a5a17f87e3e67e7f6e96f9481c13dc1302cb",
@@ -39,7 +39,7 @@
     "okx_idle_reconcile.py": "bcc30292ca972ad1f3a6f56c3328db7110a3482629913a392be725939dfc84a0",
     "okx_latency.py": "bc35caaec1b306953cc2e654e131742189697306083474e2acec9c6a1229c777",
     "okx_latency_rollup.py": "9bfe907c86cc47f78cc55248fc2b1918d071d50d790efad72aeca9a86e842cb8",
-    "okx_manager_version.py": "2bb0a6c021094b8b89a66b872ca068e2fe83caed0d29fb7b31af6e0e9029ac5c",
+    "okx_manager_version.py": "05506f58aa322ce8314ff3dc795342f99dada78a1306a5dbe5f23e365f454a72",
     "okx_position_reader_client.py": "14ef4c0b6ebc4b6153d9874c67c0982cefd89c18da84c6f12b2f74585f2f6704",
     "okx_position_reader_core.py": "a0a2c67913b6277981ad26b4348dc7be595c71015cfd076d3f59bc94aa2d21de",
     "okx_positions_fifo.py": "2349dcdbf2f99ed8ba11223f8daf84c3bb90146e5c2655150920277049c093b3",
@@ -58,12 +58,12 @@
     "okx_terminal_accounting.py": "0a1902ac323b1b3bc0ee7464fd7799d51ebf1df0dd77f1467085b078cf932753",
     "okx_tp_telemetry.py": "45c5324efd0cc67ec55dd7f30b52844e4b53f767d30ae2d615cd11398c346e1a",
     "okx_version.py": "fe9f3f948dcf7df85a41468b637a5cb804a2e1aefd5a5133f5709481f3f5dadf",
-    "okxbot.py": "ad98a675df7acfa55e3436abba19780c448ea3e863a5e4b2f17403591a2a59dc",
+    "okxbot.py": "bc75443bbebc5a70e52a315d330ec71924e36e36b86e52a8e37bf60c45290288",
     "requirements.txt": "769713e3bf1092a3392790b05318eca3e983605e503a700d47d9481c4cbb67d7"
   },
-  "provenance": "v0.7.83 published baseline; approved partial BUY detachment and 5/3 policy",
-  "release_version": "0.7.86",
+  "provenance": "v0.7.86 published source baseline; terminal funding lifecycle audit revision",
+  "release_version": "0.7.87",
   "schema": 1,
-  "scope": "engine, API, manager and controlled upgrade; OFFLINE candidate only",
+  "scope": "unchanged trading engine and dependencies; manager/Telegram/Funding service maintenance; bounded PANIC finalization; OFFLINE only",
   "state_schema": 1
 }

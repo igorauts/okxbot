@@ -29,7 +29,7 @@ def allowed_package_member(name):
     if len(parts)==3 and parts[:2]==('tests','funding') and parts[2] in (
             'benchmark_funding.py','f1_bills_fixture.json','test_funding_collector.py',
             'test_funding_f6.py','test_funding_f61.py','test_funding_ledger.py',
-            'test_funding_view_backup.py'):
+            'test_funding_view_backup.py','test_terminal_funding_lifetime.py'):
         return True
     if len(parts)==3 and parts[:2]==('deploy','reader'):
         return True

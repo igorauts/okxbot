@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.7.87 — 2026-11-26 UTC — Terminal Funding Lifecycle (engine 0.7.85 unchanged)
+
+- Finalize funding by attested terminal instance lifetime; retain final amounts independently of active snapshots.
+- One PANIC financial notification: immediately from a durable covered settlement proof when available; otherwise a bounded wait for a targeted collection, then an explicitly unconfirmed Funding result on failure. Never send a later funding correction.
+- Use the last possible hourly settlement window, including delayed bills in the settlement minute only for isolated PANIC lifetimes. Preserve exact per-instance proof and frozen records; block ambiguous successor attribution and later contradictions.
+- Keep hourly regular collection and its 120-second freshness cushion. Targeted terminal GET does not refresh active snapshots. Minute idle checks are silent and use metadata-only cache when safe.
+- No engine, trading policy, Reader, archive-file or API credential changes. HARD retains an open-position warning; no invented final total.
+
+- OFFLINE: 1079 tests; independent audit 108/108 test files. LIVE Funding, shared runtime and Telegram postflight passed; trading and Reader processes unchanged. See [release notes](RELEASE_NOTES_V0787.md).
+
 ## v0.7.86 — 2026-11-26 UTC — Service maintenance (engine 0.7.85)
 
 - Service-only cleanup; pinned engine remains 0.7.85.

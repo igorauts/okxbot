@@ -1,9 +1,9 @@
 {
   "component_sha256": {
     "funding/okx_funding_backup.py": "f02b43e1d04fd2ebabbc2d9224733d17ce87e18f8ebed6f1929a800d8c59d52c",
-    "funding/okx_funding_collector.py": "c2e93919d7c8f7f0993fe612e3a3e57536d6fa76605bbbcf64d0a3d0ba5638dc",
-    "okx_funding_ledger.py": "400d4f2a2a2eec04e66e2c3a74ca8827972525bf9fa14934d798754795b93ffc",
-    "okx_funding_view.py": "a3fb02505a4a9ec941f7c1fe01b7e1b30eeb2545c46579b52d568a1c10251f04",
+    "funding/okx_funding_collector.py": "7c56f0baf2482eb07a6330ad9d43b5ea180a68a09297a55135cdcb060758a0c0",
+    "okx_funding_ledger.py": "0ba1df641aadab6c503b3f3fac9fa13142e974974dfb925861ad9a0e5a0c17a2",
+    "okx_funding_view.py": "57adf0b27695cd632e03e95887e3badea71fb3aebca2bd7353f09cbb9797ea6b",
     "okx_position_reader_service.py": "86c525a77a101d09a0818954ac3fef4d2622778377c0449eb5da4acb854913e5",
     "okx_position_reader_watchdog.py": "e504f60c01575327be521185d20d4dfc72bffbdca8151ffab78354cd80852ee6"
   },
@@ -53,7 +53,7 @@
     "okx_position_reader_service.py": "okx_position_reader_service.py",
     "okx_position_reader_watchdog.py": "okx_position_reader_watchdog.py"
   },
-  "release_version": "0.7.86",
+  "release_version": "0.7.87",
   "retire_shared": {
     "okx_shared_runtime_deploy.py": "5715defdca47fd201462f32d7f0757516ff97a6963f95d04c95ac722c2fbcc47"
   },

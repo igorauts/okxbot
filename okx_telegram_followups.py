@@ -17,6 +17,7 @@ from pathlib import Path
 
 from okx_paths import cycles_db, pnl_db, state_file
 from okx_telegram_events import one
+from okx_funding_view import terminal_funding, terminal_wait
 from okx_telegram_views import read_json, number, human_amount, money, date_epoch
 
 TERMINAL = frozenset(('CLOSED', 'EXITED'))
@@ -305,8 +306,10 @@ def _final_stats(root, state):
     return final, nums, cv, coin
 
 
-def _panic_message(name, verified):
+def _panic_message(name, verified, funding, reason=None):
     final, v, cv, coin = verified
+    confirmed=(funding is not None and funding.complete and funding.identity[4]==final.get('terminal_state_sha256'))
+    total=funding.add_to(v['final_trade_pnl']) if confirmed else None
     closed = date_epoch(final.get('closed_at'))
     if closed is None:
         return None
@@ -321,25 +324,43 @@ def _panic_message(name, verified):
              f'PANIC SELL объём: {_fmt_qty(v["panic_sell_qty"]*cv)} {html.escape(coin)}',
              f'PANIC SELL комиссия: {money(v["panic_sell_fee"], 2, True)}',
              f'Открытая позиция: 0 {html.escape(coin)}', '',
-             f'<b>ИТОГОВЫЙ PnL: {money(v["final_trade_pnl"], 8, True)}</b>']
+             f'ТОРГОВЫЙ PnL: {money(v["final_trade_pnl"], 8, True)}']
+    if confirmed:
+        rows += [f'FUNDING: {money(funding.amount, 8, True)}',
+                 f'<b>ИТОГОВЫЙ PnL: {money(total, 8, True)}</b>']
+    else:
+        rows += [f'FUNDING: не подтверждён ({html.escape(reason or "TERMINAL_EVIDENCE_UNAVAILABLE")})',
+                 '<b>ИТОГОВЫЙ PnL: не подтверждён</b>']
     return '\n'.join(rows)
 
 
-def panic_scan(api, st, names):
-    """Two independent Telegram milestones; archived bots aren't replayed."""
+def panic_scan(api, st, names, *, base=None):
+    """One financial final, using a durable pending identity; no Funding follow-up."""
     since = st.setdefault(state_key('observing_since'), time.time())
     baseline = st.setdefault(state_key('panic_seen'), {})
-    for name, root in names.items():
+    pending = st.setdefault(state_key('panic_pending'), {})
+    roots=dict(names)
+    if base is not None:
+        base=Path(base).resolve()
+        for name,record in list(pending.items()):
+            try:
+                p=Path(record['root']).resolve()
+                if p!=base and base in p.parents and p.name==name and (p/'config.json').is_file():
+                    roots.setdefault(name,p)
+            except (OSError,ValueError,TypeError,KeyError):
+                continue
+    for name, root in roots.items():
         root = Path(root)
         state = read_json(state_file(root))
         if not _confirmed_panic(root, state):
-            if state.get('terminal_mode') not in ('RETIRED', 'PANIC_DONE'):
-                baseline.setdefault(name, 'observed_running')
+            if state.get('terminal_mode') not in ('RETIRED', 'PANIC_DONE') and name in names and state:
+                baseline[name]='observed_running'
+                pending.pop(name,None)
             continue
         final = read_json(root / 'state/control_ack.json')
         closed_at = date_epoch(final.get('updated_at'))
-        # Initial installation/restart must not flood chat with old archived PANICs.
         # First observed terminal after this monitor was already running is OK.
+        # Do not replay historical PANICs when Funding is added to their archive.
         if name not in baseline:
             baseline[name] = ('observed_running' if closed_at is not None and
                               closed_at >= since else 'old_terminal')
@@ -349,12 +370,31 @@ def panic_scan(api, st, names):
         marker = str(snapshot.get('at_utc') or final.get('updated_at') or '')
         if not marker:
             continue
+        key=f'panic/final/{name}/{marker}'
+        done='finalized:'+marker
+        if baseline[name]==done or key in st.get('incident_sent',{}):
+            baseline[name]=done
+            pending.pop(name,None)
+            continue
+        pending[name]={'root':str(root.resolve()),'marker':marker}
         verified = _final_stats(root, state)
         if verified is not None:
-            msg = _panic_message(name, verified)
+            funding=terminal_funding(root)
+            if funding is None or not funding.complete:
+                wait,reason=(False,'LEDGER_CONTRADICTION') if funding is not None and funding.conflict else terminal_wait(root)
+                if wait:
+                    continue
+                msg=_panic_message(name,verified,funding,reason)
+            else:
+                msg=_panic_message(name,verified,funding)
             if msg:
-                one(api, st, f'panic/final/{name}/{marker}', msg, html_mode=True)
+                # Persist-before-send is the existing durable outbox contract.
+                one(api, st, key, msg, html_mode=True)
+                baseline[name]=done
+                pending.pop(name,None)
         else:
+            # Preserve existing trading-accounting safety milestones. Funding
+            # never creates another notification or a provisional PnL report.
             age = time.time() - (closed_at if closed_at is not None else since)
             if age > 15:
                 one(api, st, f'panic/confirmed/{name}/{marker}',

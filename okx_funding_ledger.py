@@ -139,7 +139,7 @@ def merged_coverage(intervals):
 def fully_covered(intervals, start, end):
     return start >= end or any(a <= start and b >= end for a, b in intervals)
 
-def apply_complete_windows(path, windows, inventory, synced_ms, *, reconciled_ms=None, account_fingerprint=None, blocked=(), issues=(), reconcile_missing=False):
+def apply_complete_windows(path, windows, inventory, synced_ms, *, reconciled_ms=None, account_fingerprint=None, blocked=(), issues=(), reconcile_missing=False, terminals=(), regular_sync=False, live_proofs=None, publish_live=True):
     """Commit fully fetched [begin,end) windows and publish one snapshot atomically.
 
     F3 caller MUST attest all pages of each window succeeded; partial page sets are
@@ -243,44 +243,62 @@ def apply_complete_windows(path, windows, inventory, synced_ms, *, reconciled_ms
         # Decimal exactness: allow both maximum integer and fractional widths
         # across different 128-character amounts, plus SQLite row count bounds.
         # No SQL SUM over text (which would coerce to floating point).
-        with localcontext() as ctx:
-            ctx.prec = 320
-            published = []
-            for inst, created in sorted(bots.items()):
-                if inst in blocked or db.execute('SELECT 1 FROM quarantine WHERE inst_id=? AND ts_ms>=? LIMIT 1',(inst,created)).fetchone():
-                    blocked.add(inst)
-                    continue
-                total = Decimal(0)
-                last = None
-                for amount, ts in db.execute('SELECT amount,ts_ms FROM bills WHERE inst_id=? AND ts_ms>=? AND ts_ms<? ORDER BY ts_ms,bill_id', (inst, created, covered_until)):
-                    total += money(amount)
-                    last = ts
-                complete = fully_covered(intervals, created, covered_until) and not db.execute('SELECT 1 FROM discrepancy WHERE inst_id=? AND ts_ms>=? LIMIT 1',(inst,created)).fetchone()
-                # Track last complete history verification per identity without a schema migration.
-                # Never reset the clock merely because an incomplete snapshot is refreshed.
-                key = f'complete_at:{inst}:{created}'
-                if complete:
-                    db.execute('INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', (key,str(synced_ms)))
-                else:
-                    old_complete = db.execute('SELECT synced_ms FROM snapshot WHERE inst_id=? AND created_ms=? AND complete=1',(inst,created)).fetchone()
-                    if old_complete is not None:
-                        db.execute('INSERT OR IGNORE INTO meta VALUES (?,?)',(key,str(old_complete[0])))
-                published.append((inst, created, canonical(total), last, synced_ms, int(complete)))
-        # Preserve blocked instruments' last good snapshot (identity checked by reader).
-        # Drop retired/removed identities, never modify any bot or archive file.
-        for (inst,) in db.execute('SELECT inst_id FROM snapshot').fetchall():
-            if inst not in blocked:
-                db.execute('DELETE FROM snapshot WHERE inst_id=?',(inst,))
-        db.executemany('INSERT INTO snapshot VALUES (?,?,?,?,?,?)', published)
-        live_keys = {f'complete_at:{inst}:{created}' for inst,created in bots.items()}
-        for (key,) in db.execute("SELECT key FROM meta WHERE key LIKE 'complete_at:%'").fetchall():
-            if key not in live_keys:
-                db.execute('DELETE FROM meta WHERE key=?',(key,))
+        published=[]
+        if publish_live:
+            with localcontext() as ctx:
+                ctx.prec = 320
+                published = []
+                for inst, created in sorted(bots.items()):
+                    if inst in blocked or db.execute('SELECT 1 FROM quarantine WHERE inst_id=? AND ts_ms>=? LIMIT 1',(inst,created)).fetchone():
+                        blocked.add(inst)
+                        continue
+                    total = Decimal(0)
+                    last = None
+                    for amount, ts in db.execute('SELECT amount,ts_ms FROM bills WHERE inst_id=? AND ts_ms>=? AND ts_ms<? ORDER BY ts_ms,bill_id', (inst, created, covered_until)):
+                        total += money(amount)
+                        last = ts
+                    complete = fully_covered(intervals, created, covered_until) and not db.execute('SELECT 1 FROM discrepancy WHERE inst_id=? AND ts_ms>=? LIMIT 1',(inst,created)).fetchone()
+                    # Track last complete history verification per identity without a schema migration.
+                    # Never reset the clock merely because an incomplete snapshot is refreshed.
+                    key = f'complete_at:{inst}:{created}'
+                    if complete:
+                        db.execute('INSERT INTO meta VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value', (key,str(synced_ms)))
+                    else:
+                        old_complete = db.execute('SELECT synced_ms FROM snapshot WHERE inst_id=? AND created_ms=? AND complete=1',(inst,created)).fetchone()
+                        if old_complete is not None:
+                            db.execute('INSERT OR IGNORE INTO meta VALUES (?,?)',(key,str(old_complete[0])))
+                    published.append((inst, created, canonical(total), last, synced_ms, int(complete)))
+            # Preserve blocked instruments' last good snapshot (identity checked by reader).
+            # Drop retired/removed identities, never modify any bot or archive file.
+            for (inst,) in db.execute('SELECT inst_id FROM snapshot').fetchall():
+                if inst not in blocked:
+                    db.execute('DELETE FROM snapshot WHERE inst_id=?',(inst,))
+            db.executemany('INSERT INTO snapshot VALUES (?,?,?,?,?,?)', published)
+            # Bind read-only fast-path proof to the exact published live snapshot.
+            # It contains only file metadata, not the key or any credential digest.
+            db.execute(LIVE_PROOF_SQL)
+            for inst,created,amount,last,_,complete in published:
+                proof=(live_proofs or {}).get(inst)
+                if complete and proof is not None:
+                    name,c,token=proof
+                    require(account_fingerprint is not None and c==created and re.fullmatch(r'[A-Za-z0-9_-]+',name) and isinstance(token,str),'INVALID_LIVE_PROOF')
+                    db.execute('INSERT INTO terminal_live_proof VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(bot_id,inst_id,created_ms) DO UPDATE SET env_token=excluded.env_token,synced_ms=excluded.synced_ms,covered_until_ms=excluded.covered_until_ms,amount=excluded.amount,last_bill_ms=excluded.last_bill_ms',(name,inst,created,token,synced_ms,covered_until,amount,last))
+            live_keys = {f'complete_at:{inst}:{created}' for inst,created in bots.items()}
+            for (key,) in db.execute("SELECT key FROM meta WHERE key LIKE 'complete_at:%'").fetchall():
+                if key not in live_keys:
+                    db.execute('DELETE FROM meta WHERE key=?',(key,))
+        # Publish bounded terminal lifetime records in the same committed generation.
+        # Never prune these when a new instance claims the same instrument.
+        terminal_published=publish_terminals(db,terminals,intervals,synced_ms,account_fingerprint)
         db.execute("INSERT INTO meta VALUES ('synced_ms',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(synced_ms),))
         db.execute("INSERT INTO meta VALUES ('covered_until_ms',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(covered_until),))
+        if not publish_live and old is not None:
+            db.execute("INSERT OR IGNORE INTO meta VALUES ('regular_synced_ms',?)",(old[0],))
+        if regular_sync:
+            db.execute("INSERT INTO meta VALUES ('regular_synced_ms',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(synced_ms),))
         if reconciled_ms is not None:
             db.execute("INSERT INTO meta VALUES ('reconciled_ms',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (str(reconciled_ms),))
-    return {'inserted': inserted, 'duplicates': duplicates, 'published': len(published), 'blocked': len(blocked), 'quarantined': len(bad), 'missing': sum(bid not in observed for bid,_,_ in missing)}
+    return {'inserted': inserted, 'duplicates': duplicates, 'published': len(published), 'terminal_published': terminal_published, 'blocked': len(blocked), 'quarantined': len(bad), 'missing': sum(bid not in observed for bid,_,_ in missing)}
 
 def read_snapshot(path, inst, created_at):
     """Read one ready amount; caller must first confirm the bot is nonterminal."""
@@ -297,3 +315,316 @@ def read_snapshot(path, inst, created_at):
     result = dict(zip(('amount','last_bill_ms','synced_ms','complete'), row))
     result['last_complete_ms'] = row[2] if row[3] else (int(mark[0]) if mark is not None else None)
     return result
+
+# Terminal funding is separate from mutable instrument-keyed live snapshots.
+# Additive table within schema 2: old readers/backup tooling remain compatible.
+TERMINAL_SQL = '''CREATE TABLE IF NOT EXISTS terminal_funding (
+ bot_id TEXT NOT NULL, inst_id TEXT NOT NULL, created_ms INTEGER NOT NULL,
+ end_ms INTEGER NOT NULL, state_sha TEXT NOT NULL, mode TEXT NOT NULL,
+ amount TEXT NOT NULL, last_bill_ms INTEGER, synced_ms INTEGER NOT NULL,
+ complete INTEGER NOT NULL CHECK(complete IN (0,1)),
+ PRIMARY KEY(bot_id,inst_id,created_ms,end_ms,state_sha)
+)'''
+
+
+def terminal_identity(root):
+    """Read immutable engine evidence; never infer terminal from systemd alone."""
+    import hashlib
+    root = Path(root)
+    def raw(name):
+        p = root/name
+        require(p.is_file() and not p.is_symlink() and p.resolve()==root.resolve()/name,
+                'TERMINAL_FILE_UNAVAILABLE')
+        return p.read_bytes()
+    cfg = json.loads(raw('config.json'), parse_float=Decimal)
+    state_raw = raw('state/bot_state.json')
+    state = json.loads(state_raw, parse_float=Decimal)
+    ack = json.loads(raw('state/control_ack.json'))
+    final = json.loads(raw('state/final_stats.json'))
+    inst, created = instrument(cfg['instrument']), creation_ms(cfg['created_at'])
+    mode = state['terminal_mode']
+    snap = state['terminal_snapshot']
+    sha = hashlib.sha256(state_raw).hexdigest()
+    require(mode in ('PANIC_DONE','RETIRED') and snap['mode']==mode and ack['phase']==mode
+            and ack['mode']==('PANIC' if mode=='PANIC_DONE' else 'HARD'),
+            'TERMINAL_MODE_MISMATCH')
+    require(final['schema_version']==1 and final['complete'] is True and final['instrument']==inst
+            and final['mode']==mode and final['terminal_state_sha256']==sha,
+            'TERMINAL_ACCOUNTING_MISMATCH')
+    end = creation_ms(snap['at_unix'])
+    require(created < end, 'INVALID_TERMINAL_WINDOW')
+    position = Decimal(str(snap['position_contracts']))
+    require(position.is_finite() and position>=0 and
+            position==Decimal(str(final['values']['position_contracts'])) and
+            position==Decimal(str(ack['remaining_position'])) and
+            (mode!='PANIC_DONE' or position==0), 'TERMINAL_POSITION_MISMATCH')
+    require(re.fullmatch(r'[A-Za-z0-9_-]+',root.name) is not None,'INVALID_BOT_ID')
+    return (root.name,inst,created,end,sha,mode), position
+
+
+HOUR_MS = 3600000
+SETTLEMENT_MS = 60000
+
+
+def terminal_horizon(identity):
+    """Exclusive coverage required for last possible hourly settlement.
+
+    The exact PANIC boundary belongs to the previous hour if it is exactly :00.
+    A bill posted during the settlement minute may follow the terminal state.
+    Do not use this to allocate a bill across two bot identities.
+    """
+    _,_,created,end,_,_=identity
+    return max(created, ((end-1)//HOUR_MS)*HOUR_MS+SETTLEMENT_MS)
+
+
+def terminal_amount(db, identity, intervals, synced_ms):
+    """Signed, covered lifetime; PANIC's isolated settlement tail only.
+
+    Caller must establish account and non-overlapping settlement ownership.
+    HARD never claims bills posted after its terminal boundary.
+    """
+    _,inst,created,end,_,mode=identity
+    horizon=terminal_horizon(identity)
+    stop=max(end,horizon) if mode=='PANIC_DONE' else end
+    with localcontext() as ctx:
+        ctx.prec=320
+        total=Decimal(0)
+        last=None
+        for amount,ts in db.execute('SELECT amount,ts_ms FROM bills WHERE inst_id=? AND ts_ms>=? AND ts_ms<? ORDER BY ts_ms,bill_id',(inst,created,stop)):
+            total+=money(amount)
+            last=ts
+    complete=synced_ms>=horizon and fully_covered(intervals,created,horizon) and not any(
+        db.execute('SELECT 1 FROM '+table+' WHERE inst_id=? AND ts_ms>=? AND ts_ms<? LIMIT 1',(inst,created,max(stop,horizon))).fetchone()
+        for table in ('quarantine','discrepancy'))
+    # A HARD position can continue accruing while settlement is still running;
+    # its post-terminal bill cannot be safely split by the account timestamp.
+    if mode=='RETIRED' and horizon>end and db.execute('SELECT 1 FROM bills WHERE inst_id=? AND ts_ms>=? AND ts_ms<? LIMIT 1',(inst,end,horizon)).fetchone():
+        complete=False
+    return (canonical(total),last,synced_ms,int(complete))
+
+
+PERMANENT_REASONS=frozenset(('OVERLAPPING_INSTRUMENT_LIFETIMES','TERMINAL_PROOF_CONTRADICTION'))
+
+
+def _attempt_reason(db,identity):
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='terminal_attempt'").fetchone():
+        return None
+    row=db.execute('SELECT reason FROM terminal_attempt WHERE bot_id=? AND inst_id=? AND created_ms=? AND end_ms=? AND state_sha=? AND mode=?',identity).fetchone()
+    return row[0] if row else None
+
+
+def _record_attempt(db,identity,reason,now):
+    old=_attempt_reason(db,identity)
+    if old==reason or old in PERMANENT_REASONS:
+        return
+    db.execute('INSERT INTO terminal_attempt VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(bot_id,inst_id,created_ms,end_ms,state_sha,mode) DO UPDATE SET reason=excluded.reason,at_ms=excluded.at_ms',identity+(reason,now))
+
+
+def _lifetime_overlap(a,b):
+    return a!=b and a[1]==b[1] and a[2]<max(b[3],terminal_horizon(b)) and b[2]<max(a[3],terminal_horizon(a))
+
+
+def publish_terminals(db, identities, intervals, synced_ms, account_fingerprint):
+    db.execute(TERMINAL_SQL)
+    db.execute(TERMINAL_ATTEMPT_SQL)
+    published=0
+    identities=list(identities)
+    existing=db.execute('SELECT bot_id,inst_id,created_ms,end_ms,state_sha,mode FROM terminal_funding').fetchall()
+    for identity in identities:
+        bot_id, inst, created, end, sha, mode = identity
+        require(account_fingerprint is not None and instrument(inst)==inst
+                and integer_ms(created)<integer_ms(end)<=synced_ms
+                and re.fullmatch(r'[A-Za-z0-9_-]+',bot_id)
+                and re.fullmatch(r'[0-9a-f]{64}',sha)
+                and mode in ('PANIC_DONE','RETIRED'),'INVALID_TERMINAL_IDENTITY')
+        if any(_lifetime_overlap(identity,other) for other in identities+existing):
+            _record_attempt(db,identity,'OVERLAPPING_INSTRUMENT_LIFETIMES',synced_ms)
+            for other in existing:
+                if _lifetime_overlap(identity,other):
+                    _record_attempt(db,other,'OVERLAPPING_INSTRUMENT_LIFETIMES',synced_ms)
+            continue
+        if _attempt_reason(db,identity) in PERMANENT_REASONS:
+            continue
+        old=db.execute('SELECT complete FROM terminal_funding WHERE bot_id=? AND inst_id=? AND created_ms=? AND end_ms=? AND state_sha=? AND mode=?',identity).fetchone()
+        if old and old[0]==1:
+            continue
+        value=terminal_amount(db,identity,intervals,synced_ms)
+        proof=live_proof(db,identity)
+        horizon=terminal_horizon(identity)
+        # If the already durable hourly proof could have been used for a fast
+        # financial report, never silently freeze a different result.
+        if mode=='PANIC_DONE' and horizon<=end and proof and horizon<=proof[2]<=proof[1]<=end and value[3] and value[:2]!=proof[3:5]:
+            _record_attempt(db,identity,'TERMINAL_PROOF_CONTRADICTION',synced_ms)
+            continue
+        db.execute('INSERT INTO terminal_funding VALUES (?,?,?,?,?,?,?,?,?,?) ON CONFLICT(bot_id,inst_id,created_ms,end_ms,state_sha) DO UPDATE SET amount=excluded.amount,last_bill_ms=excluded.last_bill_ms,synced_ms=excluded.synced_ms,complete=excluded.complete WHERE terminal_funding.complete=0',identity+value)
+        if value[3]:
+            db.execute('DELETE FROM terminal_attempt WHERE bot_id=? AND inst_id=? AND created_ms=? AND end_ms=? AND state_sha=? AND mode=?',identity)
+        published+=value[3]
+    return published
+
+
+TERMINAL_ATTEMPT_SQL = '''CREATE TABLE IF NOT EXISTS terminal_attempt (
+ bot_id TEXT NOT NULL, inst_id TEXT NOT NULL, created_ms INTEGER NOT NULL,
+ end_ms INTEGER NOT NULL, state_sha TEXT NOT NULL, mode TEXT NOT NULL,
+ reason TEXT NOT NULL, at_ms INTEGER NOT NULL,
+ PRIMARY KEY(bot_id,inst_id,created_ms,end_ms,state_sha,mode)
+)'''
+
+
+def _bound(db, fingerprint):
+    row=db.execute("SELECT value FROM meta WHERE key='account_fingerprint'").fetchone()
+    require(row is not None and row[0]==fingerprint,'ACCOUNT_BINDING_MISMATCH')
+
+
+def record_terminal_attempts(path, identities, fingerprint, reason, now):
+    if not identities or not Path(path).is_file():
+        return
+    with writer(path) as db:
+        _bound(db,fingerprint)
+        db.execute(TERMINAL_ATTEMPT_SQL)
+        for identity in identities:
+            _record_attempt(db,identity,reason,now)
+
+
+def finalize_covered_terminals(path, identities, fingerprint, now):
+    """No API, no live snapshot mutation, no sync watermark advancement."""
+    if not identities or not Path(path).is_file():
+        return 0
+    with writer(path) as db:
+        _bound(db,fingerprint)
+        intervals=merged_coverage(db.execute('SELECT begin_ms,end_ms FROM coverage').fetchall())
+        ready=[i for i in identities if terminal_amount(db,i,intervals,now)[3]]
+        if not ready:
+            return 0
+        return publish_terminals(db,ready,intervals,now,fingerprint)
+
+
+LIVE_PROOF_SQL = '''CREATE TABLE IF NOT EXISTS terminal_live_proof (
+ bot_id TEXT NOT NULL, inst_id TEXT NOT NULL, created_ms INTEGER NOT NULL,
+ env_token TEXT NOT NULL, synced_ms INTEGER NOT NULL,
+ covered_until_ms INTEGER NOT NULL, amount TEXT NOT NULL, last_bill_ms INTEGER,
+ PRIMARY KEY(bot_id,inst_id,created_ms)
+)'''
+
+
+def terminal_env_token(root):
+    """Stat-only identity of the credentials file; never read the secret."""
+    import stat
+    p=Path(root)/'.env'
+    st=p.lstat()
+    require(stat.S_ISREG(st.st_mode) and p.resolve()==Path(root).resolve()/'.env','TERMINAL_CREDENTIALS_UNAVAILABLE')
+    return ':'.join(str(x) for x in (st.st_dev,st.st_ino,st.st_size,st.st_mtime_ns,st.st_ctime_ns))
+
+
+def live_proof(db,identity):
+    if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='terminal_live_proof'").fetchone():
+        return None
+    return db.execute('SELECT env_token,synced_ms,covered_until_ms,amount,last_bill_ms FROM terminal_live_proof WHERE bot_id=? AND inst_id=? AND created_ms=?',identity[:3]).fetchone()
+
+
+def terminal_registry_conflict(root, identity):
+    """Read-only guard for direct publication from the previous live snapshot."""
+    root=Path(root).resolve();base=root.parent
+    reg=base/'.okxbot_registry.json'
+    require(reg.is_file() and not reg.is_symlink(),'TERMINAL_REGISTRY_UNAVAILABLE')
+    entries=json.loads(reg.read_text(encoding='utf-8'))
+    require(isinstance(entries,dict) and root.name in entries and
+            Path(entries[root.name]['path']).resolve()==root,'TERMINAL_REGISTRY_MISMATCH')
+    _,inst,created,end,_,_=identity
+    stop=max(end,terminal_horizon(identity))
+    for name,entry in entries.items():
+        if name==root.name:
+            continue
+        try:
+            other=Path(entry['path']).resolve()
+            if other==base or base not in other.parents:
+                continue
+            cfg=json.loads((other/'config.json').read_text(encoding='utf-8'),parse_float=Decimal)
+            if cfg['instrument']!=inst:
+                continue
+            c=creation_ms(cfg['created_at'])
+        except (OSError,ValueError,TypeError,KeyError,ArithmeticError):
+            # Unknown unrelated archive; collector isolates it too.
+            continue
+        if c>=stop:
+            continue
+        try:
+            previous,_=terminal_identity(other)
+        except (OSError,ValueError,TypeError,KeyError,ArithmeticError):
+            return True
+        if created<max(previous[3],terminal_horizon(previous)):
+            return True
+    return False
+
+
+def read_terminal_local(path,identity,env_token):
+    """Fast read of an already covered lifetime from an exact live snapshot.
+
+    No writes. Only outside the settlement minute, and only with a matching
+    previously verified live identity. The proof (amount, coverage and identity)
+    is itself durable and independent of mutable live snapshots. The collector
+    freezes the terminal record, rejecting any contradiction with this proof.
+    """
+    path=Path(path)
+    require(path.is_file() and not path.is_symlink(),'DB_UNAVAILABLE')
+    with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True,timeout=0.1)) as db:
+        db.execute('PRAGMA query_only=ON');db.execute('BEGIN')
+        require(db.execute('PRAGMA user_version').fetchone()[0]==SCHEMA,'UNSUPPORTED_SCHEMA')
+        # A previous successful Collector generation must be account-bound.
+        require(db.execute("SELECT value FROM meta WHERE key='account_fingerprint'").fetchone() is not None,'ACCOUNT_BINDING_UNAVAILABLE')
+        proof=live_proof(db,identity)
+        if not proof or proof[0]!=env_token:
+            return None
+        _,inst,created,end,_,mode=identity
+        horizon=terminal_horizon(identity)
+        if horizon>end or mode!='PANIC_DONE':
+            return None
+        if not (horizon<=proof[2]<=proof[1]<=end) or _attempt_reason(db,identity) in PERMANENT_REASONS:
+            return None
+        if db.execute('SELECT 1 FROM inventory_issue WHERE subject=? OR subject=? LIMIT 1',(inst,'terminal:'+identity[0])).fetchone():
+            return None
+        intervals=merged_coverage(db.execute('SELECT begin_ms,end_ms FROM coverage').fetchall())
+        row=terminal_amount(db,identity,intervals,proof[1])
+        if row[3] and row[:2]==proof[3:5]:
+            return row
+        return None
+
+
+def terminal_failure(path,identity,fingerprint=None,*,env_token=None):
+    path=Path(path)
+    require(path.is_file() and not path.is_symlink(),'DB_UNAVAILABLE')
+    with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True,timeout=0.1)) as db:
+        db.execute('PRAGMA query_only=ON');db.execute('BEGIN')
+        require(db.execute('PRAGMA user_version').fetchone()[0]==SCHEMA,'UNSUPPORTED_SCHEMA')
+        if fingerprint is not None:
+            _bound(db,fingerprint)
+        reason=_attempt_reason(db,identity)
+        if reason:return reason
+        proof=live_proof(db,identity)
+        if env_token is not None and proof and proof[0]!=env_token:
+            return 'ACCOUNT_CREDENTIALS_NOT_ATTESTED'
+        return None
+
+
+def read_terminal_snapshot_status(path, identity, *, audit=True):
+    """Read a frozen terminal result and expose any later ledger contradiction."""
+    path=Path(path)
+    require(path.is_file() and not path.is_symlink(),'DB_UNAVAILABLE')
+    with closing(sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True,timeout=0.1)) as db:
+        db.execute('PRAGMA query_only=ON')
+        db.execute('BEGIN')
+        require(db.execute('PRAGMA user_version').fetchone()[0]==SCHEMA,'UNSUPPORTED_SCHEMA')
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='terminal_funding'").fetchone():
+            return None,False
+        row=db.execute('SELECT amount,last_bill_ms,synced_ms,complete FROM terminal_funding WHERE bot_id=? AND inst_id=? AND created_ms=? AND end_ms=? AND state_sha=? AND mode=?',identity).fetchone()
+        conflict=False
+        if audit and row and row[3]==1:
+            intervals=merged_coverage(db.execute('SELECT begin_ms,end_ms FROM coverage').fetchall())
+            current=terminal_amount(db,identity,intervals,row[2])
+            conflict=(current[:2]!=row[:2] or current[3]!=1 or _attempt_reason(db,identity) in PERMANENT_REASONS)
+        return row,conflict
+
+
+def read_terminal_snapshot(path, identity):
+    """For scheduler: a finalized record is never a retry candidate."""
+    return read_terminal_snapshot_status(path,identity,audit=False)[0]

@@ -1456,6 +1456,8 @@ def stats_text(name):
                 or final.get('mode') not in ('RETIRED','PANIC_DONE')
                 or not isinstance(final.get('report'),str)):
             raise RuntimeError('Некорректный окончательный отчёт')
+        from okx_funding_view import terminal_report
+        final_text=terminal_report(path,final)
         # Historical trading report is immutable: final accounting ADDS to it.
         # Its market/open-position values are PRE-TERMINATION snapshots.
         try:
@@ -1464,9 +1466,9 @@ def stats_text(name):
             historical=None
         if historical is not None:
             previous=with_latest_bot_dd(historical[0],path,instrument)
-            return (header+final['report']+'\n\n'+'━'*32+'\n'
+            return (header+final_text+'\n\n'+'━'*32+'\n'
                     +'ИСТОРИЧЕСКАЯ СТАТИСТИКА (до завершения)\n\n'+previous)
-        return header+'Исторический снимок недоступен.\n\n'+final['report']
+        return header+'Исторический снимок недоступен.\n\n'+final_text
     if instance_terminal(entry):
         return header+('⏳ Финальный расчёт не подтверждён. '
             'Торговлю не возобновлять. Выполните GET-only --terminal-finalize '
