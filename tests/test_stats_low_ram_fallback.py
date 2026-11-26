@@ -30,6 +30,8 @@ class TestStatsNoRetainedCache(unittest.TestCase):
         self.assertEqual(len(ledger_calls),1)
         self.assertEqual([ast.dump(a,include_attributes=False) for a in ledger_calls[0].args],
                          [ast.dump(ast.Name(id=n,ctx=ast.Load()),include_attributes=False) for n in ('st','archive')])
-        self.assertIn("finance_mode = 'original_full'",code)
-        self.assertIn('if LIVE and stats_cache is not None:',code)
+        self.assertNotIn('stats_cache',code)
+        self.assertNotIn('finance_cache',code)
+        self.assertNotIn('stats_checkpoint.json',code)
+        self.assertIn('_last_24h_profit(st, fills, CONTRACT_VALUE, int(now * 1000), snapshot_archive=archive)',code)
 if __name__=='__main__':unittest.main(verbosity=2)

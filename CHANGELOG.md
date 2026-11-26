@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.7.88 — 2026-11-26 UTC — Dead-code cleanup (engine 0.7.88)
+
+- Remove four unreachable engine functions and unused FULL cache branches; preserve active FULL and StatsWorker v2 calculations.
+- Remove five obsolete source-only cache modules and their standalone historical index test (not in run_checks); preserve Git history.
+- Relocate two original Stats v2 prototypes to pinned offline test fixtures; no reduction in original phase/production test counts.
+- Hash-pinned shared retirement; canary admits only explicitly pinned dependency removals. After full rollout, 18 per-instance obsolete files were removed with verified backups. Reader unchanged.
+
+- OFFLINE: 1086 tests; independent audit 108/108 test files. LIVE NES canary, nine active engines, shared and instance cleanup and final attestation passed. See [release notes](RELEASE_NOTES_V0788.md).
+
 ## v0.7.87 — 2026-11-26 UTC — Terminal Funding Lifecycle (engine 0.7.85 unchanged)
 
 - Finalize funding by attested terminal instance lifetime; retain final amounts independently of active snapshots.

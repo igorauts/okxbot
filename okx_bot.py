@@ -427,20 +427,6 @@ def record_bot_drawdown(total_pnl, now=None, source='fills', bid=None):
         return payload
 
 
-def bot_dd_mark(anchor, st, bid):
-    """Fast exact BID adjustment to a previously verified fill-based baseline.
-
-    Do not extrapolate after a trade until history fetches all actual fills.
-    """
-    if (anchor.get('schema')!=1 or anchor.get('instrument')!=INST
-        or anchor.get('signature')!=financial_signature(st)):
-        return None
-    bid=D(bid)
-    if bid<=0 or not bid.is_finite():return None
-    return (D(anchor['total_pnl_usdt']) + D(anchor['open_contracts']) *
-            CONTRACT_VALUE * (bid-D(anchor['bid'])))
-
-
 class ExchangeTemporary(RuntimeError):
     """Safe GET/transient API failure: halt new writes but keep process alive."""
 
@@ -926,18 +912,6 @@ def allocated_market_fills(order_fills, plan, cycle_id):
     return mine
 
 
-def expected_cycle_sells(c, indexed):
-    """Verified per-cycle fills: actual exchange order with deterministic partition."""
-    result=[]
-    for r in c.get('tpOrders',[]):
-        if D(r.get('filled'))<=0:continue
-        rows=indexed.get(str(r['ordId']),[])
-        if r.get('source')=='aggregate_exit':
-            rows=allocated_market_fills(rows,r['aggregatePlan'],c['cycleId'])
-        result.extend(rows)
-    return result
-
-
 def accumulate_expected_sell(expected, leg):
     oid=str(leg.get('ordId') or '')
     if not oid:raise ValueError('Filled SELL missing order ID')
@@ -1241,15 +1215,6 @@ def control_ack(mode, phase, **details):
     log('CONTROL_STATE',mode=mode,phase=phase,**details)
 
 
-def controller_owns_orders(st, pending):
-    """Fail closed if any pending order on this instrument isn't ours."""
-    verify_existing(st,pending)
-    # A panic order is also tracked using a durable client ID.
-    known_oids={e.get('ordId') for e in st.get('panic_orders',[])}
-    known_cids={e.get('clOrdId') for e in st.get('panic_orders',[])}
-    for order in pending:
-        if order.get('ordId') in known_oids or order.get('clOrdId') in known_cids:
-            continue
         # verify_existing already checked tracked cycles.
 
 
@@ -5075,10 +5040,6 @@ def stats_pct(num, denominator):
     return f'{pct:.6f}%' if pct and abs(pct)<Decimal('0.01') else f'{pct:.4f}%'
 
 
-def stats_amount(x, digits=6):
-    return f'${x:,.{digits}f}'
-
-
 def full_stats_snapshot(state, fills, bid, contract_value, *, include_durable_archive=True, snapshot_archive=None):
     """Pure calculation over authoritative fill rows.
 
@@ -5591,7 +5552,7 @@ def require_pristine_first_audit(st):
                 raise ExchangeUnresolved('Missing trading state with nonempty ledger: '+path.name)
 
 
-def print_full_stats(pnl=None, *, require_complete=False, market=None, stats_cache=None, finance_cache=None,
+def print_full_stats(pnl=None, *, require_complete=False, market=None,
                      audited_fresh_state=None):
     """Complete verified account snapshot anchored to one pre-REST state.
 
@@ -5606,7 +5567,7 @@ def print_full_stats(pnl=None, *, require_complete=False, market=None, stats_cac
     t_start_unix_ms=time.time()*1000
     st=json.loads(DATA.read_text()) if DATA.exists() else None
     if audited_fresh_state is not None:
-        if not require_complete or pnl is None or stats_cache is not None or finance_cache is not None:
+        if not require_complete or pnl is None:
             raise ExchangeUnresolved('Fresh audit snapshot requires mandatory accounting')
         require_pristine_first_audit(audited_fresh_state)
         st=copy.deepcopy(audited_fresh_state)
@@ -5618,16 +5579,14 @@ def print_full_stats(pnl=None, *, require_complete=False, market=None, stats_cac
     # Archive captured immediately after the state. The state view wins for
     # duplicate cycle IDs, so a later archive compaction cannot replace it.
     archive_start=clock()
-    archive=(stats_cache.archive_rows() if stats_cache is not None else archived_rows())
+    archive=archived_rows()
     archive_done=clock()
     bid=stats_capture_bid(market) if market is not None else A.ticker()
     bid_done=clock()
     captured_at=time.time()
     t_capture=clock()
     expected=expected_filled_orders(st,snapshot_archive=archive)
-    fetched=(stats_cache.expected_rows(expected,FILL_STORE.ensure_expected)
-             if stats_cache is not None else
-             stats_exchange_fills(st,snapshot_archive=archive,expected=expected))
+    fetched=stats_exchange_fills(st,snapshot_archive=archive,expected=expected)
     t_fills=clock()
     fills_breakdown=getattr(getattr(globals().get('FILL_STORE'),'perf',None),'last',{})
     # A BUY/SELL can fill AGAIN on the same ordId while REST paginates. Its
@@ -5638,17 +5597,7 @@ def print_full_stats(pnl=None, *, require_complete=False, market=None, stats_cac
         if require_complete:
             raise ExchangeUnresolved('Incomplete/straddling fills in mandatory pre-LIVE audit')
         return False
-    if finance_cache is not None:
-        if stats_cache is None or require_complete:
-            raise RuntimeError('Incremental finance only supported in independently verified LIVE StatsWorker')
-        d,cached_past24,finance_mode=finance_cache.calculate(
-            st,archive,fills,bid,CONTRACT_VALUE,int(captured_at*1000),
-            full=full_stats_snapshot,pct=stats_pct,rolling=_last_24h_profit,
-            allocate=allocated_market_fills,source_cache=stats_cache)
-    else:
-        d=full_stats_snapshot(st,fills,bid,CONTRACT_VALUE,snapshot_archive=archive)
-        cached_past24=None
-        finance_mode='original_full' 
+    d=full_stats_snapshot(st,fills,bid,CONTRACT_VALUE,snapshot_archive=archive)
     t_calculated=clock()
     if not d['complete']:
         print('⚠️ Статистика неполная: часть исполнений отсутствует',flush=True)
@@ -5680,8 +5629,7 @@ def print_full_stats(pnl=None, *, require_complete=False, market=None, stats_cac
     # with the completion time.  Consumers assess freshness by captured_at.
     now=captured_at
     _, capital_top=_first_anchor(fills)
-    past24=(cached_past24 if finance_cache is not None else
-            _last_24h_profit(st,fills,CONTRACT_VALUE,int(now*1000),snapshot_archive=archive)) if capital_top is not None else None
+    past24=_last_24h_profit(st,fills,CONTRACT_VALUE,int(now*1000),snapshot_archive=archive) if capital_top is not None else None
     report=format_okx_report(st,fills,d,now=now,snapshot_archive=archive,precomputed_24h=past24)
     detail=performance_snapshot(st,fills,d,now,snapshot_archive=archive,precomputed_24h=past24)
     t_render=clock()
@@ -5703,13 +5651,6 @@ def print_full_stats(pnl=None, *, require_complete=False, market=None, stats_cac
             'performance_v0724': detail,  # stable legacy wire alias
             'report': report,
         })
-    if LIVE and stats_cache is not None:
-        checkpoint=stats_cache.checkpoint_metadata(financial_signature(st),now)
-        if checkpoint is not None:
-            atomic_json(ROOT / 'state' / 'stats_checkpoint.json', checkpoint)
-    if finance_cache is not None and stats_cache is not None:
-        # Clear only after full financial + ledger verification and report write.
-        stats_cache.last_added_order_ids.clear()
     t_written=clock()
     # Wall interval anchors allow OFFLINE overlap analysis with WS→intent.
     # These records are enqueued asynchronously *after* finance calculation;

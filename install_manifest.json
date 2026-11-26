@@ -23,11 +23,9 @@
     "okx_positions_fifo.py",
     "okx_positions_priority.py",
     "okx_state.py",
-    "okx_stats_v2_checkpoint.py",
     "okx_stats_v2_contract.py",
     "okx_stats_v2_money.py",
     "okx_stats_v2_phase3.py",
-    "okx_stats_v2_phase4.py",
     "okx_stats_v2_production.py",
     "okx_stats_v2_recovery.py",
     "okx_strategy.py",
@@ -35,7 +33,7 @@
     "okx_tp_telemetry.py",
     "okx_version.py"
   ],
-  "engine_version": "0.7.85",
+  "engine_version": "0.7.88",
   "funding": {
     "okx_funding_backup.py": "funding/okx_funding_backup.py",
     "okx_funding_collector.py": "funding/okx_funding_collector.py",
@@ -53,9 +51,16 @@
     "okx_position_reader_service.py": "okx_position_reader_service.py",
     "okx_position_reader_watchdog.py": "okx_position_reader_watchdog.py"
   },
-  "release_version": "0.7.87",
+  "release_version": "0.7.88",
   "retire_shared": {
-    "okx_shared_runtime_deploy.py": "5715defdca47fd201462f32d7f0757516ff97a6963f95d04c95ac722c2fbcc47"
+    "okx_shared_runtime_deploy.py": "5715defdca47fd201462f32d7f0757516ff97a6963f95d04c95ac722c2fbcc47",
+    "okx_stats_finance_incremental.py": "a84128ccc16f934428c595175609160d2dc8a33652265b93c62eca9c16a514bd",
+    "okx_stats_incremental_core.py": "5ce6b759ece4f8ca096a9d5a1fa3481bc5f54978aa84ea10f89066a3f2be15a4",
+    "okx_stats_incremental_finance.py": "5705abb9dcb257580f8f718d94f0c63b31695e16dc465985bf4cdfde90234dee",
+    "okx_stats_incremental_runtime.py": "87741301bc53c01c7147d932b86d672f9b047b483c2f48deb0bb6b20ff303d0e",
+    "okx_stats_sqlite_delta_v0751.py": "d6ec0aa1a0e504b65e09d72ad790705860b4f45300e66288e2d640931aa9ca3d",
+    "okx_stats_v2_checkpoint.py": "c9ba79ba5872e198a90942b3d8b2b5d935b24743486a222ec77f777c54de54e6",
+    "okx_stats_v2_phase4.py": "e59739225e99affcbf6565b118d34d57a81a4e739722ce4000d6d5bf58944e81"
   },
   "schema": 1,
   "shared": [
@@ -104,11 +109,9 @@
     "okx_source_attestation.py",
     "okx_state.py",
     "okx_stats_ui.py",
-    "okx_stats_v2_checkpoint.py",
     "okx_stats_v2_contract.py",
     "okx_stats_v2_money.py",
     "okx_stats_v2_phase3.py",
-    "okx_stats_v2_phase4.py",
     "okx_stats_v2_production.py",
     "okx_stats_v2_recovery.py",
     "okx_strategy.py",
@@ -138,12 +141,7 @@
   ],
   "source_only": [
     "okx_release_contract.py",
-    "okx_setup_presets.py",
-    "okx_stats_finance_incremental.py",
-    "okx_stats_incremental_core.py",
-    "okx_stats_incremental_finance.py",
-    "okx_stats_incremental_runtime.py",
-    "okx_stats_sqlite_delta_v0751.py"
+    "okx_setup_presets.py"
   ],
   "telegram": [
     "okx_telegram_account_balance_getonly.py",

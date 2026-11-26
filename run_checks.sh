@@ -202,3 +202,6 @@ python3 -B -m unittest tests.test_partial_detach_v0784 tests.test_partial_detach
 
 # Maintenance install transaction, explicit inventory and standalone exports.
 python3 -B -m unittest tests.test_maintenance_install_v0786 -v
+
+# Dead code removal: exact active FULL specialization and pinned retirement.
+python3 -B -m unittest tests.test_dead_code_cleanup_v0788 -v

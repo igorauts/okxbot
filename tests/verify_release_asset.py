@@ -51,7 +51,8 @@ def allowed_package_member(name):
                  ('tests','fixtures','okx_bot_v0781_baseline.py.gz'),
                  ('tests','fixtures','okx_bot_v0782_baseline.py.gz'),
                  ('tests','fixtures','okx_bot_v0783_baseline.py.gz'),
-                 ('tests','fixtures','okx_bot_v0784_baseline.py.gz')):
+                 ('tests','fixtures','okx_bot_v0784_baseline.py.gz'),
+                 ('tests','fixtures','okx_bot_v0785_baseline.py.gz')):
         return True
     if (len(parts)==5 and parts[:2]==('tests','stats_v2_original')
         and parts[2] in ('stats_v2_release_work','stats_v2_prod_candidate')

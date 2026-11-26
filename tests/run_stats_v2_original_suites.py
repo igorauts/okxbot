@@ -43,7 +43,15 @@ def main():
         (release/'reference'/'okx_bot.py').write_bytes(oracle)
         for f in ROOT.glob('okx_stats_v2_*.py'):
             shutil.copyfile(f,release/f.name)
+        # These two prototypes have no production importers; retain them solely
+        # for the original PHASE regressions, with the published bytes pinned.
+        for name, digest in {'okx_stats_v2_checkpoint.py': 'c9ba79ba5872e198a90942b3d8b2b5d935b24743486a222ec77f777c54de54e6', 'okx_stats_v2_phase4.py': 'e59739225e99affcbf6565b118d34d57a81a4e739722ce4000d6d5bf58944e81'}.items():
+            source=ROOT/'historical'/name
+            require(source.is_file() and not source.is_symlink(), 'MISSING_OFFLINE_PROTOTYPE '+name)
+            require(hashlib.sha256(source.read_bytes()).hexdigest()==digest, 'OFFLINE_PROTOTYPE_SHA_MISMATCH '+name)
+            shutil.copyfile(source,release/name)
         shutil.copyfile(ROOT/'okx_bot.py',production/'okx_bot.py')
+        shutil.copyfile(HERE/'fixtures/okx_bot_v0785_baseline.py.gz',production/'okx_bot_v0785_baseline.py.gz')
         shutil.copyfile(HERE/'fixtures/okx_bot_v0780_baseline.py.gz',production/'okx_bot_v0780_baseline.py.gz')
         shutil.copyfile(HERE/'fixtures/okx_bot_v0781_baseline.py.gz',production/'okx_bot_v0781_baseline.py.gz')
         shutil.copyfile(HERE/'fixtures/okx_bot_v0782_baseline.py.gz',production/'okx_bot_v0782_baseline.py.gz')

@@ -84,6 +84,16 @@ class EnginePatchTest(unittest.TestCase):
         # Verify every changed candidate hunk against the reviewed digest, undo
         # only those exact hunks, and retain the historical oracle for all else.
         import gzip, hashlib
+        # v0.7.88: reverse exact dead-code-only hunks before the original checks.
+        v85=gzip.decompress((DIR/'okx_bot_v0785_baseline.py.gz').read_bytes())
+        self.assertEqual(hashlib.sha256(v85).hexdigest(), 'c68f370655cb7c59a0741d3089c6a5a17f87e3e67e7f6e96f9481c13dc1302cb')
+        v85_base=v85.decode().splitlines(keepends=True)
+        v88_lines=new.splitlines(keepends=True)
+        for i1,i2,j1,j2,digest in reversed([(427, 441, 427, 427, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'), (928, 940, 914, 914, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'), (1243, 1252, 1217, 1217, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'), (5077, 5081, 5042, 5042, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'), (5593, 5594, 5554, 5555, '768930abd0201d9d5889d184878509197bab198e9023009635cd51809807576c'), (5608, 5609, 5569, 5570, '3f4b54d14f96938582af9a9432a67c22aea9b1fd147d048bc46d94e627370fc2'), (5620, 5621, 5581, 5582, 'fc17d32e4173612e547a8668ecbf00cdaefea00cbf91638cd91b72824a0e39bd'), (5627, 5630, 5588, 5589, '361b99799944fa9e82f7bfab4cf9890e7b51a64993a095fa082d04b0ef0f4ad2'), (5640, 5651, 5599, 5600, 'd0fa4c9ad07a73855a83b0585874d2bdf1d8392a9d7aaba987c21db23ba5a48b'), (5682, 5684, 5631, 5632, 'bf130a04e8762a2e7580abf3bcd87ae75e4b29793253f3a68f5e2c70cbc2129d'), (5705, 5712, 5653, 5653, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')]):
+            self.assertEqual(hashlib.sha256(''.join(v88_lines[j1:j2]).encode()).hexdigest(),digest)
+            v88_lines[j1:j2]=v85_base[i1:i2]
+        new=''.join(v88_lines)
+        self.assertEqual(new.encode(),v85)
         # v0.7.85: reverse only the reviewed terminal-AMEND race / alarm / audit delta.
         v84=gzip.decompress((DIR/'okx_bot_v0784_baseline.py.gz').read_bytes())
         self.assertEqual(hashlib.sha256(v84).hexdigest(), 'ffe84de337f7d097aca2912a3a3c8e55a6a42d351cae937d2f9486a0e628b0be')

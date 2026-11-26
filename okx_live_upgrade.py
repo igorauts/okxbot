@@ -162,7 +162,8 @@ def allowed_package_member(name):
                  ('tests','fixtures','okx_bot_v0781_baseline.py.gz'),
                  ('tests','fixtures','okx_bot_v0782_baseline.py.gz'),
                  ('tests','fixtures','okx_bot_v0783_baseline.py.gz'),
-                 ('tests','fixtures','okx_bot_v0784_baseline.py.gz')):
+                 ('tests','fixtures','okx_bot_v0784_baseline.py.gz'),
+                 ('tests','fixtures','okx_bot_v0785_baseline.py.gz')):
         return True
     if (len(parts) == 5 and parts[:2] == ('tests','stats_v2_original')
         and parts[2] in ('stats_v2_release_work','stats_v2_prod_candidate')
@@ -508,13 +509,21 @@ def verify_single_instance_sources(root):
     # The canary may change only engine and its version module. All other
     # dependencies must match the current published instance and target.
     old=manifest['engines'][OLD_VERSION];new=manifest['engines'][NEW_VERSION]
-    if set(old['dependencies'])!=set(new['dependencies']):
-        fail('Single-instance dependency inventory changed')
+    old_deps=set(old['dependencies']);new_deps=set(new['dependencies'])
+    if new_deps-old_deps:
+        fail('Single-instance dependency additions outside approved scope')
+    removed=old_deps-new_deps
+    if removed:
+        from okx_install_manifest import load
+        retirement=load(STAGE,manifest)['retire_shared']
+        for name in removed:
+            if retirement.get(name)!=old['dependency_sha256'].get(name) or name=='okx_version.py':
+                fail('Single-instance dependency removal not pinned: '+name)
     for name in old['dependencies']:
         expected=old['dependency_sha256'][name]
         if sha256(check_file(root/name))!=expected:
             fail('Installed dependency drift: '+name)
-        if name!='okx_version.py' and new['dependency_sha256'][name]!=expected:
+        if name in new_deps and name!='okx_version.py' and new['dependency_sha256'][name]!=expected:
             fail('Single-instance dependency change outside approved scope: '+name)
     return True
 
