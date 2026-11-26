@@ -162,7 +162,6 @@ nsp.update({'_panic_all_preflight':lambda:plan,
             'service_running':lambda x:True,
             'read_control':lambda x:{'mode':'RUN' if x=='a' else 'SOFT'},
             'write_control':lambda entry,mode:sent.append((entry,mode)),
-            '_current_account_bots':lambda:[],
             'subprocess':SimpleNamespace(run=lambda *a,**kw:
                          SimpleNamespace(stdout='123\n' if 'okx-grid-a.service' in a[0] else '456\n'))})
 with patch('okx_panic_all.survey',return_value=(plan,(),())):

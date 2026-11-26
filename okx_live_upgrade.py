@@ -128,31 +128,34 @@ def allowed_package_member(name):
         return True
     if len(parts) == 2 and parts[0] in ('tests', 'historical'):
         return True
+    if len(parts)==3 and parts[:2]==('tests','legacy') and parts[2] in ('__init__.py','single_transition_upgrader.py','okx_shared_runtime_deploy.py'):
+        return True
+    if len(parts)==2 and parts[0]=='tools' and parts[1] in (
+            'README.md','build_release_zip.py','okx_snapshot.py',
+            'okx_market_fill_audit.py','okx_reconcile_trigger_report.py',
+            'okx_reader_230_plus1_readonly_audit.py','export_component.py'):
+        return True
+    if len(parts)==3 and parts[:2]==('docs','history') and parts[2].endswith('.md'):
+        return True
+    if len(parts)==3 and parts[:2]==('tests','funding') and parts[2] in (
+            'benchmark_funding.py','f1_bills_fixture.json','test_funding_collector.py',
+            'test_funding_f6.py','test_funding_f61.py','test_funding_ledger.py',
+            'test_funding_view_backup.py'):
+        return True
     if len(parts) == 3 and parts[:2] == ('deploy', 'reader'):
         return True
     # Explicit historical oracle fixture and original offline tests. This
     # nested layout is test-only, never copied into a trading instance.
     if name in (
-        'deploy/reader_pacing/okx_reader_230_plus1_readonly_audit.py',
-        'deploy/reader_pacing/okx_reader_pacing_230_plus1_install.py',
         'deploy/resources/README.md',
         'deploy/resources/collector.py',
         'deploy/resources/http429_audit.py',
         'funding/README.md',
-        'funding/benchmark_funding.py',
-        'funding/f1_bills_fixture.json',
         'funding/okx_funding_backup.py',
         'funding/okx_funding_collector.py',
-        'funding/okx_funding_ledger.py',
-        'funding/okx_funding_view.py',
         'funding/systemd/okx-funding-collector.service',
         'funding/systemd/okx-funding-collector.timer',
         'funding/systemd/paths.conf.example',
-        'funding/test_funding_collector.py',
-        'funding/test_funding_f6.py',
-        'funding/test_funding_f61.py',
-        'funding/test_funding_ledger.py',
-        'funding/test_funding_view_backup.py',
     ):return True
     if parts in (('tests','fixtures','okx_bot_original_full_v0760.py.gz'),
                  ('tests','fixtures','okx_bot_v0780_baseline.py.gz'),
@@ -208,7 +211,13 @@ def stage_check():
     from okx_source_attestation import verify_bundle
     verify_bundle(STAGE)
     from okx_dependency_attestation import verify
-    verify(STAGE,json_read(STAGE/'engine_manifest.json'))
+    manifest=json_read(STAGE/'engine_manifest.json')
+    verify(STAGE,manifest)
+    from okx_install_manifest import load
+    from okx_manager_version import RELEASE_VERSION, validate_manager_version
+    install=load(STAGE,manifest)
+    if install['release_version']!=RELEASE_VERSION or not validate_manager_version():
+        fail('Install manifest release mismatch')
     return True
 
 
@@ -371,30 +380,55 @@ def install_shared():
     if not SHARED.is_dir() or SHARED.is_symlink():fail('Unsafe shared runtime')
     # Do not touch the trading services. Shared Python modules are imported on next process start.
     dest=backup_dir('shared')
-    to_copy=sorted(p.name for p in STAGE.iterdir() if p.suffix=='.py')+['engine_manifest.json','requirements.txt','okx_source_bundle.json']
+    from okx_install_manifest import load
+    inventory=load(STAGE,json_read(STAGE/'engine_manifest.json'))
+    to_copy=inventory['shared']
+    retired=[]
+    for name,expected in inventory['retire_shared'].items():
+        p=SHARED/name
+        if p.exists() or p.is_symlink():
+            if p.is_symlink() or not p.is_file() or sha256(p)!=expected:
+                print('RETIRED FILE PRESERVED (unrecognized bytes):',name,flush=True)
+            else:retired.append(name)
+    # Copy only byte/mode changes; unchanged pinned engine/Reader files retain their inode.
+    import stat
+    changed=[]
+    for name in to_copy:
+        dst=SHARED/name
+        if dst.is_symlink():fail('Unsafe shared destination: '+name)
+        if not dst.exists():changed.append(name);continue
+        check_file(dst)
+        if sha256(dst)!=sha256(STAGE/name) or stat.S_IMODE(dst.stat().st_mode)!=stat.S_IMODE((STAGE/name).stat().st_mode):
+            changed.append(name)
     (dest/'old').mkdir(mode=0o700)
     old_exists=[]
-    for name in to_copy:
+    for name in changed+retired:
         src=SHARED/name
-        if src.exists():
+        if src.exists() or src.is_symlink():
             shutil.copy2(check_file(src),dest/'old'/name)
             old_exists.append(name)
     (dest/'old_existing.json').write_text(json.dumps(old_exists))
     try:
-        for name in to_copy:atomic_replace_file(STAGE/name,SHARED/name)
+        for name in changed:atomic_replace_file(STAGE/name,SHARED/name)
+        for name in retired:
+            if sha256(check_file(SHARED/name))!=inventory['retire_shared'][name]:
+                fail('Retired file changed during install: '+name)
+            (SHARED/name).unlink()
         for name in to_copy:
             if sha256(STAGE/name)!=sha256(SHARED/name):fail('Shared content mismatch: '+name)
         from okx_source_attestation import verify_bundle
         verify_bundle(SHARED)
+        from okx_dependency_attestation import verify
+        verify(SHARED,json_read(SHARED/'engine_manifest.json'),installed_shared=True)
         if not os.access(SHARED/'okxbot.py',os.X_OK):
             fail('Manager executable bit lost; shared install requires rollback')
     except BaseException:
         for name in old_exists:atomic_replace_file(dest/'old'/name,SHARED/name)
-        for name in to_copy:
+        for name in changed:
             if name not in old_exists and (SHARED/name).is_file(): (SHARED/name).unlink()
         raise
     (dest/'complete').write_text('Shared runtime updated, no trading services changed\n')
-    print('SHARED PASS:',len(to_copy),'files; backup:',dest)
+    print('SHARED PASS:',len(to_copy),'files; changed:',len(changed),'retired:',len(retired),'backup:',dest)
 
 
 def install_telegram():
@@ -402,7 +436,8 @@ def install_telegram():
     stage_check()
     if TELEGRAM_ROOT.is_symlink() or not TELEGRAM_ROOT.is_dir():
         fail('Unsafe Telegram root')
-    names=sorted(p.name for p in STAGE.glob('okx_telegram_*.py'))
+    from okx_install_manifest import load
+    names=load(STAGE,json_read(STAGE/'engine_manifest.json'))['telegram']
     if len(names)<5:fail('Incomplete Telegram module set')
     old=backup_dir('telegram')
     (old/'old').mkdir(mode=0o700)
@@ -488,9 +523,9 @@ def migrate_partial_policy(config):
     """One-time approved strategy policy transition; not tied to release numbers."""
     revision=config.get('partial_buy_policy_revision',1)
     if revision==1:
-        print('PARTIAL_POLICY_MIGRATION: timeout',config.get('partial_buy_timeout_sec',60),
-              '-> 5; distance',config.get('partial_buy_distance_steps',5),
-              '-> 3; revision 1 -> 2',flush=True)
+        print('PARTIAL_POLICY_MIGRATION:',
+              f"{config.get('partial_buy_timeout_sec',60)}s/{config.get('partial_buy_distance_steps',5)}steps -> 5s/3steps",
+              flush=True)
         config.update(partial_buy_timeout_sec=5,partial_buy_distance_steps=3,
                       partial_buy_policy_revision=2)
     elif revision!=2:
@@ -498,6 +533,7 @@ def migrate_partial_policy(config):
 
 
 def upgrade_bot(bot, *, single_instance=False):
+    if OLD_VERSION==NEW_VERSION:fail('Same-engine bot restart not permitted')
     stage_check()
     engine_files=files_required()
     if not single_instance:
@@ -557,14 +593,23 @@ def upgrade_bot(bot, *, single_instance=False):
         if single_instance or resume_detach:env['OKX_GRID_ISOLATION_AUDIT']='1'
         if resume_detach:env['OKX_GRID_DETACH_RESUME_AUDIT']='1'
         audit_started=True
-        proc=subprocess.run([str(root/'.venv/bin/python'),'-u',str(root/'okx_bot.py')],
-            cwd=root,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=180)
-        print('\n'.join(proc.stdout.splitlines()[-28:]),flush=True)
+        try:
+            proc=subprocess.run([str(root/'.venv/bin/python'),'-u',str(root/'okx_bot.py')],
+                cwd=root,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=180)
+        except subprocess.TimeoutExpired as exc:
+            output=exc.stdout or ''
+            if isinstance(output,bytes):output=output.decode('utf-8',errors='replace')
+            if output:print(output,flush=True)
+            raise
         if not audit_output_complete(proc.returncode, proc.stdout,single_instance=single_instance or resume_detach):
+            if proc.stdout:print(proc.stdout,flush=True)
             fail('READ-ONLY AUDIT did not fully finish; BOT REMAINS STOPPED')
+        coverage='ISOLATED' if 'UPGRADE AUDIT COMPLETE ISOLATED' in proc.stdout.splitlines() else 'STRICT'
+        print('POSITION COVERAGE PASS',coverage,flush=True)
+        print('FINANCIAL AUDIT PASS',flush=True)
         print('AUDIT PASS',bot,flush=True)
     except BaseException:
-        if (single_instance or resume_detach) and audit_started:
+        if audit_started:
             # GET-only audit can persist new exchange facts and fill evidence.
             # Never restore an old state over those facts after an audit starts.
             print('AUDIT FAILED; CANDIDATE AND CURRENT STATE RETAINED; SERVICE STOPPED; backup',dest,flush=True)
@@ -638,8 +683,15 @@ def main():
     expected=json_read(STAGE/'engine_manifest.json')
     NEW_VERSION=expected.get('current_version')
     OLD_VERSION=args.from_engine
-    if not isinstance(NEW_VERSION,str) or OLD_VERSION==NEW_VERSION:
-        fail('Upgrade requires different explicit source and target engine identities')
+    if not isinstance(NEW_VERSION,str):fail('Invalid target engine identity')
+    from okx_manager_version import RELEASE_KIND, validate_manager_version
+    if RELEASE_KIND=='maintenance':
+        if args.action=='bot' or args.single_instance:
+            fail('Maintenance release forbids trading bot upgrade/restart')
+        if OLD_VERSION!=NEW_VERSION or not validate_manager_version():
+            fail('Maintenance requires identical source and target engine identities')
+    elif OLD_VERSION==NEW_VERSION:
+        fail('Same-engine installation requires a declared maintenance release')
     old_entry=expected.get('engines',{}).get(OLD_VERSION)
     if not isinstance(old_entry,dict) or old_entry.get('file')!='okx_bot.py':
         fail('Source engine identity not attested in target package manifest')

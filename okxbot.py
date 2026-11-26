@@ -848,12 +848,6 @@ def _account_soft_latch_data():
 def account_soft_active():
     return _account_soft_latch_data() is not None
 
-def account_soft_menu_label():
-    try:
-        return ('Общая остановка аккаунта — восстановление (SOFT)' if account_soft_active()
-                else 'Общая остановка аккаунта — статус (нет блокировки)')
-    except (OSError,RuntimeError,ValueError):
-        return 'Общая остановка аккаунта — ОШИБКА, нужна проверка'
 
 def _account_reset_preflight(latch):
     """Verify EVERY active registered instance; never hardcode bot names.
@@ -987,9 +981,6 @@ def cmd_account_reset():
     print('Если проблема с маржой повторится, блокировка автоматически восстановится.')
 
 
-def _current_account_bots():
-    """Authoritative discovery: unknown running services are fatal."""
-    return discover_single_account(BASE, SYSTEMD_DIR)
 
 
 def _account_env_file():

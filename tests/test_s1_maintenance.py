@@ -18,8 +18,10 @@ def get(name, filename):
 
 class S1Contracts(unittest.TestCase):
     def test_watchdog_deploy_copy(self):
-        self.assertEqual((ROOT/'okx_position_reader_watchdog.py').read_bytes(),
-                         (ROOT/'deploy/reader/okx_position_reader_watchdog.py').read_bytes())
+        m=json.loads((ROOT/'install_manifest.json').read_text())
+        self.assertEqual(m['reader']['okx_position_reader_watchdog.py'],'okx_position_reader_watchdog.py')
+        self.assertTrue((ROOT/'okx_position_reader_watchdog.py').is_file())
+        self.assertFalse((ROOT/'deploy/reader/okx_position_reader_watchdog.py').exists())
 
     def test_watchdog_stable_skip_and_heartbeat(self):
         mod = get('offline_watchdog_a', 'okx_position_reader_watchdog.py')

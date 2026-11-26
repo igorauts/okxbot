@@ -18,7 +18,7 @@ def digest(path):
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
-def verify(root, manifest, *, bot_only=False):
+def verify(root, manifest, *, bot_only=False, installed_shared=False):
     root=Path(root)
     engine=manifest['engines'][manifest['current_version']]
     required=[engine['file']]+list(engine['dependencies'])
@@ -35,9 +35,14 @@ def verify(root, manifest, *, bot_only=False):
     package=manifest.get('source_modules_sha256')
     if not isinstance(package,dict) or not package:
         raise RuntimeError('No full source package SHA manifest')
-    actual={p.name for p in root.glob('*.py') if p.is_file()}
-    if set(package)!=actual:
-        raise RuntimeError('Source package Python inventory mismatch')
+    if installed_shared:
+        from okx_install_manifest import load
+        inventory=load(root,manifest,installed=True)
+        package={n:package[n] for n in inventory['shared'] if n.endswith('.py')}
+    else:
+        actual={p.name for p in root.glob('*.py') if p.is_file()}
+        if set(package)!=actual:
+            raise RuntimeError('Source package Python inventory mismatch')
     for filename, sha in package.items():
         if not hmac.compare_digest(digest(root/filename),sha):
             raise RuntimeError('Package module SHA mismatch: '+filename)
@@ -48,13 +53,14 @@ def main():
     cli=argparse.ArgumentParser()
     cli.add_argument('--source',type=Path,default=Path(__file__).resolve().parent)
     cli.add_argument('--bot-root',type=Path,default=None)
+    cli.add_argument('--installed-shared',action='store_true',help='Verify explicit installed shared inventory; preserve unrelated files')
     ns=cli.parse_args()
     source=ns.source.resolve()
     manifest_path=source/'engine_manifest.json'
     if manifest_path.is_symlink() or not manifest_path.is_file():
         raise SystemExit('FAIL_CLOSED: missing source manifest')
     manifest=json.loads(manifest_path.read_text())
-    count=verify(source,manifest)
+    count=verify(source,manifest,installed_shared=ns.installed_shared)
     print('SOURCE_PACKAGE_SHA256=PASS',count,'ENGINE=',manifest['current_version'])
     if ns.bot_root:
         try:

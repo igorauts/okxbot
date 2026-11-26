@@ -12,9 +12,11 @@ import stat
 import zipfile
 from pathlib import Path
 
-SOURCE = Path(__file__).resolve().parent
+SOURCE = Path(__file__).resolve().parents[1]
+import sys
+sys.path.insert(0,str(SOURCE))
 EXECUTABLES = ('okxbot.py','okx_live_upgrade.py','rollout_preflight.py',
-               'run_checks.sh','okx_shared_runtime_deploy.py','build_release_zip.py',
+               'run_checks.sh','tools/build_release_zip.py',
                'okx_dependency_attestation.py')
 
 

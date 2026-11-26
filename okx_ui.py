@@ -152,17 +152,6 @@ def last_local_bid(unit):
     except (OSError,subprocess.TimeoutExpired):return None
 
 
-def monitor_service_enabled(unit,kind):
-    """systemd per-instance toggle; older custom monitors are not misidentified."""
-    base=unit[:-8] if unit.endswith('.service') else unit
-    for version in ('074','073'):
-        svc=f'{base}-{kind}-monitor{version}.service'
-        try:
-            p=subprocess.run(['systemctl','is-active','--quiet',svc],
-                             capture_output=True,timeout=3,check=False)
-            if p.returncode==0:return True
-        except (OSError,subprocess.TimeoutExpired):pass
-    return False
 
 
 def history_multifill(path):

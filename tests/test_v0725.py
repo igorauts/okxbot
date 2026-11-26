@@ -205,21 +205,21 @@ print('PASS PANIC ALL dispatch: independent durable intents sent; skipped bot st
 # come from the PUBLISHED v0.7.27 release asset, not the candidate v0.7.28.
 # Independently computed from okx_grid_v0727_final.zip/okx_bot.py.
 import hashlib
-from historical import single_transition_upgrader as upgrader
+from tests.legacy import single_transition_upgrader as upgrader
 assert upgrader.OLD_ENGINE_SHA256 == 'e0d66fc153a2a20d2b9c5df6e79915b73deb1cbd694eae1d153f305284b02717'
 assert upgrader.OLD_ENGINE_SHA256 != hashlib.sha256((ROOT/'okx_bot.py').read_bytes()).hexdigest()
-assert 'instance_check(bot,cfg[' in (ROOT/'historical/single_transition_upgrader.py').read_text()
+assert 'instance_check(bot,cfg[' in (ROOT/'tests/legacy/single_transition_upgrader.py').read_text()
 print('PASS updater: pinned original v0.7.26 published engine hash; preflight verifies actual code before any stop')
 
-upgrade=ast.parse((ROOT/'historical/single_transition_upgrader.py').read_text())
+upgrade=ast.parse((ROOT/'tests/legacy/single_transition_upgrader.py').read_text())
 assert any(isinstance(n,ast.FunctionDef) and n.name=='upgrade_bot' for n in upgrade.body)
-assert '--confirm-live-stop' in (ROOT/'historical/single_transition_upgrader.py').read_text()
-assert '--sha256' in (ROOT/'historical/single_transition_upgrader.py').read_text()
+assert '--confirm-live-stop' in (ROOT/'tests/legacy/single_transition_upgrader.py').read_text()
+assert '--sha256' in (ROOT/'tests/legacy/single_transition_upgrader.py').read_text()
 print('PASS updater: in-repo controlled single-instance installer, pinned package and explicit stop consent')
 # Exercise actual installer stage checksum and Telegram-only transactional install.
 # No systemctl or live filesystem access is permitted in this test.
 import zipfile,hashlib,stat
-from historical import single_transition_upgrader as upgrader
+from tests.legacy import single_transition_upgrader as upgrader
 with tempfile.TemporaryDirectory() as td:
     temp=Path(td);pkg=temp/'candidate.zip';tg=temp/'telegram';tg.mkdir()
     import shutil as _copy_for_legacy, re as _re_for_legacy

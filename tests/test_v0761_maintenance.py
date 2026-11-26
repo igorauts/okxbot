@@ -205,7 +205,7 @@ class DeploymentSafety(unittest.TestCase):
         unit=(root/'deploy/reader/okx-position-reader-watchdog.service').read_text()
         self.assertIn('Type=simple',unit)
         self.assertIn('--loop',unit)
-        import okx_shared_runtime_deploy as dep
+        from tests.legacy import okx_shared_runtime_deploy as dep
         self.assertTrue(dep.WATCHDOG_UNIT.endswith('.service'))
         with self.assertRaisesRegex(RuntimeError,'RETIRED'):
             dep.apply(None)

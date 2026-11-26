@@ -256,8 +256,4 @@ def main():
     else:apply(a)
 
 if __name__=='__main__':
-    try:main()
-    except (RuntimeError, OSError, ValueError, KeyError, subprocess.CalledProcessError,
-            subprocess.TimeoutExpired, zipfile.BadZipFile) as exc:
-        print('INSTALLER STOP:',type(exc).__name__,str(exc),file=sys.stderr)
-        sys.exit(1)
+    raise SystemExit('RETIRED TEST FIXTURE: use current reviewed installer')

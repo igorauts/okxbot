@@ -73,7 +73,7 @@ class CleanEngineRefactorTests(unittest.TestCase):
                          "OLD_ENGINE_SHA256=old_entry.get('sha256')", 'READ_ONLY',
                          'backup_instance(',"run('systemctl','stop'",'AUDIT CONSISTENT'):
             self.assertIn(required,code)
-        self.assertTrue((ROOT/'historical/single_transition_upgrader.py').is_file())
+        self.assertTrue((ROOT/'tests/legacy/single_transition_upgrader.py').is_file())
 
 
 if __name__ == '__main__':

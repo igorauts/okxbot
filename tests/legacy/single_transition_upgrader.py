@@ -421,7 +421,4 @@ def main():
         os.close(fd)
 
 if __name__=='__main__':
-    try:main()
-    except Exception as e:
-        print('UPGRADE STOPPED:',type(e).__name__,str(e),file=sys.stderr,flush=True)
-        sys.exit(1)
+    raise SystemExit('RETIRED TEST FIXTURE: use current reviewed installer')

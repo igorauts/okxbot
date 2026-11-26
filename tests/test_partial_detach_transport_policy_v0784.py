@@ -97,7 +97,7 @@ class ResumeGuard(unittest.TestCase):
         import io
         c={'partial_buy_timeout_sec':300,'partial_buy_distance_steps':10}
         with redirect_stdout(io.StringIO()) as log:migrate_partial_policy(c)
-        self.assertIn('300 -> 5',log.getvalue());self.assertIn('10 -> 3',log.getvalue())
+        self.assertIn('300s/10steps -> 5s/3steps',log.getvalue());self.assertNotIn('revision',log.getvalue())
         self.assertEqual((c['partial_buy_timeout_sec'],c['partial_buy_distance_steps']),(5,3))
 
 

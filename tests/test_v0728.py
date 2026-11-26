@@ -12,7 +12,7 @@ sys.path.insert(0,str(ROOT))
 from okx_latency_rollup import (MinuteWriter, add_row, read_rollups,
                                distribution, segment_dir, SECONDS)
 from okx_version import ENGINE_VERSION, RELEASE_VERSION, STATE_SCHEMA
-from historical import single_transition_upgrader as upgrader
+from tests.legacy import single_transition_upgrader as upgrader
 import okx_telegram_health as health
 
 assert __import__("okx_release_contract").check()

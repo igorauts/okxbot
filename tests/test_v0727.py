@@ -21,7 +21,7 @@ import okx_telegram_health as health
 
 assert __import__("okx_release_contract").check()
 # The upgrader MUST recognize LIVE v0.7.27, not only the new candidate.
-from historical import single_transition_upgrader as upgrader
+from tests.legacy import single_transition_upgrader as upgrader
 assert upgrader.OLD_VERSION == '0.7.27' and upgrader.NEW_VERSION == '0.7.28'
 assert upgrader.OLD_VERSION != upgrader.NEW_VERSION
 assert upgrader.OLD_ENGINE_SHA256 == 'e0d66fc153a2a20d2b9c5df6e79915b73deb1cbd694eae1d153f305284b02717'

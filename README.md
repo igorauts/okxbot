@@ -1,6 +1,8 @@
 # OKX Grid Bot
 
-**Текущий релиз: [v0.7.85](https://github.com/igorauts/okxbot/releases/tag/v0.7.85)** · торговый движок **0.7.85**.
+**Текущий релиз: [v0.7.86](https://github.com/igorauts/okxbot/releases/tag/v0.7.86)** · торговый движок **0.7.85** без изменений.
+
+Сервисный релиз: явный состав установки, исправление вывода и rollback обязательного аудита, уборка Manager/Telegram/UI, служебных инструментов и документации. Все 26 файлов движка идентичны 0.7.85. На LIVE обновлены общие файлы и Telegram; торговые боты, Reader и Funding не перезапускались. См. `RELEASE_NOTES_V0786.md`.
 
 Частичный выход BUY: 5 секунд И 3 шага, AMEND → CANCEL → MARKET. Релиз устраняет блокирующую гонку терминального AMEND, добавляет алерты Telegram и совместимое возобновление durable intent. Основной путь подтверждён LIVE на SLX 0.7.84; все активные боты обновлены до 0.7.85 после 1045 OFFLINE-тестов. Редкие гонки проверены OFFLINE; сырая форма ответа OKX отдельно не зафиксирована. См. `RELEASE_NOTES_V0785.md`.
 
@@ -13,7 +15,7 @@
 - Резерв attached TP: durable-доказательство родительского BUY, полная сверка не чаще 60 с в стабильном состоянии, немедленная повторная проверка при противоречии.
 - Независимое аварийное обслуживание HARD/PANIC; неизвестный резерв не считается закрытым.
 - Раздельный учёт реальных TP и резерва, причины защитных пауз, видимость резерва в менеджере и Telegram.
-- См. `V0782_AUDIT_OFFLINE.md` (исторический OFFLINE-отчёт). Финальный пакет прошёл 988 тестов; LIVE-канарейка и обновление всех активных ботов подтверждены оператором. PANIC/HARD проверены OFFLINE.
+- См. `docs/history/V0782_AUDIT_OFFLINE.md` (исторический OFFLINE-отчёт). Финальный пакет прошёл 988 тестов; LIVE-канарейка и обновление всех активных ботов подтверждены оператором. PANIC/HARD проверены OFFLINE.
 
 ## История: что нового в 0.7.80
 
@@ -59,6 +61,7 @@ Floating PnL −$1,151.65
 Используйте `okxbot` для управления экземплярами; Telegram предназначен для наблюдения. Не добавляйте второй торговый процесс для той же NET-позиции. Перед LIVE-обновлением нужны резервная копия, проверка исходников и зависимостей, финансовые инварианты и контролируемая установка. Архивные данные не изменяются. Не публикуйте `.env`, API-ключи, Telegram-токены, реальные SQLite, state, журналы и финансовые данные. Исторические upgrade-скрипты не являются универсальными установщиками последнего релиза.
 
 - [Changelog](CHANGELOG.md)
+- [Release notes 0.7.86](RELEASE_NOTES_V0786.md)
 - [Release notes 0.7.85](RELEASE_NOTES_V0785.md)
 - [Release notes 0.7.83](RELEASE_NOTES_V0783.md)
 - [Release notes 0.7.82](RELEASE_NOTES_V0782.md)
@@ -74,48 +77,48 @@ Floating PnL −$1,151.65
 
 ## v0.7.64 — Eager terminal archive (LIVE, 07.11.2026 UTC)
 
-Проверенный LIVE-релиз 8/8 торговых движков. После 900 секунд безопасно переносит закрытые терминальные циклы из рабочей сетки в архив; законные ожидания shared-компонентов больше не вызывают ложный `STATS_V2_STALLED`. На BLUR подтверждены `pending=18→0`, перенос шести терминальных циклов и непрерывная финансовая публикация. Торговая стратегия и денежные правила freeze не изменены. См. `V0764_EAGER_TERMINAL_ARCHIVE_LIVE_RELEASE_NOTES_RU.md`. Отдельный `V0764_EAGER_TERMINAL_ARCHIVE_OFFLINE_NOTES_RU.md` сохранён как исторический отчёт до LIVE.
+Проверенный LIVE-релиз 8/8 торговых движков. После 900 секунд безопасно переносит закрытые терминальные циклы из рабочей сетки в архив; законные ожидания shared-компонентов больше не вызывают ложный `STATS_V2_STALLED`. На BLUR подтверждены `pending=18→0`, перенос шести терминальных циклов и непрерывная финансовая публикация. Торговая стратегия и денежные правила freeze не изменены. См. `docs/history/V0764_EAGER_TERMINAL_ARCHIVE_LIVE_RELEASE_NOTES_RU.md`. Отдельный `docs/history/V0764_EAGER_TERMINAL_ARCHIVE_OFFLINE_NOTES_RU.md` сохранён как исторический отчёт до LIVE.
 
 ## v0.7.63 — Stats-v2 reliability (LIVE, 07.11.2026 UTC)
 
-Проверенный LIVE-релиз: 8/8 торговых движков v0.7.63, подтверждённые новые финансовые публикации, Reader/Telegram активны. Исправлены bootstrap anchor, bounded pending/rebuild, обработка гонок состояния и инцидентная телеметрия. Результаты и ограничения см. `V0763_STATS_V2_RELIABILITY_LIVE_RELEASE_NOTES_RU.md`. Прежний `V0763_STATS_V2_RELIABILITY_OFFLINE_NOTES.md` — исторический отчёт о кандидате до LIVE.
+Проверенный LIVE-релиз: 8/8 торговых движков v0.7.63, подтверждённые новые финансовые публикации, Reader/Telegram активны. Исправлены bootstrap anchor, bounded pending/rebuild, обработка гонок состояния и инцидентная телеметрия. Результаты и ограничения см. `docs/history/V0763_STATS_V2_RELIABILITY_LIVE_RELEASE_NOTES_RU.md`. Прежний `docs/history/V0763_STATS_V2_RELIABILITY_OFFLINE_NOTES.md` — исторический отчёт о кандидате до LIVE.
 
 ## v0.7.62 — StatsWorker v2 (06.11.2026)
 
-Инкрементальный StatsWorker v2, контролируемый HOT/архив и сверка финансов. 8 LIVE-ботов обновлены. **Ограничение:** для нового бота требуется исходный `grid_reference.json`; автоматическая инициализация ещё не исправлена. См. `V0762_STATS_WORKER_V2_LIVE_RELEASE_NOTES_RU.md`.
+Инкрементальный StatsWorker v2, контролируемый HOT/архив и сверка финансов. 8 LIVE-ботов обновлены. **Ограничение:** для нового бота требуется исходный `grid_reference.json`; автоматическая инициализация ещё не исправлена. См. `docs/history/V0762_STATS_WORKER_V2_LIVE_RELEASE_NOTES_RU.md`.
 
 ## v0.7.61 — Telegram N1/B1/B2/N2/N3 (06.11.2026)
 
-Maintenance: алерты combined observers, ограниченные повторы Telegram-команд, checkpoint курсоров журналов и BUY, корректный UI observers, защита от старого watchdog timer. Торговый движок v0.7.60 не менялся. См. `V0761_N1_B1_B2_N2_N3_RELEASE_NOTES_RU.md`.
+Maintenance: алерты combined observers, ограниченные повторы Telegram-команд, checkpoint курсоров журналов и BUY, корректный UI observers, защита от старого watchdog timer. Торговый движок v0.7.60 не менялся. См. `docs/history/V0761_N1_B1_B2_N2_N3_RELEASE_NOTES_RU.md`.
 
 ## v0.7.60 — S1–S3 и D1: снижение фоновой нагрузки (05.11.2026)
 
-Watchdog — постоянный процесс; resource sampler — кеш systemd units на час; combined observers — один процесс на бота; drawdown — прежние расчёты каждые 5 секунд с более редкой записью current. Торговый движок v0.7.60. См. `V0760_S1_S2_S3_D1_LIVE_RELEASE_NOTES_RU.md`.
+Watchdog — постоянный процесс; resource sampler — кеш systemd units на час; combined observers — один процесс на бота; drawdown — прежние расчёты каждые 5 секунд с более редкой записью current. Торговый движок v0.7.60. См. `docs/history/V0760_S1_S2_S3_D1_LIVE_RELEASE_NOTES_RU.md`.
 
 # OKX Grid Bot
 
 ## v0.7.59 — Telegram Monitor T1–T4 (05.11.2026)
 
-Maintenance-пакет: long polling 25 с, команды в отдельном worker, запись состояния только при изменениях, системная проверка раз в 15 с. Торговый движок v0.7.57 не изменён. См. `V0759_TELEGRAM_T1_T4_RELEASE_NOTES_RU.md`.
+Maintenance-пакет: long polling 25 с, команды в отдельном worker, запись состояния только при изменениях, системная проверка раз в 15 с. Торговый движок v0.7.57 не изменён. См. `docs/history/V0759_TELEGRAM_T1_T4_RELEASE_NOTES_RU.md`.
 
 
 
 ## v0.7.58 — Telegram Financial UI maintenance (05.11.2026)
-Пакет v0.7.58 обновляет Telegram `/status`, `/full`, `/latency`, `/help` и GET-only отображение баланса. **Торговый движок v0.7.57 не меняется.** Подробности: `V0758_TELEGRAM_UI_RELEASE_NOTES_RU.md`.
+Пакет v0.7.58 обновляет Telegram `/status`, `/full`, `/latency`, `/help` и GET-only отображение баланса. **Торговый движок v0.7.57 не меняется.** Подробности: `docs/history/V0758_TELEGRAM_UI_RELEASE_NOTES_RU.md`.
 
 ## v0.7.57 — LIVE: защита idle HTTPS для CANCEL и динамический `/latency` (04.11.2026)
 - Изолированный elective CANCEL: обновление простаивающего TLS до одного POST, без повторов и изменения безопасности BUY/TP/MARKET/PANIC.
 - Telegram `/latency` обнаруживает работающих ботов динамически.
 - Известное ограничение: `/latency8h` запрашивает 480 минут, но CLI принимает только 15–180; `/latency` за 60 минут работает.
 - GitHub-публикация не меняет работающие сервисы и не запускает тесты.
-- Подробности: `V0757_LIVE_RELEASE_NOTES_RU.md`.
+- Подробности: `docs/history/V0757_LIVE_RELEASE_NOTES_RU.md`.
 
 
 ## v0.7.56 — LIVE trading engine (04.11.2026)
 - v0.7.54/55: TP/BUY cleanup and nonblocking isolated elective CANCEL reconciliation.
 - v0.7.56: real protective LIMIT TP is restored without elective 10-second quiet cooldown when below target.
 - Seven active engines verified at publication preflight; no VPS changes on GitHub push.
-- See `V0756_LIVE_RELEASE_NOTES_RU.md` and the GitHub Release for details.
+- See `docs/history/V0756_LIVE_RELEASE_NOTES_RU.md` and the GitHub Release for details.
 
 
 **Историческая ссылка на релиз: [v0.7.58](https://github.com/igorauts/okxbot/releases/tag/v0.7.58).**
@@ -351,11 +354,11 @@ Shared Reader — уже существующий account key, не отдель
 
 - [CHANGELOG.md](CHANGELOG.md)
 - [SAFETY_REVIEW.md](SAFETY_REVIEW.md)
-- [V0739_RELEASE_NOTES_RU.md](V0739_RELEASE_NOTES_RU.md)
-- [STATS_WORKER_OPTIMIZATION_RU.md](STATS_WORKER_OPTIMIZATION_RU.md)
-- [V0738_LIVE_RELEASE_NOTES_RU.md](V0738_LIVE_RELEASE_NOTES_RU.md)
-- [READER_TELEGRAM_ALERTS_RU.md](READER_TELEGRAM_ALERTS_RU.md)
-- [READER_ZERO_0741_OFFLINE_NOTES.md](READER_ZERO_0741_OFFLINE_NOTES.md)
+- [V0739_RELEASE_NOTES_RU.md](docs/history/V0739_RELEASE_NOTES_RU.md)
+- [STATS_WORKER_OPTIMIZATION_RU.md](docs/history/STATS_WORKER_OPTIMIZATION_RU.md)
+- [V0738_LIVE_RELEASE_NOTES_RU.md](docs/history/V0738_LIVE_RELEASE_NOTES_RU.md)
+- [READER_TELEGRAM_ALERTS_RU.md](docs/history/READER_TELEGRAM_ALERTS_RU.md)
+- [READER_ZERO_0741_OFFLINE_NOTES.md](docs/history/READER_ZERO_0741_OFFLINE_NOTES.md)
 
 Релизные ZIP и исторические README доступны в соответствующих Git-тегах.
 

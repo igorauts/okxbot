@@ -1,0 +1,10 @@
+# OKX Grid Bot v0.7.86 — Service maintenance
+
+Manager/package 0.7.86; trading engine 0.7.85 and all 25 engine dependencies unchanged byte-for-byte. No strategy, finance, Reader pacing, transport, state schema or archive changes. No trading bot upgrade/restart is allowed by this maintenance installer.
+
+- Explicit install inventory and pinned component sources; unchanged protected files are not rewritten. Only the exact known retired shared installer is eligible for removal with backup; operator files are preserved.
+- Mandatory upgrade audit prints position coverage and financial audit PASS markers instead of the old funding-less report. Once audit starts, preserve all newly observed facts on failure; no stale-state rollback. Migration output reports actual changes only.
+- Remove unused Manager/Telegram/UI functions, consolidate duplicate component sources, move historical docs and tools, quarantine legacy installers and organize Funding tests. Engine cleanup and decomposition are not part of this release.
+- OFFLINE: 1055 unittest executions in run_checks.sh; independent audit also ran 102 test files individually and verified actual shared installation on a simulated server tree, including byte-for-byte rollback after injected failure. NEW/CLONE and first-start paths verified offline.
+- LIVE on 2026-11-26 UTC: shared install (76 files, 10 changed/added, 1 retired) and separate Telegram install (11 files) passed. Final source attestation passed for shared runtime, Telegram, 32-file new-bot bundle and all 26 files in each of the nine active trading bots. All trading and Reader process identities remained unchanged; Funding timer active and no Funding restart during installation; only Telegram restarted and operator confirmed it works. No new bot was created on LIVE for this verification.
+- Publication changes documentation only relative to the audited candidate. Historical candidate reports are retained as historical records. No full test rerun for the documentation-only repack. No trading or service changes during publication.

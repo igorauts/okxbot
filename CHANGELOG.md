@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.7.86 — 2026-11-26 UTC — Service maintenance (engine 0.7.85)
+
+- Service-only cleanup; pinned engine remains 0.7.85.
+- Explicit install inventory, concise upgrade output, preserve audit-discovered facts on failure.
+- Remove unused manager/Telegram/UI functions and duplicate deployment sources.
+- Preserve historic engine records and operational files; no trading restart for same-engine maintenance.
+
+- OFFLINE: 1055 tests; independent audit and simulated installer/rollback passed. LIVE shared and Telegram installation verified; trading processes, Reader and Funding unchanged. See [release notes](RELEASE_NOTES_V0786.md).
+
 ## v0.7.85 — 2026-11-26 UTC — Independent audit corrections and partial BUY exit
 
 - Exact terminal AMEND ambiguity is isolated without a global exception; late confirmed removal or exact child discovery resolves it. No repeated full history scans on the new path.

@@ -20,7 +20,6 @@ import re
 import subprocess
 import time
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 from decimal import Decimal, ROUND_HALF_UP
 from urllib.request import Request, urlopen, getproxies
 import http.client
@@ -150,55 +149,14 @@ def _active_service(name):
     except KeyError:
         return False
 
-def _terminal_report(name):
-    root=Path(BOT_DIRS[name]);path=root/'state/final_stats.json'
-    if not path.is_file():return None
-    data=json.loads(path.read_text())
-    instrument=json.loads((root/'config.json').read_text()).get('instrument')
-    if (data.get('schema_version')!=1 or data.get('complete') is not True
-        or data.get('instrument')!=instrument
-        or data.get('mode') not in ('PANIC_DONE','RETIRED')):
-        raise ValueError('Invalid terminal report')
-    return f'🔴 {name} · {data["mode"]}\n'+data['report']
 
 SHARED_SOFT = Path('/var/lib/okxbot/account_soft_stop.json')
 STATE_PATH = Path('/var/lib/okxbot/telegram_monitor_state.json')
-ALERT_EVENTS = {
-    'ACCOUNT_AUTO_SOFT_STOP':'🚨 AUTO SOFT STOP',
-    'AUTO_SOFT_MODE_LATCHED':'🛑 SOFT STOP confirmed',
-    'RECONCILIATION_LONG_WAIT':'⚠️ Reconciliation stalled',
-    'TRADING_LOOP_LONG_PASS':'⚠️ Long trading pass',
-    'BUY_POST_UNRESOLVED':'⚠️ BUY POST unresolved',
-    'TP_POST_UNRESOLVED':'⚠️ TP POST unresolved',
-    'KNOWN_TP_UNRESOLVED':'⚠️ Known TP unavailable',
-    'TP_RESTORE_REJECTED':'🔴 TP restore rejected',
-    'ATTACHED_TP_REJECTED':'🚨 Attached TP failed on OKX',
-    'TP_PRICE_LIMIT_UNAVAILABLE':'⚠️ TP price limit unavailable',
-    'TP_FAILURE_BUY_HOLD':'🚨 BUY held: attached TP failure',
-    'PANIC_UNRESOLVED':'🚨 PANIC outcome unresolved',
-    'BUY_POST_EXPIRED_ABSENT':'✅ Expired BUY confirmed absent',
-    'TP_POST_EXPIRED_ABSENT':'✅ Expired TP confirmed absent',
-    'RECONCILIATION_RECOVERED':'✅ Reconciliation recovered',
-    'STARTUP_SYNC_WAIT':'⚠️ Startup syncing',
-    'FEE_CHECK_PAUSED_BUYS':'⚠️ BUY paused: fee check',
-    'ACCOUNT_POSITIONS_GATE_RECOVERED':'⚠️ Position limiter recovered',
-    'ACCOUNT_POSITIONS_GATE_DEGRADED':'🚨 Position limiter fallback active',
-    'AGG_MARKET_INTENT':'⚠️ Market SELL: intent saved',
-    'AGG_MARKET_ACK':'📤 Market SELL: accepted by OKX',
-    'AGG_MARKET_REJECTED':'🚨 Market SELL: rejected',
-    'AGG_MARKET_TERMINAL':'💰 Market SELL: final result',
-    'BOT_TERMINAL_FINALIZED':'🏁 Final bot PnL verified',
-    'BOT_TERMINAL_STATS_PENDING':'⚠️ Final bot accounting pending',
-    'EMERGENCY_POSITIONS_GATE_BLOCKED':'🚨 Emergency positions gate blocked',
-    'EMERGENCY_POSITIONS_READ':'🚨 Emergency positions read',
-    'COVERAGE_RECOVERY_WAIT':'⚠️ TP coverage hold',
-}
 RATE_LIMIT_SECONDS = 600
 MARKET_ALERTS = frozenset({'AGG_MARKET_INTENT','AGG_MARKET_ACK',
                             'AGG_MARKET_REJECTED','AGG_MARKET_TERMINAL',
                             'BOT_TERMINAL_FINALIZED','BOT_TERMINAL_STATS_PENDING'})
 POLL_SECONDS = 5
-TZ = ZoneInfo('America/Santiago')
 
 
 def read_env(path):
@@ -377,63 +335,8 @@ def _age_label(start):
     return f'{days}d {hours}h {mins}min'
 
 
-def _service_status(name,control_mode,stats_age):
-    """Exchange-trading status comes from systemd and control file."""
-    try:
-        result=subprocess.run(['systemctl','is-active',SERVICES[name]],
-                              capture_output=True,text=True,timeout=3)
-        active=result.stdout.strip()=='active'
-    except (OSError,subprocess.TimeoutExpired):
-        return '🟡','unknown'
-    if not active:return '🔴','stopped'
-    if SHARED_SOFT.exists():return '🟡','auto soft stop'
-    control_mode=str(control_mode).upper()
-    if control_mode in ('RUN','RUNNING'):
-        if stats_age>1200:return '🟡','stats stale'
-        return '🟢','running'
-    if control_mode in ('STOP','STOPPED','PANIC','ERROR'):
-        return '🔴',control_mode.lower()
-    return '🟡','paused' if control_mode in ('PAUSE','PAUSED') else control_mode.lower()
 
 
-def _historical_max_position(root, instrument):
-    """Reuse the existing manager's historical position result, never recompute it.
-
-    okxbot.py uses `okx_position_peak.format_peak(root, instrument)`.
-    Its output has a dedicated `МАКС. ПОЗИЦИЯ В ИСТОРИИ:` line.
-    `max position` in the normal grid report is NOT this value.
-    """
-    try:
-        from okx_position_peak import format_peak
-    except ImportError:
-        # The script and manager may live in different directories on VPS.
-        import sys
-        format_peak=None
-        for module_dir in ('/opt/okx-grid-live', '/root/okx'):
-            if not (Path(module_dir)/'okx_position_peak.py').is_file():
-                continue
-            if module_dir not in sys.path:
-                sys.path.insert(0, module_dir)
-            try:
-                from okx_position_peak import format_peak
-                break
-            except ImportError:
-                continue
-        if format_peak is None:
-            return 'н/д'
-    try:
-        lines=format_peak(root, instrument) or []
-        if isinstance(lines,str):
-            lines=lines.splitlines()
-        for line in lines:
-            label,sep,value=str(line).partition(':')
-            if not sep:continue
-            normalized=label.casefold().replace('.', '').strip()
-            if 'позиц' in normalized and 'истори' in normalized and ('макс' in normalized or 'наибольш' in normalized):
-                return value.strip() or 'н/д'
-        return 'н/д'
-    except (OSError, ValueError, TypeError, KeyError):
-        return 'н/д'
 
 
 def mode_and_stats(name, *, total_sink=None):
@@ -785,16 +688,6 @@ def send_report(api,report):
             raise ValueError('Single Telegram bot report exceeds 3800 bytes')
     if batch: api.send(batch,parse_mode='HTML')
 
-def format_alert(name,obj):
-    typ=obj['event']
-    parts=[f'{ALERT_EVENTS[typ]} | OKX {name}']
-    for key in ('severity','code','price','cycleId','cycles','qty','requested',
-                'grid_pnl','final_pnl','remaining','mode',
-                'filled','avgPx','state','ordId','clOrdId','seconds','reason','error','message'):
-        if key in obj and obj[key] not in ('',None):
-            safe=re.sub(r'[^\w\d .:,()=+\-_/]', '',str(obj[key]))
-            parts.append(f'{key}: {safe[:200]}')
-    return '\n'.join(parts)
 
 
 def ingest_events(api,st):
@@ -1343,12 +1236,6 @@ def safety_check(api,st):
     _mon_phase("safety.stats_freshness",stats_freshness_check,api,st,SERVICES,BOT_DIRS,now)
 
 
-def daily_check(api,st,now=None):
-    now=now or datetime.now(TZ)
-    day=now.strftime('%Y-%m-%d')
-    if now.hour>=9 and st.get('daily_date')!=day:
-        send_report(api,status_report())
-        st['daily_date']=day
 
 
 

@@ -17,31 +17,34 @@ def allowed_package_member(name):
         return False
     if len(parts)==1:return True
     if len(parts)==2 and parts[0] in ('tests','historical'):return True
+    if len(parts)==3 and parts[:2]==('tests','legacy') and parts[2] in ('__init__.py','single_transition_upgrader.py','okx_shared_runtime_deploy.py'):
+        return True
+    if len(parts)==2 and parts[0]=='tools' and parts[1] in (
+            'README.md','build_release_zip.py','okx_snapshot.py',
+            'okx_market_fill_audit.py','okx_reconcile_trigger_report.py',
+            'okx_reader_230_plus1_readonly_audit.py','export_component.py'):
+        return True
+    if len(parts)==3 and parts[:2]==('docs','history') and parts[2].endswith('.md'):
+        return True
+    if len(parts)==3 and parts[:2]==('tests','funding') and parts[2] in (
+            'benchmark_funding.py','f1_bills_fixture.json','test_funding_collector.py',
+            'test_funding_f6.py','test_funding_f61.py','test_funding_ledger.py',
+            'test_funding_view_backup.py'):
+        return True
     if len(parts)==3 and parts[:2]==('deploy','reader'):
         return True
     # Imported, BYTE-PINNED offline regression fixtures only. These are not
     # deployed into a trading-bot runtime; reject arbitrary nested ZIP paths.
     if name in (
-        'deploy/reader_pacing/okx_reader_230_plus1_readonly_audit.py',
-        'deploy/reader_pacing/okx_reader_pacing_230_plus1_install.py',
         'deploy/resources/README.md',
         'deploy/resources/collector.py',
         'deploy/resources/http429_audit.py',
         'funding/README.md',
-        'funding/benchmark_funding.py',
-        'funding/f1_bills_fixture.json',
         'funding/okx_funding_backup.py',
         'funding/okx_funding_collector.py',
-        'funding/okx_funding_ledger.py',
-        'funding/okx_funding_view.py',
         'funding/systemd/okx-funding-collector.service',
         'funding/systemd/okx-funding-collector.timer',
         'funding/systemd/paths.conf.example',
-        'funding/test_funding_collector.py',
-        'funding/test_funding_f6.py',
-        'funding/test_funding_f61.py',
-        'funding/test_funding_ledger.py',
-        'funding/test_funding_view_backup.py',
     ):return True
     if parts in (('tests','fixtures','okx_bot_original_full_v0760.py.gz'),
                  ('tests','fixtures','okx_bot_v0780_baseline.py.gz'),
@@ -143,6 +146,23 @@ def verify(zip_path):
         for name,digest in module_pins.items():
             if hashlib.sha256(z.read(name)).hexdigest()!=digest:
                 raise ValueError('Source package module checksum mismatch: '+name)
+        if 'install_manifest_sha256' in manifest:
+            raw=z.read('install_manifest.json')
+            if hashlib.sha256(raw).hexdigest()!=manifest['install_manifest_sha256']:
+                raise ValueError('Install manifest SHA mismatch')
+            install=json.loads(raw)
+            shared=set(install['shared']); source_only=set(install['source_only'])
+            if (install.get('schema')!=1 or install['release_version']!=manager_release or install['engine_version']!=engine
+                    or set(install['engine'])!=set(deps)|{entry['file']}
+                    or not set(install['engine'])<=shared or not set(install['telegram'])<=shared
+                    or shared & source_only or {n for n in shared if n.endswith('.py')}|source_only!=root_modules
+                    or not shared|source_only<=names):
+                raise ValueError('Install inventory mismatch')
+            for key in ('reader','funding'):
+                for dest,src in install[key].items():
+                    if src not in names or src not in (dest,'funding/'+dest):raise ValueError('Component mapping mismatch')
+                    if hashlib.sha256(z.read(src)).hexdigest()!=install['component_sha256'].get(src):raise ValueError('Component SHA mismatch')
+            if not set(install['tools'])<=names:raise ValueError('Tool inventory mismatch')
         if b'def audit_output_complete(' not in z.read('okx_live_upgrade.py'):
             raise ValueError('Missing financial audit completion guard')
     return manager_release, engine, actual

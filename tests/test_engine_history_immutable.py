@@ -15,8 +15,13 @@ class ImmutableEngineHistory(unittest.TestCase):
         manifest=json.loads((ROOT/'engine_manifest.json').read_text())
         original=json.loads((ROOT/'tests/engine_history_reference.json').read_text())
         now=manifest['current_version']
-        self.assertNotIn(now,original)
-        self.assertEqual(set(manifest['engines']),set(original)|{now})
+        from okx_manager_version import RELEASE_KIND
+        if RELEASE_KIND=='maintenance':
+            self.assertIn(now,original)
+            self.assertEqual(set(manifest['engines']),set(original))
+        else:
+            self.assertNotIn(now,original)
+            self.assertEqual(set(manifest['engines']),set(original)|{now})
         for version,sha in original.items():
             with self.subTest(version=version):
                 self.assertEqual(canonical(manifest['engines'][version]),sha)

@@ -74,7 +74,7 @@ with writer(sys.argv[1]) as db:
         lock=self.root/'collector.lock'
         with lock.open('w') as f:
             fcntl.flock(f,fcntl.LOCK_EX|fcntl.LOCK_NB)
-            p=subprocess.run([sys.executable,'-B','okx_funding_collector.py','--base',str(self.root/'unused'), '--registry',str(self.root/'missing'), '--systemd-dir',str(self.root/'missing-units'),'--data-dir',str(self.root)],capture_output=True,text=True,timeout=5)
+            p=subprocess.run([sys.executable,'-B',str(Path(__file__).resolve().parents[2]/'funding'/'okx_funding_collector.py'),'--base',str(self.root/'unused'), '--registry',str(self.root/'missing'), '--systemd-dir',str(self.root/'missing-units'),'--data-dir',str(self.root)],capture_output=True,text=True,timeout=5)
             self.assertEqual(p.returncode,0);self.assertIn('LOCK_BUSY',p.stdout);self.assertFalse(self.db.exists())
     def test_window_seam_no_hole_and_same_id_dedup(self):
         start=NOW-11*DAY; self.bots={MMT:start/1000}
