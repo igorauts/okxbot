@@ -5,9 +5,10 @@ package explicitly declares its type instead of adding a hard-coded pair to
 an ever-growing compatibility table. Engine identity remains authoritative
 in the engine manifest, not the release number.
 """
-RELEASE_VERSION = '0.7.83'
-ENGINE_VERSION = '0.7.83'
+RELEASE_VERSION = '0.7.85'
+ENGINE_VERSION = '0.7.85'
 STATE_SCHEMA = 1
+PARTIAL_DETACH_RESUME_SCHEMA = 1
 RELEASE_KIND = 'engine'
 def validate_version_ids(release=RELEASE_VERSION, engine=ENGINE_VERSION):
     """Fail closed for invalid identities and undeclared version divergence."""

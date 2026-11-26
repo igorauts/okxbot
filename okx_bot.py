@@ -87,15 +87,15 @@ ABSENCE_GRACE_MS = 120000  # wait for OKX history to index any accepted order
 ABSENCE_CHECK_GAP_SEC = 20
 ABSENCE_REQUIRED_CHECKS = 3
 ABSENCE_MAX_AGE_SEC = 6 * 24 * 3600  # within OKX 7-day history retention
-# These are operator-configurable only for new bots; old instances preserve
-# their existing trading parameters with these defaults during migration.
-PARTIAL_AGE = int(CFG.get('partial_buy_timeout_sec',60))
-PARTIAL_STEPS = Decimal(str(CFG.get('partial_buy_distance_steps',5)))
+# Partial-exit policy revision 2: 5 seconds AND 3 upward grid steps.
+# Installer migrates legacy configs once; explicit values remain validated.
+PARTIAL_AGE = int(CFG.get('partial_buy_timeout_sec',5))
+PARTIAL_STEPS = Decimal(str(CFG.get('partial_buy_distance_steps',3)))
 BOT_DD_DATA = ROOT / 'state' / 'bot_drawdown.json'
 STATS_FINANCIAL_ANCHOR = ROOT / 'state' / 'stats_financial_anchor.json'
 BOT_DD_SAMPLE_INTERVAL = 5  # seconds; refreshed via live public WS BID, no account API
 BOT_DD_LOCK = threading.Lock()
-if not (30 <= PARTIAL_AGE <= 3600 and 1 <= PARTIAL_STEPS <= 100):
+if not (5 <= PARTIAL_AGE <= 3600 and 1 <= PARTIAL_STEPS <= 100):
     raise RuntimeError('Invalid partial BUY cleanup thresholds')
 
 
@@ -1660,9 +1660,9 @@ def virtual_cycles(st):
 def unprotected_partial_buy(st):
     """Exchange-confirmed BUY fills with parent order not yet fully filled.
 
-    The attached TP does not exist until the parent BUY is FILLED. Reserve
-    these fills separately from exchange/virtual SELL coverage; never pretend
-    that they have an attached or virtual TP.
+    While the parent BUY is still live, reserve these fills separately
+    from exchange/virtual SELL coverage. A terminal partial cancellation can
+    create an attached TP unless its removal was positively confirmed first.
     """
     return sum((D(c.get('filledBuy'))-D(c.get('filledTP'))
                 for c in st['cycles'].values()
@@ -1782,6 +1782,8 @@ def partial_attached_parent_proof(c,rec):
     Revalidate against the exact current cycle on every use. A contradicted
     proof cannot authorize isolation merely because a later GET is absent.
     """
+    if rec.get('detachTerminalProof') is not None:
+        return partial_detach_reservation_proof(c,rec)
     try:
         proof=rec.get('partialParentProof')
         if not isinstance(proof,dict) or rec.get('partialParentProofBlocked'):
@@ -2276,7 +2278,13 @@ def track(st,pending, *, isolation=None, reservation_poll=None):
             filled=D(o.get('accFillSz'))
             if filled < D(c.get('filledBuy')) or filled > D(c['sz']):
                 die('Nonmonotonic BUY cancel fill '+key)
-            if state in ('canceled','mmp_canceled'):
+            if c.get('partialDetach'):
+                observe_partial_detach(st,c,o)
+            if (c.get('partialDetach') and state in ('filled','canceled','mmp_canceled')
+                    and resolve_detached_terminal(st,c,o)):
+                if c['state']=='VIRTUAL_TP':continue
+                status='TP_WAIT'
+            elif state in ('canceled','mmp_canceled'):
                 if filled>D(c.get('filledBuy')):note_cleanup_fill()
                 resolve_partial_cancel(st,c,filled)
                 if not filled:
@@ -2343,7 +2351,16 @@ def track(st,pending, *, isolation=None, reservation_poll=None):
                 continue
             trip_if_margin_cancel(o, 'BUY_CANCELED_BY_OKX')
             state=o.get('state');filled=D(o.get('accFillSz'))
-            if state=='filled':
+            if c.get('partialDetach'):
+                observe_partial_detach(st,c,o)
+            if (c.get('partialDetach') and state in ('filled','canceled','mmp_canceled')
+                    and resolve_detached_terminal(st,c,o)):
+                if c['state']=='VIRTUAL_TP':continue
+            elif state=='filled':
+                # Full fill won the race before detachment was proven. Keep
+                # the normal attached TP path, not a partial MARKET exit.
+                if c.pop('partial_cleanup',None):
+                    log('PARTIAL_EXIT_ABORTED_FULL_BUY',price=key)
                 if filled>D(c.get('filledBuy')):note_cleanup_fill()
                 c['state']='TP_WAIT';c['filledBuy']=str(filled)
                 if not tp_records(c):
@@ -2381,6 +2398,41 @@ def track(st,pending, *, isolation=None, reservation_poll=None):
             if rec['phase'] in ('FILLED','CANCELED','FAILED'):continue
             o=(byid.get(rec.get('ordId')) if rec.get('ordId') else None)
             if o is None:o=bycid.get(rec['clOrdId'])
+            if rec.get('detachTerminalProof') is not None and rec['phase']=='PENDING' and not rec.get('ordId'):
+                parent=partial_detach_reservation_proof(c,rec)
+                if parent is None:raise ExchangeUnresolved('Invalid terminal AMEND reservation proof')
+                # No full history scan on this path. Positive late WS proof may
+                # resolve the quarantine, but fresh actual child discovery wins.
+                proven=partial_detach_proof(dict(c,tpOrders=[]),parent)
+                # Ten seconds of bounded exact-child observation, then only
+                # new WS/pending evidence, a position mismatch, mode change or
+                # restart reopens the check. No periodic full-history search.
+                if (o is None and not proven and reservation_poll is not None
+                        and rec['clOrdId'] in reservation_poll
+                        and 0<=time.monotonic()-reservation_poll[rec['clOrdId']]
+                        and (time.time()-float(rec['detachTerminalProof']['recordedAt'])>=10
+                             or time.monotonic()-reservation_poll[rec['clOrdId']]<1)):
+                    if isolation is None:all_resolved=False
+                    else:isolation.add(rec['clOrdId'])
+                    continue
+                if o is None:o=A.order(cid=rec['clOrdId'])
+                if o is not None:
+                    tp_record_update(st,c,rec,o)
+                    if reservation_poll is not None:reservation_poll.pop(rec['clOrdId'],None)
+                    continue
+                if proven:
+                    # No fictitious exchange failure or fill. The successful
+                    # exact AMEND witness plus terminal parent prove detachment.
+                    rec['phase']='FAILED';rec['resolution']='CONFIRMED_DETACHMENT'
+                    c['partialDetach']['terminalResolution']='CONFIRMED_DETACHMENT'
+                    save(st)
+                    if reservation_poll is not None:reservation_poll.pop(rec['clOrdId'],None)
+                    log('PARTIAL_DETACH_TERMINAL_RECOVERED',cycleId=c['cycleId'],ordId=c['ordId'])
+                    continue
+                if reservation_poll is not None:reservation_poll[rec['clOrdId']]=time.monotonic()
+                if isolation is None:all_resolved=False
+                else:isolation.add(rec['clOrdId'])
+                continue
             # Cheap path is ONLY for a previously positively proven reservation.
             # A fresh pending match always wins. This never caches a position,
             # pending snapshot, fill, or trading permission.
@@ -2726,6 +2778,302 @@ def place_virtual_tp(st,c):
     return True
 
 
+def partial_detach_identity(c, parent, *, min_fill=None):
+    """Exact BUY identity; no price/size coincidence or missing-field inference."""
+    if not isinstance(parent,dict):return False
+    try:
+        return bool(parent.get('instId')==INST and parent.get('side')=='buy'
+            and parent.get('ordId')==c.get('ordId') and parent.get('ordId')
+            and parent.get('clOrdId')==c.get('clOrdId') and parent.get('clOrdId')
+            and parent.get('posSide')=='net' and parent.get('reduceOnly') in ('false',False)
+            and D(parent['px'])==D(c['buyPx']) and D(parent['sz'])==D(c['sz'])
+            and D(c['filledBuy'] if min_fill is None else min_fill)<=D(parent['accFillSz'])<=D(c['sz'])
+            and int(parent['uTime'])>0)
+    except (KeyError,TypeError,ValueError,ArithmeticError):return False
+
+
+def partial_detach_empty(parent):
+    # A missing attachment field is NOT an explicit empty list. Also reject
+    # legacy top-level TP/SL parameters that still describe a live attachment.
+    return (parent.get('attachAlgoOrds')==[] and all(
+        parent.get(k) in (None,'','0',0) for k in
+        ('tpOrdPx','tpTriggerPx','tpTriggerRatio','slOrdPx','slTriggerPx','slTriggerRatio')))
+
+
+def observe_partial_detach(st,c,parent, *, amendment_event=False):
+    d=c.get('partialDetach')
+    if not isinstance(d,dict) or d.get('phase')!='REQUESTED':return False
+    # A delayed matching WS event can precede a newer REST-confirmed fill.
+    # It is only a witness for detachment, never permission to regress fills.
+    min_fill=d.get('beforeFill',c['filledBuy']) if amendment_event else None
+    records=tp_records(c)
+    # Late correlated WS evidence may resolve an explicitly quarantined terminal
+    # amendment. A discovered child or a second SELL leg always wins.
+    quarantined=(amendment_event and len(records)==1 and
+                 partial_detach_reservation_proof(c,records[0]) is not None)
+    if (not partial_detach_identity(c,parent,min_fill=min_fill) or (records and not quarantined)
+            or d.get('ordId')!=c['ordId'] or d.get('clOrdId')!=c['clOrdId']
+            or d.get('tpClOrdId')!=c.get('tpClOrdId')
+            or not d.get('attachAlgoId') or not d.get('reqId')
+            or not partial_detach_empty(parent)):
+        return False
+    if int(parent['uTime'])<=int(d['beforeUTime']) or D(parent['accFillSz'])<=0:return False
+    # An exact REST observation while BUY is still open proves removal.
+    # A terminal observation, or a WS witness, additionally needs the exact
+    # successful amendment request ID. WS never supplies permission to trade.
+    matched=(parent.get('reqId')==d['reqId'] and parent.get('amendResult')=='0')
+    if (amendment_event or parent.get('state') not in ('live','partially_filled')) and not matched:
+        return False
+    if parent.get('state') not in ('live','partially_filled','filled','canceled','mmp_canceled'):
+        return False
+    d.update(phase='CONFIRMED',confirmedUTime=parent['uTime'],
+             confirmedFill=str(D(parent['accFillSz'])),
+             witness='amend_event' if amendment_event else 'order_details')
+    save(st)
+    log('PARTIAL_DETACH_CONFIRMED',cycleId=c['cycleId'],ordId=c['ordId'],reqId=d['reqId'],
+        witness=d['witness'],state=parent.get('state'),uTime=parent['uTime'],
+        accFillSz=parent['accFillSz'],attachAlgoOrds=parent.get('attachAlgoOrds'),
+        observedReqId=parent.get('reqId'),amendResult=parent.get('amendResult'))
+    return True
+
+
+def remember_partial_detach_event(st,event):
+    # Only the owner handles a matching amendment result, before the next
+    # REST reconcile. Do not change a cycle's fills/state from WS here.
+    if not isinstance(event,dict) or event.get('amendResult')!='0':return False
+    for c in st['cycles'].values():
+        if c.get('ordId')==event.get('ordId') and c.get('partialDetach'):
+            return observe_partial_detach(st,c,event,amendment_event=True)
+    return False
+
+
+def partial_detach_proof(c, parent):
+    d=c.get('partialDetach')
+    if not isinstance(d,dict) or not partial_detach_identity(c,parent):return False
+    if (d.get('ordId')!=c['ordId'] or d.get('clOrdId')!=c['clOrdId']
+            or d.get('tpClOrdId')!=c.get('tpClOrdId') or not d.get('attachAlgoId')
+            or not d.get('reqId') or tp_records(c) or not partial_detach_empty(parent)):
+        return False
+    try:
+        return (d.get('phase')=='CONFIRMED' and
+            int(parent['uTime'])>=int(d['confirmedUTime'])>int(d['beforeUTime'])
+            and D(parent['accFillSz'])>=D(d['confirmedFill'])>0)
+    except (KeyError,TypeError,ValueError,ArithmeticError):return False
+
+
+def partial_detach_terminal_shape(c,parent):
+    """An uncertain terminal snapshot may only refer to the original single TP.
+
+    Missing or zeroed fields are not proof of detachment. An unexpected second
+    attachment, other identity, split TP or SL is a real ownership conflict.
+    """
+    try:
+        d=c['partialDetach']; items=parent.get('attachAlgoOrds')
+        if items is not None:
+            if not isinstance(items,list) or len(items)>1:return False
+            for a in items:
+                if not isinstance(a,dict):return False
+                if (a.get('attachAlgoId') not in (None,'',d['attachAlgoId'])
+                    or a.get('attachAlgoClOrdId') not in (None,'',d['tpClOrdId'])
+                    or a.get('tpOrdKind') not in (None,'','limit')
+                    or D(a.get('tpOrdPx')) not in (D(0),D(c['tpPx']))
+                    or any(a.get(k) not in (None,'','0',0) for k in
+                           ('tpTriggerPx','tpTriggerRatio','slOrdPx','slTriggerPx','slTriggerRatio','percent'))
+                    or (a.get('sz') not in (None,'','0',0) and D(a['sz'])!=D(parent['accFillSz']))):
+                    return False
+        return (D(parent.get('tpOrdPx')) in (D(0),D(c['tpPx'])) and all(
+            parent.get(k) in (None,'','0',0) for k in
+            ('tpTriggerPx','tpTriggerRatio','slOrdPx','slTriggerPx','slTriggerRatio')))
+    except (KeyError,TypeError,ValueError,ArithmeticError):return False
+
+
+def partial_detach_reservation_proof(c,rec):
+    """Positive terminal BUY identity, NOT proof of a SELL or of its absence.
+
+    Only this exact quantity can be quarantined. The normal fresh full-position
+    and pending ownership proof is still required before independent actions.
+    """
+    try:
+        d=c['partialDetach']; evidence=rec['detachTerminalProof']; parent=evidence['parent']
+        bought=D(c['filledBuy']); original=D(c['sz'])
+        if not (c['state']=='TP_WAIT' and d['phase'] in ('REQUESTED','CONFIRMED','REJECTED')
+                and d['reqId'] and d['attachAlgoId'] and evidence['reqId']==d['reqId']
+                and evidence['cycleId']==c['cycleId'] and d['ordId']==c['ordId']
+                and d['clOrdId']==c['clOrdId'] and d['tpClOrdId']==c['tpClOrdId']
+                and len(c['tpOrders'])==1 and c['tpOrders'][0] is rec
+                and rec['phase']=='PENDING' and rec['source']=='attached'
+                and not rec.get('ordId') and rec['clOrdId']==c['tpClOrdId']
+                and D(rec['sz'])==bought and D(rec['filled'])==D(c.get('filledTP'))==0
+                and 0<D(d['beforeFill'])<original and D(d['beforeFill'])<=bought<=original
+                and partial_detach_identity(c,parent) and partial_detach_terminal_shape(c,parent)
+                and D(parent['accFillSz'])==bought
+                and parent['state'] in ('filled','canceled','mmp_canceled')
+                and (parent['state']!='filled' or bought==original)
+                and int(parent['uTime'])>=int(d['beforeUTime'])>0
+                and 0<float(evidence['recordedAt'])<=time.time()+1):
+            return None
+        return parent
+    except (KeyError,TypeError,ValueError,ArithmeticError,AttributeError):return None
+
+
+def resolve_detached_terminal(st,c,parent):
+    """A terminal AMEND race is isolated, not a fleet or PANIC-wide exception.
+
+    A positively detached parent can be virtual immediately. An already known
+    child follows the normal lifecycle. Uncertainty is explicit durable evidence
+    for at most the actual filled quantity, never a claim that SELL exists.
+    """
+    if not partial_detach_proof(c,parent):
+        d=c['partialDetach']
+        if tp_records(c):return False
+        if not (partial_detach_identity(c,parent) and d.get('reqId') and d.get('attachAlgoId')
+                and d.get('ordId')==c['ordId'] and d.get('clOrdId')==c['clOrdId']
+                and d.get('tpClOrdId')==c['tpClOrdId']
+                and d.get('phase') in ('REQUESTED','CONFIRMED','REJECTED')
+                and parent.get('state') in ('filled','canceled','mmp_canceled')
+                and int(parent['uTime'])>=int(d['beforeUTime'])>0):
+            raise ExchangeUnresolved('Terminal AMEND identity/intent not proven')
+        filled=D(parent['accFillSz'])
+        if (not 0<D(d['beforeFill'])<D(c['sz']) or not D(d['beforeFill'])<=filled<=D(c['sz'])
+                or (parent['state']=='filled' and filled!=D(c['sz']))
+                or not partial_detach_terminal_shape(c,parent)):
+            raise ExchangeUnresolved('Terminal AMEND fill quantity invalid')
+        attachments=parent.get('attachAlgoOrds')
+        # Positive exchange failure on the original attachment retains its
+        # original rejection handling (including account-wide margin latch).
+        if isinstance(attachments,list) and any(isinstance(a,dict) and
+                a.get('attachAlgoId')==d['attachAlgoId'] and
+                a.get('attachAlgoClOrdId')==d['tpClOrdId'] and
+                str(a.get('failCode') or '') not in ('','0') for a in attachments):
+            return False
+        if filled>D(c.get('filledBuy')):note_cleanup_fill()
+        c['filledBuy']=str(filled);c['state']='TP_WAIT'
+        if filled==D(c['sz']):
+            c.pop('partial_cleanup',None)
+            log('PARTIAL_EXIT_ABORTED_FULL_BUY',price=c['buyPx'])
+            log('BUY_FILLED',price=c['buyPx'],ordId=c['ordId'],tp=c['tpPx'])
+        now=time.time()
+        d.update(terminalState=parent['state'],terminalUTime=parent['uTime'],terminalUnresolvedAt=now)
+        # Keep the actual terminal response, not a synthetic parent attachment.
+        keys=('instId','ordId','clOrdId','side','posSide','reduceOnly','px','sz',
+              'accFillSz','state','uTime','attachAlgoOrds','tpOrdPx','tpTriggerPx',
+              'tpTriggerRatio','slOrdPx','slTriggerPx','slTriggerRatio')
+        evidence={'cycleId':c['cycleId'],'reqId':d['reqId'],'recordedAt':now,
+                  'parent':{k:parent[k] for k in keys if k in parent}}
+        tp_records(c).append({'clOrdId':c['tpClOrdId'],'ordId':'','sz':str(filled),
+            'filled':'0','phase':'PENDING','source':'attached','placedAt':now,
+            'detachTerminalProof':evidence})
+        save(st)
+        log('PARTIAL_DETACH_TERMINAL_UNRESOLVED',cycleId=c['cycleId'],
+            ordId=c['ordId'],reqId=d['reqId'],severity='CRITICAL',
+            message='Exact terminal BUY quarantined; no duplicate SELL; operator review if no proof')
+        return True
+    state=parent.get('state');filled=D(parent['accFillSz'])
+    if state not in ('filled','canceled','mmp_canceled'):return False
+    if filled<=0 or (state=='filled' and filled!=D(c['sz'])):return False
+    if filled>D(c.get('filledBuy')):note_cleanup_fill()
+    c['filledBuy']=str(filled);c['state']='VIRTUAL_TP'
+    if filled==D(c['sz']):
+        c.pop('partial_cleanup',None)
+        log('PARTIAL_EXIT_ABORTED_FULL_BUY',price=c['buyPx'])
+        log('BUY_FILLED',price=c['buyPx'],ordId=c['ordId'],tp=c['tpPx'])
+    c['partialDetach']['terminalState']=state
+    c['partialDetach']['terminalUTime']=parent['uTime']
+    save(st)
+    log('PARTIAL_DETACHED_BUY_TERMINAL',price=c['buyPx'],qty=str(filled),state=state,
+        cycleId=c['cycleId'],ordId=c['ordId'])
+    return True
+
+
+def partial_detach_action(st,c):
+    """One amendment or cancellation per pass, with durable proof before CANCEL.
+
+    The POST ACK is not proof. Confirm removal from the exact still-live BUY.
+    Unknown amendment outcomes are polled by exact parent ID, never blindly
+    retried. A terminal race is handled by track() and the normal TP lifecycle.
+    """
+    d=c.get('partialDetach')
+    if c.get('state')!='BUY_PARTIAL':return 'WAIT'
+    if d is not None and not isinstance(d,dict):
+        raise ExchangeUnresolved('Invalid partial detach intent')
+    now=time.time()
+    if d and d.get('phase')=='REJECTED':
+        # A definite rejection leaves the original attachment intact. Do not
+        # cancel the parent or retry a rejected amendment in a tight loop.
+        return 'NONE'
+    if d and d.get('phase')=='REQUESTED':
+        # This is a diagnostic polling budget ONLY, never an authorization
+        # to cancel or SELL. After ten seconds the normal pending/WS/terminal
+        # reconciliation still observes this intent, without extra GETs.
+        if d.get('warnedAt'):return 'NONE'
+        if now-float(d['requestedAt'])>=10:
+            d['warnedAt']=now;save(st)
+            log('PARTIAL_DETACH_UNRESOLVED',cycleId=c['cycleId'],ordId=c['ordId'],
+                reqId=d['reqId'],severity='CRITICAL')
+            return 'NONE'
+        if now<float(d.get('nextCheckAt',0)):return 'NONE'
+        d['nextCheckAt']=now+1;save(st)
+    parent=A.order(oid=c['ordId'])
+    if parent is None:return 'NONE'
+    if not partial_detach_identity(c,parent):
+        raise ExchangeUnresolved('Partial detach parent identity/fill mismatch')
+    if parent.get('state') not in ('live','partially_filled'):return 'NONE'
+    filled=D(parent['accFillSz'])
+    if not 0<filled<D(c['sz']) or tp_records(c):return 'NONE'
+    if control_mode()!='RUN':return 'NONE'
+    if d:
+        if (d.get('ordId')!=c['ordId'] or d.get('clOrdId')!=c['clOrdId']
+                or d.get('tpClOrdId')!=c.get('tpClOrdId')):
+            raise ExchangeUnresolved('Partial detach intent identity mismatch')
+        if d.get('phase')=='REQUESTED' and not observe_partial_detach(st,c,parent):
+            log('PARTIAL_DETACH_OBSERVATION',cycleId=c['cycleId'],ordId=c['ordId'],
+                reqId=d['reqId'],state=parent.get('state'),uTime=parent.get('uTime'),
+                attachAlgoOrds=parent.get('attachAlgoOrds'),tpOrdPx=parent.get('tpOrdPx'),
+                tpTriggerPx=parent.get('tpTriggerPx'),slOrdPx=parent.get('slOrdPx'),
+                observedReqId=parent.get('reqId'),amendResult=parent.get('amendResult'))
+            return 'NONE'
+        if not partial_detach_proof(c,parent):
+            raise ExchangeUnresolved('Partial detach proof contradicted; parent not canceled')
+        if control_mode()!='RUN':return 'NONE'
+        if filled>D(c.get('filledBuy')):note_cleanup_fill()
+        c['filledBuy']=str(filled)
+        cancel_lowest_specific(st,c)
+        return 'ACTION'
+    attachments=parent.get('attachAlgoOrds')
+    if not isinstance(attachments,list) or len(attachments)!=1:
+        raise ExchangeUnresolved('Partial detach requires original single attached TP')
+    a=attachments[0]
+    if (not isinstance(a,dict) or not a.get('attachAlgoId')
+            or a.get('attachAlgoClOrdId')!=c.get('tpClOrdId')
+            or a.get('tpOrdKind')!='limit' or D(a.get('tpOrdPx'))!=D(c['tpPx'])
+            or any(a.get(k) not in (None,'','0',0) for k in
+                ('slTriggerPx','slOrdPx','slTriggerRatio','sz','percent'))):
+        raise ExchangeUnresolved('Partial detach attachment identity/type mismatch')
+    d={'phase':'REQUESTED','reqId':newid('D'),'ordId':c['ordId'],
+       'clOrdId':c['clOrdId'],'tpClOrdId':c['tpClOrdId'],
+       'attachAlgoId':a['attachAlgoId'],'beforeUTime':parent['uTime'],
+       'beforeFill':str(filled),
+       'requestedAt':now,'nextCheckAt':0}
+    if filled>D(c.get('filledBuy')):note_cleanup_fill()
+    c['partialDetach']=d;c['filledBuy']=str(filled);save(st)
+    log('PARTIAL_DETACH_INTENT',cycleId=c['cycleId'],ordId=c['ordId'],reqId=d['reqId'])
+    rows=A.req('POST','/api/v5/trade/amend-order',body={
+        'instId':INST,'ordId':c['ordId'],'reqId':d['reqId'],'cxlOnFail':False,
+        'newPx':str(c['buyPx']), 'attachAlgoOrds':[{'attachAlgoId':a['attachAlgoId'],
+            'newTpOrdKind':'limit','newTpOrdPx':'0'}]})
+    if (len(rows)!=1 or not isinstance(rows[0],dict)
+            or rows[0].get('ordId')!=c['ordId'] or rows[0].get('reqId')!=d['reqId']
+            or str(rows[0].get('sCode',''))==''):
+        raise ExchangeUnresolved('Partial detach amendment response ambiguous')
+    if str(rows[0]['sCode'])!='0':
+        d['phase']='REJECTED';d['failCode']=str(rows[0]['sCode']);save(st)
+        log('PARTIAL_DETACH_REJECTED',cycleId=c['cycleId'],ordId=c['ordId'],
+            code=d['failCode'],severity='CRITICAL')
+        return 'NONE'
+    log('PARTIAL_DETACH_ACK',cycleId=c['cycleId'],ordId=c['ordId'],reqId=d['reqId'])
+    return 'ACTION'
+
+
 def partial_cleanup_due(c,bid,now=None):
     """Only upward moves; don't market dump partially-filled BUYs in a fall."""
     now=time.time() if now is None else float(now)
@@ -2784,7 +3132,11 @@ def partial_cleanup_action(st,bid,actual,mode, *, isolated=None, reserved_qty=0)
     # Prefer completing already requested cleanups over initiating new ones.
     for c in st['cycles'].values():
         if not c.get('partial_cleanup'):continue
-        if c['state'] in ('BUY_PARTIAL','CANCELING','BUY_LIVE'):
+        if c['state']=='BUY_PARTIAL':
+            result=partial_detach_action(st,c)
+            if result!='NONE':return result
+            continue
+        if c['state'] in ('CANCELING','BUY_LIVE'):
             return 'WAIT'
         if c['state'] in ('CLOSED','EXITED','CANCELED'):
             continue
@@ -2809,7 +3161,7 @@ def partial_cleanup_action(st,bid,actual,mode, *, isolated=None, reserved_qty=0)
             return 'WAIT'
         return 'WAIT'
     for c in st['cycles'].values():
-        if partial_cleanup_due(c,bid):
+        if not c.get('partial_cleanup') and partial_cleanup_due(c,bid):
             c['partial_cleanup']=True
             c['partial_cleanup_at']=time.time()
             save(st)
@@ -2817,8 +3169,7 @@ def partial_cleanup_action(st,bid,actual,mode, *, isolated=None, reserved_qty=0)
                 filled=c['filledBuy'],bid=str(bid),
                 age=int(time.time()-float(c.get('partial_since') or time.time())),
                 threshold_steps=str(PARTIAL_STEPS))
-            cancel_lowest_specific(st,c)
-            return 'ACTION'
+            return partial_detach_action(st,c)
     return 'NONE'
 
 
@@ -3314,6 +3665,14 @@ class WSWatcher(threading.Thread):
                             if item.get('instId')==INST:
                                 safe={k:item.get(k) for k in ('ordId','clOrdId','algoClOrdId',
                                     'side','state','accFillSz','fillSz','tradeId')}
+                                if (item.get('side')=='buy' and
+                                        str(item.get('reqId') or '').startswith('OX4D') and
+                                        item.get('amendResult')=='0'):
+                                    safe['partialDetachEvent']={k:item[k] for k in (
+                                        'instId','ordId','clOrdId','side','state','posSide','reduceOnly',
+                                        'px','sz','accFillSz','uTime','reqId','amendResult','attachAlgoOrds',
+                                        'tpOrdPx','tpTriggerPx','tpTriggerRatio','slOrdPx','slTriggerPx',
+                                        'slTriggerRatio') if k in item}
                                 self.events.put_nowait(safe)
                                 if not self.private_wake.is_set():
                                     self._first_private_event_ns=time.perf_counter_ns()
@@ -3778,7 +4137,7 @@ def reconcile_position(st, timeout=30, pause=0.5, *, allow_mismatch=False, run_i
                            outcome='exception' if exc_type is not None else 'returned')
 
 
-def audit_once(st, *, allow_partial_isolation=False):
+def audit_once(st, *, allow_partial_isolation=False, detach_resume_only=False):
     # Explicit upgrade audit only; default audit, shutdown and PANIC stay strict.
     isolated=set()
     if allow_partial_isolation:
@@ -3792,6 +4151,10 @@ def audit_once(st, *, allow_partial_isolation=False):
         real,covered,virtual=coverage_audit(st,pending,actual)
     elif allow_partial_isolation and isolated and control_mode()=='RUN' and not tp_failure_buy_hold(st):
         # reconcile_position granted isolation only from a complete fresh pass.
+        # A normal AMEND-resume upgrade may not admit unrelated legacy reserves.
+        if detach_resume_only and any(not r.get('detachTerminalProof')
+                for c in st['cycles'].values() for r in tp_records(c) if r.get('clOrdId') in isolated):
+            die('AMEND-resume audit found unrelated legacy reservation')
         # Do not make an unknown TP virtual or claim its link resolved.
         reserved=sum((D(r['sz'])-D(r.get('filled')) for c in st['cycles'].values()
                       for r in tp_records(c) if r.get('clOrdId') in isolated),D(0))
@@ -4005,6 +4368,8 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
                 event=watcher.events.get_nowait()
                 reservation_poll.pop(event.get('clOrdId'),None)
                 reservation_poll.pop(event.get('algoClOrdId'),None)
+                if event.get('partialDetachEvent'):
+                    remember_partial_detach_event(st,event['partialDetachEvent'])
                 log('WS_ORDER',**event)
                 ws_n+=1
             if ws_n:
@@ -5818,7 +6183,10 @@ def main():
             realized_usdt=str(pnl.total()))
         if AUDIT:
             isolation_audit=(os.getenv('OKX_GRID_ISOLATION_AUDIT')=='1')
-            audit_kind=audit_once(st,allow_partial_isolation=isolation_audit)
+            detach_resume_only=(os.getenv('OKX_GRID_DETACH_RESUME_AUDIT')=='1')
+            if detach_resume_only and not isolation_audit:die('AMEND-resume audit requires isolation audit')
+            audit_kind=(audit_once(st,allow_partial_isolation=True,detach_resume_only=True)
+                        if detach_resume_only else audit_once(st,allow_partial_isolation=isolation_audit))
             pnl.work(st,max_cycles=1,historical=True)
             print('💰',pnl.status(st),flush=True)
             if fresh_audit and audit_kind!='STRICT':

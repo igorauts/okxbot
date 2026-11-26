@@ -84,6 +84,28 @@ class EnginePatchTest(unittest.TestCase):
         # Verify every changed candidate hunk against the reviewed digest, undo
         # only those exact hunks, and retain the historical oracle for all else.
         import gzip, hashlib
+        # v0.7.85: reverse only the reviewed terminal-AMEND race / alarm / audit delta.
+        v84=gzip.decompress((DIR/'okx_bot_v0784_baseline.py.gz').read_bytes())
+        self.assertEqual(hashlib.sha256(v84).hexdigest(), 'ffe84de337f7d097aca2912a3a3c8e55a6a42d351cae937d2f9486a0e628b0be')
+        v84_base=v84.decode().splitlines(keepends=True)
+        v85_lines=new.splitlines(keepends=True)
+        v85_hunks=[(1784, 1784, 1784, 1786, '9e9d11495bf1f90f50f66e28c71cb089c2891bc07c5e01fcba27d854b0a4fd62'), (2280, 2284, 2282, 2287, '36b60ef85f4d264a9b360de1491e6dade38541b9184d7f675392a57cf59f4bd0'), (2352, 2356, 2355, 2359, '94f0e3a572201caefd2526dc4a0ecd52ffa0c9d604848ec9e08c7b375b5e0ab7'), (2397, 2397, 2400, 2435, '49976c86dfab3ee63645880e6dd7da565a7a2a961515104387e76bdb1ee6763b'), (2770, 2771, 2808, 2814, 'afd17005eee5869bec57d1d7dc19288f1ddc7878e0ace6dd368189c695bc2590'), (2789, 2790, 2832, 2836, '0e715fb014cc2ce7a41e7ef1919bbf80cf164e0a1046aa94b5da45680d061650'), (2817, 2817, 2863, 2918, '4e83089a1abfafeb69b67e3fe6082f4e9c57ce3afbc513a3184107909861b97a'), (2818, 2819, 2919, 2920, '4aacb58720d24daddb6502ddcfb56dc40a3b98a5c0a6bba54af7bb9e33a74a52'), (2820, 2823, 2921, 2924, 'f43aae60d5d566be628ace4b457d30c0a1dba2555cb41023ce9c69ed416eb8a1'), (2826, 2826, 2927, 2940, 'db1cbe55147af6c74ecd5c063b2fb730ea4dd4d0ad0401df9ab98b7a95729bcb'), (2827, 2839, 2941, 2970, 'c86736513bf3dec30fff26f05948351b92a5d9bc335b0c65c938b65d1a439b3e'), (2897, 2897, 3028, 3033, '075593e34fa56e0ade7bd4ffe4212b518c54ab9f7701b1b9ab2acfcf23a4120a'), (4003, 4004, 4139, 4140, '67fcd5c6e081372f7ef2a976ff006ba67aa779b0426bb66d013598f157534a33'), (4017, 4017, 4153, 4157, 'a29b2df48fb888ff0f59e99b04bb8beb7867f6f669e15e41f36a61bc1a2d3bf9'), (6045, 6046, 6185, 6189, '5365be7a6f34688b8043cb7c0a5f2b4c35cc0eb4cb5c5297b6b240973b4034f0')]
+        for i1,i2,j1,j2,digest in reversed(v85_hunks):
+            self.assertEqual(hashlib.sha256(''.join(v85_lines[j1:j2]).encode()).hexdigest(),digest)
+            v85_lines[j1:j2]=v84_base[i1:i2]
+        new=''.join(v85_lines)
+        self.assertEqual(new.encode(),v84)
+        # v0.7.84: exact reviewed partial-detachment delta, then all earlier guards.
+        v83=gzip.decompress((DIR/'okx_bot_v0783_baseline.py.gz').read_bytes())
+        self.assertEqual(hashlib.sha256(v83).hexdigest(), '5e73eff2be5d109a5cf222d5375bce4773a17bfdb69eebd1c1dc1f64e61f252b')
+        v83_base=v83.decode().splitlines(keepends=True)
+        v84_lines=new.splitlines(keepends=True)
+        v84_hunks=[(89, 93, 89, 93, 'cb633a3e384561f14f0ce64bf36a81558ba481a0492d43ae66c25b052db4f81f'), (97, 98, 97, 98, 'cd20a50545f0083df8b4d03d0066fa425e04ff5caeb8ec9c8e3c781751194d37'), (1662, 1665, 1662, 1665, '2f8741dd6e69b93b0bae27570598e77f4916379b3a8cf4e6c63887af34912523'), (2278, 2278, 2278, 2283, '3ad4e4d5df0bfad9040f240893525befcd8b81443a4242ce93b074dca67a774d'), (2345, 2345, 2350, 2355, '3ad4e4d5df0bfad9040f240893525befcd8b81443a4242ce93b074dca67a774d'), (2346, 2346, 2356, 2360, '4d68085fe8b90d3dad9612a604d698fe558cc8d25f202cbde671a716f90b2323'), (2728, 2728, 2742, 2940, '81a7065e0c2f0a649754d00ab766faf397d8118a89b04295b87f4366dbe42272'), (2786, 2787, 2998, 3003, '2919f4f1a5ec04be7e188a3534670a34121257d3bc65b7f68323853b3a0dea1d'), (2811, 2812, 3027, 3028, '738db396ce6c500fa232c8846c536b7c902cf152c021e0f770a3bc3e466f70cf'), (2819, 2821, 3035, 3036, 'e9cb0b6c3b6564a2a10f326142981916a37437382eb71b6121c9aa67e93f1ee2'), (3316, 3316, 3531, 3539, '1ee82f2d8420653933f481bacbf28254a9cc9e679dfd29f0a68ea455a4283194'), (4007, 4007, 4230, 4232, '8824f3f9d5918581c3375c7402670c59d08f2217c6c25966b638239e6fbfce63')]
+        for i1,i2,j1,j2,digest in reversed(v84_hunks):
+            self.assertEqual(hashlib.sha256(''.join(v84_lines[j1:j2]).encode()).hexdigest(),digest)
+            v84_lines[j1:j2]=v83_base[i1:i2]
+        new=''.join(v84_lines)
+        self.assertEqual(new.encode(),v83)
         # v0.7.83: pin first-start audit-only changes before all historical guards.
         v82=gzip.decompress((DIR/'okx_bot_v0782_baseline.py.gz').read_bytes())
         self.assertEqual(hashlib.sha256(v82).hexdigest(), '0d6bcd37f7908df0bb3442a5443e32a92aaae366611b7648219744674882663d')

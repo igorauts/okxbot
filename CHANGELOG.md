@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.7.85 — 2026-11-26 UTC — Independent audit corrections and partial BUY exit
+
+- Exact terminal AMEND ambiguity is isolated without a global exception; late confirmed removal or exact child discovery resolves it. No repeated full history scans on the new path.
+- Telegram critical detachment alarms; compatible durable AMEND resume after the diagnostic window with mandatory finance audit. Do not overwrite newly observed facts after failed resume audit.
+- Log old/new strategy migration values; keep 5 s / 3 steps. No ENSO-specific migration, no automatic downgrade to a target lacking resume capability.
+
+- Final offline suite: 1045 tests. LIVE fleet and Telegram rollout verified; normal AMEND path observed on 0.7.84 SLX. See [release notes](RELEASE_NOTES_V0785.md).
+
+## v0.7.84 — OFFLINE candidate — partial BUY exit detachment
+
+- Trigger partial exit after 5 seconds AND 3 grid steps; one-time policy migration, NEW and CLONE defaults.
+- Persist AMEND intent, confirm removal of attached limit TP before CANCEL, use existing exact-quantity durable MARKET exit. Full-fill races return to normal TP management.
+- No synthetic attached record or history scan on the successful new path. Extra amendment status polling stops after the diagnostic window; normal observations can still resolve the intent. Definite rejection is not blindly retried.
+- Legacy unresolved attached orders are not automatically repaired. Existing emergency and financial guards are retained. OFFLINE tests mock the exchange; no LIVE validation yet.
+
 ## v0.7.83 — 2026-11-25 UTC — First-start mandatory accounting
 
 - Pass the freshly audited empty snapshot into full mandatory accounting; do not synthesize bot_state.json. Reject prior trading evidence and orphan ledgers.

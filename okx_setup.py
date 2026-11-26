@@ -868,8 +868,9 @@ def persist(ctx,out,env_raw):
         'price_at_setup':as_string(ctx['price']),
         'maker_fee_at_setup':as_string(ctx['maker']),
         'taker_fee_at_setup':as_string(ctx['taker']),
-        'partial_buy_timeout_sec':60,
-        'partial_buy_distance_steps':5,
+        'partial_buy_timeout_sec':5,
+        'partial_buy_distance_steps':3,
+        'partial_buy_policy_revision':2,
         'created_at':time.time(),'live_trading':False}
     cfg_path=out/'config.json'
     fd=os.open(cfg_path,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)

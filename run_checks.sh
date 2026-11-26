@@ -196,3 +196,6 @@ python3 -B -m unittest tests.test_v0782_audit -q
 
 # Full first-start integration, including mandatory accounting and confirmed systemd boundary.
 python3 -B -m unittest tests.test_first_start_full_audit -v
+
+# Partial BUY detachment and one-time policy migration (OFFLINE).
+python3 -B -m unittest tests.test_partial_detach_v0784 tests.test_partial_detach_transport_policy_v0784 tests.test_v0784_partial_policy_draft -v

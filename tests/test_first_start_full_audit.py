@@ -129,7 +129,12 @@ class FirstStart(unittest.TestCase):
     def create(self,answer='no'):
         with patch('builtins.input',return_value=answer):manager.cmd_new(None)
         root=manager.bot_path(manager.find_entry('bigtimefresh')[1]);self.assertTrue(verify_instance(root,ROOT))
+        self.assert_partial_policy(root)
         return root
+
+    def assert_partial_policy(self,root):
+        cfg=json.loads((root/'config.json').read_text())
+        self.assertEqual((cfg['partial_buy_timeout_sec'],cfg['partial_buy_distance_steps'],cfg['partial_buy_policy_revision']),(5,3,2))
 
     def test_new_yes_full_audit_confirmation_and_first_live_boot(self):
         root=self.create('yes')
@@ -142,6 +147,7 @@ class FirstStart(unittest.TestCase):
         root=self.create();entries=manager.load_registry();entries['bigtimefresh']['retired']=True;manager.save_registry(entries)
         with patch('builtins.input',return_value='CLONE bigtimeclone'):manager.cmd_clone('bigtimefresh','bigtimeclone')
         clone=manager.bot_path(manager.find_entry('bigtimeclone')[1]);self.assertTrue(verify_instance(clone,ROOT))
+        self.assert_partial_policy(clone)
         self.assertFalse((clone/'state/bot_state.json').exists());manager.cmd_start('bigtimeclone')
         self.assertEqual(self.boot,[clone.name]);self.assertEqual(len(self.enable),1)
         self.assertEqual(len(self.audits),1)

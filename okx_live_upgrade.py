@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime, timezone
+from decimal import Decimal
 from okx_gate_snapshot import read_gate_snapshot
 
 PACKAGE_SHA256 = None  # REQUIRED --sha256 of operator-reviewed ZIP
@@ -156,7 +157,9 @@ def allowed_package_member(name):
     if parts in (('tests','fixtures','okx_bot_original_full_v0760.py.gz'),
                  ('tests','fixtures','okx_bot_v0780_baseline.py.gz'),
                  ('tests','fixtures','okx_bot_v0781_baseline.py.gz'),
-                 ('tests','fixtures','okx_bot_v0782_baseline.py.gz')):
+                 ('tests','fixtures','okx_bot_v0782_baseline.py.gz'),
+                 ('tests','fixtures','okx_bot_v0783_baseline.py.gz'),
+                 ('tests','fixtures','okx_bot_v0784_baseline.py.gz')):
         return True
     if (len(parts) == 5 and parts[:2] == ('tests','stats_v2_original')
         and parts[2] in ('stats_v2_release_work','stats_v2_prod_candidate')
@@ -199,6 +202,9 @@ def stage_check():
     if (mod.ENGINE_VERSION != NEW_VERSION or mod.STATE_SCHEMA != 1
             or mod.validate_version_ids() is not True):
         fail('Version constants mismatch')
+    target=json_read(STAGE/'engine_manifest.json')['engines'][NEW_VERSION]
+    if target.get('partial_detach_resume_schema')!=getattr(mod,'PARTIAL_DETACH_RESUME_SCHEMA',None):
+        fail('Partial detachment resume capability mismatch')
     from okx_source_attestation import verify_bundle
     verify_bundle(STAGE)
     from okx_dependency_attestation import verify
@@ -247,7 +253,15 @@ def instance_check(bot, desired, need_active=True):
 
 
 
-def stop_safety_readonly(root, state):
+def detach_resume_required(state):
+    # Completed historical detach records do not constrain future upgrades.
+    return any(c.get('partialDetach') and c.get('state') in ('BUY_LIVE','BUY_PARTIAL','CANCELING')
+        or any(r.get('detachTerminalProof') and r.get('phase')=='PENDING'
+               for r in c.get('tpOrders',[]))
+        for c in state.get('cycles',{}).values())
+
+
+def stop_safety_readonly(root, state, *, allow_detach_resume=False):
     """Recheck invariants immediately before stopping a real-money instance.
 
     Local snapshot is only an eligibility gate; actual position/ownership requires
@@ -261,6 +275,21 @@ def stop_safety_readonly(root, state):
         if not isinstance(cycle,dict):fail('Malformed cycle; refusing LIVE stop')
         if cycle.get('state') in ('PLACING','CANCELING'):
             fail('Unresolved BUY intent; refusing LIVE stop')
+        detach=cycle.get('partialDetach')
+        if detach and cycle.get('state') in ('BUY_LIVE','BUY_PARTIAL'):
+            if not allow_detach_resume:
+                fail('Unresolved partial TP amendment; refusing LIVE stop')
+            try:
+                valid=(isinstance(detach,dict) and detach['phase'] in ('REQUESTED','CONFIRMED','REJECTED')
+                    and detach['reqId'] and detach['attachAlgoId']
+                    and all(detach[k] and detach[k]==cycle[k] for k in ('ordId','clOrdId','tpClOrdId'))
+                    and int(detach['beforeUTime'])>0 and 0<float(detach['requestedAt'])<=time.time()
+                    and 0<Decimal(str(detach['beforeFill']))<=Decimal(str(cycle['filledBuy']))<Decimal(str(cycle['sz']))
+                    and (detach['phase']!='REQUESTED' or time.time()-float(detach['requestedAt'])>=10))
+            except (KeyError,TypeError,ValueError,ArithmeticError):valid=False
+            if not valid:fail('Partial TP amendment not durable or diagnostic window still active')
+        if any(r.get('detachTerminalProof') and r.get('phase')=='PENDING' for r in cycle.get('tpOrders',[])):
+            if not allow_detach_resume:fail('Unresolved terminal AMEND; compatible target required')
         for rec in cycle.get('tpOrders',[]):
             if isinstance(rec,dict) and rec.get('phase') in ('PLACING','CANCELING'):
                 fail('Unresolved TP intent; refusing LIVE stop')
@@ -455,6 +484,19 @@ def verify_single_instance_sources(root):
     return True
 
 
+def migrate_partial_policy(config):
+    """One-time approved strategy policy transition; not tied to release numbers."""
+    revision=config.get('partial_buy_policy_revision',1)
+    if revision==1:
+        print('PARTIAL_POLICY_MIGRATION: timeout',config.get('partial_buy_timeout_sec',60),
+              '-> 5; distance',config.get('partial_buy_distance_steps',5),
+              '-> 3; revision 1 -> 2',flush=True)
+        config.update(partial_buy_timeout_sec=5,partial_buy_distance_steps=3,
+                      partial_buy_policy_revision=2)
+    elif revision!=2:
+        fail('Unknown partial BUY policy revision')
+
+
 def upgrade_bot(bot, *, single_instance=False):
     stage_check()
     engine_files=files_required()
@@ -468,7 +510,18 @@ def upgrade_bot(bot, *, single_instance=False):
     if single_instance:
         verify_single_instance_sources(root)
         engine_files=['okx_bot.py','okx_version.py']
-    stop_safety_readonly(root,json_read(root/'state/bot_state.json'))
+    def guarded_stop_snapshot():
+        snapshot=json_read(root/'state/bot_state.json')
+        resume=detach_resume_required(snapshot)
+        if resume:
+            target=json_read(STAGE/'engine_manifest.json')['engines'][NEW_VERSION]
+            if target.get('partial_detach_resume_schema')!=1:
+                fail('Target does not declare compatible partial detachment resume')
+            stop_safety_readonly(root,snapshot,allow_detach_resume=True)
+            print('DURABLE_PARTIAL_DETACH_RESUME=YES',flush=True)
+        else:stop_safety_readonly(root,snapshot)
+        return resume
+    resume_detach=guarded_stop_snapshot()
     before_pid=int(kv['MainPID'])
     print('STOPPING',bot,'PID',before_pid,'(exchange orders remain active)',flush=True)
     run('systemctl','stop',unit,timeout=75)
@@ -481,7 +534,7 @@ def upgrade_bot(bot, *, single_instance=False):
     if stopped_pid not in ('0',None):fail('Nonzero PID after stop; NOTHING overwritten')
     # Re-evaluate state AFTER service actually stopped and flushed any completed writes.
     root,unit,_=instance_check(bot,OLD_VERSION,need_active=False)
-    stop_safety_readonly(root,json_read(root/'state/bot_state.json'))
+    resume_detach=guarded_stop_snapshot() or resume_detach
     if single_instance:verify_single_instance_sources(root)
     dest=backup_dir(bot)
     backup_instance(root,dest,engine_files)
@@ -493,23 +546,25 @@ def upgrade_bot(bot, *, single_instance=False):
         if config.get('version')!=OLD_VERSION or state.get('version')!=OLD_VERSION:
             fail('State changed during upgrade')
         config['version']=NEW_VERSION
+        migrate_partial_policy(config)
         state['version']=NEW_VERSION
         atomic_json(root/'config.json',config)
         atomic_json(root/'state/bot_state.json',state)
         instance_check(bot,NEW_VERSION,need_active=False)
         print('AUDIT START',bot,'GET only, no trading',flush=True)
-        env={k:v for k,v in os.environ.items() if k not in ('OKX_GRID_LIVE','OKX_GRID_PROBE','OKX_GRID_STATS','OKX_GRID_ISOLATION_AUDIT','OKX_GRID_TERMINAL_ONLY')}
+        env={k:v for k,v in os.environ.items() if k not in ('OKX_GRID_LIVE','OKX_GRID_PROBE','OKX_GRID_STATS','OKX_GRID_ISOLATION_AUDIT','OKX_GRID_DETACH_RESUME_AUDIT','OKX_GRID_TERMINAL_ONLY')}
         env['OKX_GRID_AUDIT']='READ_ONLY'
-        if single_instance:env['OKX_GRID_ISOLATION_AUDIT']='1'
+        if single_instance or resume_detach:env['OKX_GRID_ISOLATION_AUDIT']='1'
+        if resume_detach:env['OKX_GRID_DETACH_RESUME_AUDIT']='1'
         audit_started=True
         proc=subprocess.run([str(root/'.venv/bin/python'),'-u',str(root/'okx_bot.py')],
             cwd=root,env=env,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,timeout=180)
         print('\n'.join(proc.stdout.splitlines()[-28:]),flush=True)
-        if not audit_output_complete(proc.returncode, proc.stdout,single_instance=single_instance):
+        if not audit_output_complete(proc.returncode, proc.stdout,single_instance=single_instance or resume_detach):
             fail('READ-ONLY AUDIT did not fully finish; BOT REMAINS STOPPED')
         print('AUDIT PASS',bot,flush=True)
     except BaseException:
-        if single_instance and audit_started:
+        if (single_instance or resume_detach) and audit_started:
             # GET-only audit can persist new exchange facts and fill evidence.
             # Never restore an old state over those facts after an audit starts.
             print('AUDIT FAILED; CANDIDATE AND CURRENT STATE RETAINED; SERVICE STOPPED; backup',dest,flush=True)

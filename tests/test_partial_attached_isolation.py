@@ -23,7 +23,8 @@ NAMES={'D','track','tp_records','cycle_sell_fill','remaining_tp','active_tp_reco
        'isolated_partial_coverage','tp_record_update','verify_existing',
        'register_cancel_attached','resolve_partial_cancel','reconcile_position',
        'record_attached_tp_failure','safe_tp_during_buy_wait','partial_cleanup_action',
-       'controlled_shutdown','partial_cleanup_due','virtual_escape','maintain_virtual_tp','coverage_audit','audit_once','tp_failure_buy_hold'}
+       'controlled_shutdown','partial_detach_identity','partial_detach_empty','partial_detach_proof',
+       'partial_detach_reservation_proof','partial_detach_terminal_shape','observe_partial_detach','resolve_detached_terminal','partial_cleanup_due','virtual_escape','maintain_virtual_tp','coverage_audit','audit_once','tp_failure_buy_hold'}
 TREE=ast.parse((ROOT/'okx_bot.py').read_text())
 CODE=compile(ast.Module(body=[n for n in TREE.body if isinstance(n,ast.FunctionDef)
                             and n.name in NAMES],type_ignores=[]),'<offline-engine>','exec')
@@ -357,6 +358,49 @@ class Cases(unittest.TestCase):
                     'px':'0.3960','sz':'2','accFillSz':'2','reduceOnly':'true'}
         self.pos=Decimal(0);poll.clear()
         self.assertTrue(step());self.assertEqual(len(posts),3);self.assertEqual(self.st['terminal_mode'],'PANIC_DONE')
+    def new_terminal_amend(self):
+        c=self.st['cycles']['0.3954'];c['tpOrders']=[];c['state']='CANCELING'
+        c['partialDetach']={'phase':'REQUESTED','reqId':'amend-1','ordId':BUYID,
+            'clOrdId':c['clOrdId'],'tpClOrdId':TPID,'attachAlgoId':'4130348242148536322',
+            'beforeUTime':'100','beforeFill':'2','requestedAt':time.time()-20}
+        self.parent.update(attachAlgoOrds=[],uTime='101')
+        self.ns['paged_order']=lambda *a:self.fail('new terminal AMEND must not scan history')
+    def test_terminal_amend_actual_panic_progress(self):
+        self.new_terminal_amend();self.mode='PANIC';poll={};posts=[];acks=[]
+        self.ns['control_ack']=lambda *a,**kw:acks.append((a,kw))
+        def req(method,route,**kw):
+            self.assertEqual(method,'POST');posts.append((route,kw['body']))
+            if route.endswith('cancel-order'):return [{'sCode':'0','ordId':kw['body']['ordId']}]
+            self.assertTrue(self.st['panic_orders']);return [{'sCode':'0','ordId':'panic-first'}]
+        self.ns['A'].req=req
+        def step():
+            result,out=self.pass_(reservation_poll=poll,emergency_isolation=True)
+            return self.ns['controlled_shutdown'](self.st,result[0],result[2],result[1],'PANIC',isolated=out)
+        self.assertFalse(step());self.assertEqual(len(posts),2)
+        self.assertIn('detachTerminalProof',self.rec)
+        for row in self.pending:self.extra[row['ordId']]=dict(row,state='canceled')
+        self.pending.clear();self.assertFalse(step());self.assertEqual(len(posts),3)
+        self.assertEqual(posts[-1][1]['sz'],'619');self.assertIs(posts[-1][1]['reduceOnly'],True)
+        e=self.st['panic_orders'][0]
+        self.extra[e['ordId']]={'instId':INST,'ordId':e['ordId'],'clOrdId':e['clOrdId'],
+            'side':'sell','ordType':'market','reduceOnly':True,'sz':'619','accFillSz':'619','state':'filled'}
+        self.pos=Decimal(2);self.assertFalse(step());self.assertEqual(len(posts),3)
+        self.assertEqual(acks[-1][0][1],'WAIT_RESERVED_TP');self.assertNotIn('terminal_mode',self.st)
+        self.st=json.loads(json.dumps(self.st));self.parent=None;poll.clear()
+        self.assertFalse(step());self.assertEqual(len(posts),3)
+        self.child={'instId':INST,'ordId':'late','clOrdId':TPID,'side':'sell','state':'filled',
+                    'px':'0.3960','sz':'2','accFillSz':'2','reduceOnly':'true'}
+        self.pos=Decimal(0);poll.clear()
+        self.assertTrue(step());self.assertEqual(len(posts),3);self.assertEqual(self.st['terminal_mode'],'PANIC_DONE')
+    def test_amend_resume_audit_does_not_accept_legacy_reserve(self):
+        with self.assertRaisesRegex(RuntimeError,'unrelated legacy reservation'):
+            self.ns['audit_once'](self.st,allow_partial_isolation=True,detach_resume_only=True)
+        self.new_terminal_amend()
+        import io
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self.ns['audit_once'](self.st,allow_partial_isolation=True,detach_resume_only=True),'ISOLATED')
+        self.assertIn('RESERVED unknown TP contracts: 2',out.getvalue())
+
     def test_hard_cancels_known_orders_but_never_market_or_false_terminal(self):
         self.mode='HARD';posts=[];acks=[]
         self.ns['control_ack']=lambda *a,**kw:acks.append((a,kw))

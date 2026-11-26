@@ -402,6 +402,15 @@ def build_api(*, ENV, CFG, COIN, INST, LIVE, VER, D, die,
                             str(row.get('ordId'))!=str(body['ordId'])):
                             raise ExchangeUnresolved('Cancel rejection order ID mismatch')
                         return result['data']
+                    elif (method=='POST' and route=='/api/v5/trade/amend-order'
+                          and isinstance(result.get('data'),list) and len(result['data'])==1
+                          and isinstance(result['data'][0],dict)
+                          and str(result['data'][0].get('sCode','')) not in ('','0')):
+                        row=result['data'][0]
+                        if (not body or not body.get('reqId') or not body.get('ordId')
+                            or row.get('reqId')!=body['reqId'] or row.get('ordId')!=body['ordId']):
+                            raise ExchangeUnresolved('Amend rejection identity mismatch')
+                        return result['data']
                     elif result.get('code')!='0':
                         raise ExchangeUnresolved(f'OKX API {result.get("code")}: {str(result.get("msg"))[:120]}')
                     else:

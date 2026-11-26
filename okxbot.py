@@ -1302,6 +1302,9 @@ def cmd_clone(source_name, new_name):
     cfg['buy_buffer_orders']=5
     cfg['buy_cancel_protect_steps']=5
     cfg['tp_buffer_orders']=int(cfg['active_buy_orders'])+5
+    cfg['partial_buy_timeout_sec']=5
+    cfg['partial_buy_distance_steps']=3
+    cfg['partial_buy_policy_revision']=2
     selected_engine, selected_version = latest_engine()
     cfg.update(version=selected_version,name=new_name,created_at=time.time(),
                live_trading=False,price_at_setup=str(px),
