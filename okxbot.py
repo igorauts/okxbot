@@ -10,7 +10,6 @@ import codecs
 import contextlib
 import fcntl
 import functools
-import io
 import selectors
 import json
 import math
@@ -1354,23 +1353,35 @@ _STATS_DONE = 'Все закрытые циклы сопоставлены'
 _STATS_MAX_AGE = 900  # background reports every 600s + margin
 
 
-def read_stats_snapshot(path, expected_instrument):
-    file = path / 'state' / 'stats.json'
-    if not file.exists():
+def read_stats_snapshot(path, expected_instrument, *, historical=False):
+    from okx_stats_ui import read_stats_record
+    data=read_stats_record(path)
+    if data is None:
         return None
-    data = json.loads(file.read_text(encoding='utf-8'))
-    if (data.get('schema_version') != 1 or data.get('complete') is not True
-            or data.get('instrument') != expected_instrument
-            or not isinstance(data.get('report'), str)
-            or not data['report'].strip()
-            or _STATS_DONE not in data['report']):
+    if (not isinstance(data,dict) or type(data.get('schema_version')) is not int
+            or data.get('schema_version') != 1 or data.get('complete') is not True
+            or data.get('instrument') != expected_instrument):
         raise RuntimeError('Некорректный снимок статистики (версия, полнота или пара)')
     ts = data.get('generated_at_unix')
     if isinstance(ts, bool) or not isinstance(ts, (float, int)) or not math.isfinite(ts) or ts<=0:
         raise RuntimeError('Некорректное время снимка статистики')
     if ts > time.time()+60:
         raise RuntimeError('Время снимка статистики находится в будущем')
-    return data['report'], ts
+    if not historical and ('performance' in data or 'performance_v0724' in data):
+        from okx_stats_ui import validate_financial_snapshot
+        validate_financial_snapshot(path,expected_instrument,data)
+    elif not historical:
+        from okx_stats_ui import requires_structured_snapshot
+        cfg=json.loads((path/'config.json').read_text(encoding='utf-8'))
+        if requires_structured_snapshot(cfg,data):
+            raise RuntimeError('Структурированный финансовый снимок отсутствует')
+        if (not isinstance(data.get('report'),str) or not data['report'].strip()
+                or _STATS_DONE not in data['report']):
+            raise RuntimeError('Некорректный исторический отчёт')
+    elif (not isinstance(data.get('report'),str) or not data['report'].strip()
+          or _STATS_DONE not in data['report']):
+        raise RuntimeError('Некорректный исторический отчёт')
+    return data
 
 
 def journal_last_complete_report(text, expected_instrument):
@@ -1461,11 +1472,11 @@ def stats_text(name):
         # Historical trading report is immutable: final accounting ADDS to it.
         # Its market/open-position values are PRE-TERMINATION snapshots.
         try:
-            historical=read_stats_snapshot(path,instrument)
+            historical=read_stats_snapshot(path,instrument,historical=True)
         except (ValueError,OSError,RuntimeError):
             historical=None
         if historical is not None:
-            previous=with_latest_bot_dd(historical[0],path,instrument)
+            previous=with_latest_bot_dd(historical['report'],path,instrument)
             return (header+final_text+'\n\n'+'━'*32+'\n'
                     +'ИСТОРИЧЕСКАЯ СТАТИСТИКА (до завершения)\n\n'+previous)
         return header+'Исторический снимок недоступен.\n\n'+final_text
@@ -1475,14 +1486,14 @@ def stats_text(name):
             'на установленном торговом движке.\n')
     try:
         snapshot = read_stats_snapshot(path, instrument)
-    except (ValueError, OSError, RuntimeError) as e:
-        raise RuntimeError(f'Ошибка снимка статистики: {e}') from e
+    except (ValueError, OSError, RuntimeError, ArithmeticError, TypeError) as e:
+        return header+f'⚠️ Финансовая статистика не подтверждена. PnL: н/д ({e})'
     if snapshot is not None:
-        report, ts = snapshot
-        # Structured report, otherwise preserve the read-only historical screen.
-        data=json.loads((path/'state'/'stats.json').read_text(encoding='utf-8'))
-        if isinstance((data.get('performance') or data.get('performance_v0724')),dict):
-            from okx_stats_ui import format_stats
+        data=snapshot
+        ts=data['generated_at_unix']
+        # Render exactly the verified generation; never reopen stats.json.
+        if 'performance' in data or 'performance_v0724' in data:
+            from okx_stats_ui import format_stats, structured_payload
             heartbeat=False
             try:
                 runfile=path/'state'/'runtime_stats.json'
@@ -1490,11 +1501,11 @@ def stats_text(name):
                     rt=json.loads(runfile.read_text(encoding='utf-8'))
                     heartbeat=0<=time.time()-float(rt['last'])<=90
             except (OSError,ValueError,TypeError,KeyError):pass
-            content=format_stats(path,instrument,(data.get('performance') or data.get('performance_v0724')),
+            content=format_stats(path,instrument,structured_payload(data),
                          bot_active=service_running(unit),heartbeat_fresh=heartbeat,
                          snapshot_at=ts, include_funding=True)
             return content
-        report = with_latest_bot_dd(report, path, instrument)
+        report = with_latest_bot_dd(data['report'], path, instrument)
         try:
             from okx_position_peak import format_peak
             peak=format_peak(path,instrument)
@@ -1511,6 +1522,10 @@ def stats_text(name):
                     'BUY_HOLD_TP_FAILURE','BUY_HOLD_RECONCILIATION'):
                 status='BUY заблокированы ('+str(ack['phase'])+')'
         return header + f'Снимок: {freshness} | {age}с назад | бот {status}\n\n' + report
+    from okx_stats_ui import requires_structured_snapshot
+    cfg=json.loads((path/'config.json').read_text(encoding='utf-8'))
+    if requires_structured_snapshot(cfg,{}):
+        return header+'⚠️ Финансовый снимок отсутствует. PnL: н/д'
     report = read_legacy_journal(unit, instrument)
     if report is None:
         return header + ('Готовой статистики нет. Новый бот создаст снимок автоматически; '

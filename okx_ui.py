@@ -285,7 +285,6 @@ def status(name,root,unit):
     info=systemd_info(unit);ver=installed_engine_version(root, info)
     running=info.get('ActiveState')=='active'
     control=read_json(Path(root)/'state/control.json') or {}
-    ack=read_json(Path(root)/'state/control_ack.json') or {}
     mode=control.get('mode','RUN')
     label=('РАБОТАЕТ' if running else 'ОСТАНОВЛЕН')
     if running and mode=='PAUSE':label='ПАУЗА'

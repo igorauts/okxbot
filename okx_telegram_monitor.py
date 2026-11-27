@@ -25,8 +25,9 @@ from urllib.request import Request, urlopen, getproxies
 import http.client
 import ssl
 import html
-from okx_telegram_views import status_one, latency_report, read_json, LINE, verified_snapshot_bid, snapshot_anchor, number
-from okx_stats_ui import tp_reserve_text
+from okx_telegram_views import status_one, latency_report, read_json, LINE, number
+from okx_stats_ui import (tp_reserve_text, validate_financial_snapshot,
+                          structured_payload, read_stats_record, require_fresh_snapshot)
 from okx_telegram_events import (one, event_alert, market_event, market_process, zero_buy_scan, observer_fault_scan, gate_alert_scan)
 from okx_telegram_followups import partial_scan, panic_scan
 from okx_telegram_delivery import persist as durable_save, drain as alert_drain
@@ -350,10 +351,17 @@ def mode_and_stats(name, *, total_sink=None):
             return '<b>'+html.escape(name)+'</b>\n⚠️ Финальный отчёт не подтверждён'
         from okx_funding_view import terminal_report
         return '<b>'+html.escape(name)+'</b>\n'+html.escape(terminal_report(root,final))
-    stats=json.loads((root/'state/stats.json').read_text()) if (root/'state/stats.json').is_file() else {}
-    values=_report_values(stats.get('report',''))
-    age=_age_label(_launch_epoch(root,values))
-    return status_one(name,root,age,funding_loader=_status_funding_amount,total_sink=total_sink)
+    try:
+        stats=read_stats_record(root) or {}
+    except (OSError,ValueError,TypeError):
+        return '<b>'+html.escape(name)+'</b>\n⚠️ Финансовая статистика не подтверждена. PnL: н/д'
+    if 'performance' in stats or 'performance_v0724' in stats:
+        perf=structured_payload(stats)
+        launch=_account_number(perf.get('launch_at')) if isinstance(perf,dict) else None
+        age=_age_label(float(launch)) if launch is not None and launch>0 else 'н/д'
+    else:
+        age=_age_label(_launch_epoch(root,_report_values(stats.get('report',''))))
+    return status_one(name,root,age,funding_loader=_status_funding_amount,total_sink=total_sink,stats=stats)
 
 # Account summary is a read-only sum of verified bot snapshots.
 
@@ -508,34 +516,10 @@ def _compact_bot_row(name,root,now):
     Never calls the exchange, imports a trading engine, or writes state.
     """
     cfg=read_json(root/'config.json')
-    stats=read_json(root/'state/stats.json')
-    perf=(stats.get('performance') or stats.get('performance_v0724')) if isinstance(stats,dict) else None
-    if (not isinstance(cfg,dict) or not isinstance(perf,dict)
-        or stats.get('complete') is not True
-        or stats.get('instrument')!=cfg.get('instrument')
-        or perf.get('schema')!=1):
-        raise ValueError('stats not confirmed')
-    generated=_account_number(stats.get('generated_at_unix'))
-    if generated is None or not 0<=Decimal(str(now))-generated<=Decimal('900'):
-        raise ValueError('stats stale')
-    anchor=snapshot_anchor(root,stats)
-    bid=verified_snapshot_bid(root,cfg,stats,anchor=anchor)
-    if bid is None:
-        raise ValueError('bid/financial anchor not confirmed')
-    values={k:_account_number(perf.get(k)) for k in (
-        'grid_profit','total_pnl','floating_pnl','open_base','bid',
-        'limit_tp_net','market_tp_net','partial_exit_net','realized_open_components')}
-    if any(v is None for v in values.values()):
-        raise ValueError('financial field missing')
-    if (values['bid']!=bid or values['open_base']<0
-        or abs(values['grid_profit']-values['limit_tp_net']-values['market_tp_net'])>Decimal('0.00000001')
-        or abs(values['total_pnl']-values['grid_profit']-values['partial_exit_net']-
-               values['floating_pnl']-values['realized_open_components'])>Decimal('0.00000001')):
-        raise ValueError('financial identity mismatch')
-    if (anchor.get('schema')!=1 or anchor.get('instrument')!=cfg.get('instrument')
-        or abs((_account_number(anchor.get('at')) or Decimal('-999'))-generated)>Decimal('0.5')
-        or _account_number(anchor.get('total_pnl_usdt'))!=values['total_pnl']):
-        raise ValueError('financial anchor mismatch')
+    stats=read_stats_record(root) or {}
+    perf,values,generated=validate_financial_snapshot(root,cfg.get('instrument'),stats,now=now)
+    require_fresh_snapshot(generated,now)
+    bid=values['bid']
     cap=cfg.get('max_grids')
     state=read_json(state_file(root))
     if (type(cap)!=int or cap<=0 or
@@ -747,7 +731,7 @@ import subprocess as _latency_subprocess
 import threading as _latency_threading
 import time as _latency_time
 
-_LATENCY_CLI_PATH = str(Path(__file__).resolve().with_name('okx_per_bot_speed_readonly.py'))
+_LATENCY_CLI_PATH = str(_SHARED_CODE / 'okx_per_bot_speed_readonly.py')
 _LATENCY_CLI_RESULTS = _latency_queue.Queue(maxsize=1)
 _LATENCY_CLI_THREAD = None
 _LATENCY_CLI_TIMEOUT = 25
@@ -1190,22 +1174,20 @@ def stats_freshness_check(api,st,services,roots,now=None,stale_after=1800):
         rec=watches.setdefault(name,{'first_seen':now,'incident':0,'alerted':False})
         root=Path(where)
         cfg=read_json(root/'config.json')
-        report=read_json(root/'state/stats.json')
-        gen=report.get('generated_at_unix')
-        try:gen=float(gen)
-        except (ValueError,TypeError):gen=None
-        anchor=read_json(root/'state/stats_financial_anchor.json')
-        current=report.get('financial_anchor') or {}
+        gen=None
+        valid=False
         try:
-            same_anchor=(anchor==current and anchor.get('schema')==1 and
-                         anchor.get('instrument')==cfg.get('instrument') and
-                         gen is not None and abs(float(anchor['at'])-gen)<0.5)
-        except (ValueError,KeyError,TypeError,OverflowError):
-            same_anchor=False
-        valid=(report.get('complete') is True and
-               report.get('instrument')==cfg.get('instrument') and
-               (report.get('stats_v2') or {}).get('mode')=='single_authority_incremental'
-               and same_anchor and gen is not None and 0<=now-gen<stale_after)
+            report=read_stats_record(root) or {}
+            _,_,stamp=validate_financial_snapshot(root,cfg.get('instrument'),report,now=now)
+            if (report.get('stats_v2') or {}).get('mode')=='single_authority_incremental':
+                gen=float(stamp)
+                rec['last_verified_at']=gen
+                valid=0<=now-gen<stale_after
+        except (OSError,ValueError,TypeError,KeyError,ArithmeticError,AttributeError):
+            pass
+        # Invalid new records must not reset the age of the last verified one.
+        if gen is None:
+            gen=rec.get('last_verified_at')
         if valid:
             if rec.get('alerted'):
                 one(api,st,f'stats/recovered/{name}/{rec["incident"]}',

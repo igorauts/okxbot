@@ -4,13 +4,10 @@ from okx_telegram_wire import state_key
 Consumes existing local events, journal and persisted accounting. Never contacts OKX,
 reads exchange secrets, or writes bot state. Only Telegram monitor own cursor changes.
 """
-import html
 import json
 from contextlib import closing
 import re
-import subprocess
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from okx_paths import state_file, fills_db, observer_dir
 from okx_telegram_delivery import enqueue

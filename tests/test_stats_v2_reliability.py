@@ -311,28 +311,26 @@ class TelegramStatusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root=pathlib.Path(tmp);(root/'state').mkdir()
             (root/'config.json').write_text(json.dumps({'instrument':'BEAT-USDT-SWAP'}))
-            anchor={'schema':1,'instrument':'BEAT-USDT-SWAP','at':100}
-            (root/'state/stats_financial_anchor.json').write_text(json.dumps(anchor))
-            (root/'state/stats.json').write_text(json.dumps({
-                'complete':True,'instrument':'BEAT-USDT-SWAP',
-                'generated_at_unix':100,'stats_v2':{'mode':'single_authority_incremental'},
-                'financial_anchor':anchor}))
+            def publish(stamp):
+                anchor={'schema':1,'instrument':'BEAT-USDT-SWAP','at':stamp,'bid':'1','total_pnl_usdt':'0'}
+                perf=dict(schema=1,bid='1',open_base='0',open_nominal='0',total_pnl='0',grid_profit='0',floating_pnl='0',limit_tp_net='0',market_tp_net='0',partial_exit_net='0',realized_open_components='0',closed_count=0)
+                (root/'state/stats.json').write_text(json.dumps({'schema_version':1,
+                    'complete':True,'instrument':'BEAT-USDT-SWAP','generated_at_unix':stamp,
+                    'stats_v2':{'mode':'single_authority_incremental'},'performance':perf,'financial_anchor':anchor}))
+            publish(100)
+            from okx_stats_ui import read_stats_record,validate_financial_snapshot
             node=function_node('okx_telegram_monitor.py','stats_freshness_check')
             events=[]
             env={'time':mock.Mock(time=lambda:2000), 'Path':pathlib.Path,
                  'systemd_active':lambda name:True,'read_json':lambda path:json.loads(path.read_text()) if path.exists() else {},
-                 'one':lambda api,st,key,msg:events.append((key,msg))}
+                 'one':lambda api,st,key,msg:events.append((key,msg)),
+                 'read_stats_record':read_stats_record,'validate_financial_snapshot':validate_financial_snapshot}
             exec(compile(ast.Module(body=[node],type_ignores=[]),'offline-telegram-stale','exec'),env)
             scan=env['stats_freshness_check'];state={}; bots={'beat':'dummy'}
             scan(None,state,bots,{'beat':str(root)},now=2000,stale_after=1800)
             scan(None,state,bots,{'beat':str(root)},now=2005,stale_after=1800)
             self.assertEqual(len(events),1)
-            anchor={'schema':1,'instrument':'BEAT-USDT-SWAP','at':2005}
-            (root/'state/stats_financial_anchor.json').write_text(json.dumps(anchor))
-            (root/'state/stats.json').write_text(json.dumps({
-                'complete':True,'instrument':'BEAT-USDT-SWAP',
-                'generated_at_unix':2005,'stats_v2':{'mode':'single_authority_incremental'},
-                'financial_anchor':anchor}))
+            publish(2005)
             scan(None,state,bots,{'beat':str(root)},now=2010,stale_after=1800)
             self.assertEqual(len(events),2)
             self.assertIn('recovered',events[1][0])

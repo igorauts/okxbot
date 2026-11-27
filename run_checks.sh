@@ -205,3 +205,6 @@ python3 -B -m unittest tests.test_maintenance_install_v0786 -v
 
 # Dead code removal: exact active FULL specialization and pinned retirement.
 python3 -B -m unittest tests.test_dead_code_cleanup_v0788 -v
+
+# Unified read-only financial consumers, exact generation and golden values.
+python3 -B -m unittest tests.test_r6_maintenance -v

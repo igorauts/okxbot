@@ -51,16 +51,24 @@
     "okx_position_reader_service.py": "okx_position_reader_service.py",
     "okx_position_reader_watchdog.py": "okx_position_reader_watchdog.py"
   },
-  "release_version": "0.7.88",
+  "release_version": "0.7.89",
   "retire_shared": {
+    "BUNDLE_SHA256.json": "ee3b19907ef9810f75f3a05480f4a90b2416a733b0cf264c0c02b84fa5ef20fa",
+    "build_release_zip.py": "51dd3cb3a35c2797a8bc526ffc793a4c72f2c0e5bb73b42016ea572b3042d6ac",
+    "okx_market_fill_audit.py": "94428c25b46f072c05dcd055a3b285661d6e20c9be599d077afdd7f0c7b93512",
+    "okx_reconcile_trigger_report.py": "263f9caa1e11555fef5bac93627e94524db7297f1c8e43bd7ccee9ccfd971904",
+    "okx_release_contract.py": "b5e1737b4d01034e46bae8d4e05536bea2b99bdbeddcb6b80c61c9bc3a955eb2",
+    "okx_setup_presets.py": "711016648ce4101b739c39cf392291627cdb08d74d68ea024b086c45aae3e21b",
     "okx_shared_runtime_deploy.py": "5715defdca47fd201462f32d7f0757516ff97a6963f95d04c95ac722c2fbcc47",
+    "okx_snapshot.py": "2407ecc598b3a0ff287c23dec3e80b92332e0e9c87025d9a9748e988ba0a0dbb",
     "okx_stats_finance_incremental.py": "a84128ccc16f934428c595175609160d2dc8a33652265b93c62eca9c16a514bd",
     "okx_stats_incremental_core.py": "5ce6b759ece4f8ca096a9d5a1fa3481bc5f54978aa84ea10f89066a3f2be15a4",
     "okx_stats_incremental_finance.py": "5705abb9dcb257580f8f718d94f0c63b31695e16dc465985bf4cdfde90234dee",
     "okx_stats_incremental_runtime.py": "87741301bc53c01c7147d932b86d672f9b047b483c2f48deb0bb6b20ff303d0e",
     "okx_stats_sqlite_delta_v0751.py": "d6ec0aa1a0e504b65e09d72ad790705860b4f45300e66288e2d640931aa9ca3d",
     "okx_stats_v2_checkpoint.py": "c9ba79ba5872e198a90942b3d8b2b5d935b24743486a222ec77f777c54de54e6",
-    "okx_stats_v2_phase4.py": "e59739225e99affcbf6565b118d34d57a81a4e739722ce4000d6d5bf58944e81"
+    "okx_stats_v2_phase4.py": "e59739225e99affcbf6565b118d34d57a81a4e739722ce4000d6d5bf58944e81",
+    "run_checks.sh": "9cb140399405ffdfcae1ee4f40501f983116551ca0bff6e38ae20d3268e6e620"
   },
   "schema": 1,
   "shared": [
@@ -158,10 +166,18 @@
   ],
   "tools": [
     "tools/build_release_zip.py",
-    "tools/okx_snapshot.py",
     "tools/okx_market_fill_audit.py",
     "tools/okx_reconcile_trigger_report.py",
     "tools/okx_reader_230_plus1_readonly_audit.py",
     "tools/export_component.py"
-  ]
+  ],
+  "retire_telegram_shadows": {
+    "okx_reader_diagnostics.py": [
+      "cd9cc336c3dd5cbb6459d02c48e4725616fa78b8595f6802e197ca8a1d413ea5"
+    ],
+    "okx_per_bot_speed_readonly.py": [
+      "f055cd8a4177636d415f0faaad1776a6f42ebfc80fec1b170d8eebd149166bd9",
+      "86a964991d8227414b3c3bbd2b9e5e9f1a1b5d0efd040545b3d13b817db6caf9"
+    ]
+  }
 }

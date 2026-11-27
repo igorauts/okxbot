@@ -14,7 +14,7 @@ from pathlib import Path
 
 
 def dec(x):
-    if x is None:
+    if x is None or isinstance(x, bool):
         return None
     try:
         value=Decimal(str(x))
@@ -130,19 +130,133 @@ def peak_line(root, instrument):
         return 'Макс. позиция в истории: нет достоверных данных'
 
 
-def drawdown_lines(root, instrument, capital, now):
-    path=root/'state'/'bot_drawdown.json'
-    if not path.is_file() or path.is_symlink():return ['Макс. просадка: н/д']
+def read_drawdown(root, instrument, now):
+    """Read the independent local DD sample; no fallback to stale report text."""
+    path=Path(root)/'state'/'bot_drawdown.json'
+    if not path.is_file() or path.is_symlink():return None
     try:
         d=json.loads(path.read_text(encoding='utf-8'))
-        if d.get('schema')!=1 or d.get('instrument')!=instrument:return ['Макс. просадка: н/д']
-        value=dec(d['max_drawdown_usdt']);timestamp=float(d['max_drawdown_at'])
-        if value is None or value<0 or not math.isfinite(timestamp) or timestamp>now+60:
-            raise ValueError('invalid drawdown')
-        return [f'Макс. просадка: {signed(-value)} ({pct(-value,capital)})',
-                f'Зафиксирована: {at_utc(timestamp)}']
-    except (OSError,ValueError,TypeError,KeyError,OverflowError):
-        return ['Макс. просадка: н/д']
+        if not isinstance(d,dict) or type(d.get('schema')) is not int or d['schema']!=1 or d.get('instrument')!=instrument:
+            return None
+        value=dec(d['max_drawdown_usdt']);stamp=dec(d['max_drawdown_at'])
+        if value is None or value<0 or stamp is None or not 0<stamp<=Decimal(str(now))+60:
+            return None
+        return value,float(stamp)
+    except (OSError,ValueError,TypeError,KeyError,OverflowError,ArithmeticError):
+        return None
+
+
+def drawdown_lines(root, instrument, capital, now):
+    record=read_drawdown(root,instrument,now)
+    if record is None:return ['Макс. просадка: н/д']
+    value,timestamp=record
+    return [f'Макс. просадка: {signed(-value)} ({pct(-value,capital)})',
+            f'Зафиксирована: {at_utc(timestamp)}']
+
+
+def validate_performance(payload):
+    """One monetary identity validator, shared by all current consumers."""
+    if not isinstance(payload, dict) or type(payload.get('schema')) is not int or payload['schema'] != 1:
+        raise ValueError('Unsupported performance snapshot schema')
+    fields = ('bid', 'open_base', 'total_pnl', 'grid_profit', 'floating_pnl',
+              'limit_tp_net', 'market_tp_net', 'partial_exit_net',
+              'realized_open_components', 'open_nominal')
+    v = {k: dec(payload.get(k)) for k in fields}
+    if any(x is None for x in v.values()) or v['bid'] <= 0 or v['open_base'] < 0:
+        raise ValueError('Incomplete or invalid financial snapshot')
+    if type(payload.get('closed_count')) is not int or payload['closed_count'] < 0:
+        raise ValueError('Invalid closed cycle count')
+    tolerance = Decimal('0.00000001')
+    if (abs(v['limit_tp_net'] + v['market_tp_net'] - v['grid_profit']) > tolerance
+            or abs(v['grid_profit'] + v['partial_exit_net'] + v['floating_pnl'] +
+                   v['realized_open_components'] - v['total_pnl']) > tolerance):
+        raise ValueError('PnL attribution not reconciling; report withheld')
+    if v['open_nominal'] != v['open_base'] * v['bid']:
+        raise ValueError('Open nominal does not match exact BID')
+    # Optional metrics may be genuinely unavailable before the first fill.
+    # If supplied, they must still be finite numbers, never booleans or text.
+    for k in ('top_open_buy','capital','last_24h','volume','paid_fees','launch_at',
+              'per_day','per_30d','per_year','max_base','grid_reference_top',
+              'grid_bottom','grid_average','maker_volume','taker_volume'):
+        if payload.get(k) is not None and dec(payload[k]) is None:
+            raise ValueError('Invalid performance field: '+k)
+    if payload.get('top_open_buy') is not None and dec(payload['top_open_buy'])<=0:
+        raise ValueError('Invalid top filled BUY')
+    return v
+
+
+def read_stats_record(root):
+    """Read exactly one stats.json generation. Missing is not malformed."""
+    path=Path(root)/'state'/'stats.json'
+    if path.is_symlink():
+        raise ValueError('Unsafe statistics snapshot path')
+    if not path.exists():
+        return None
+    if not path.is_file():
+        raise ValueError('Statistics snapshot is not a regular file')
+    record=json.loads(path.read_text(encoding='utf-8'))
+    if not isinstance(record,dict):
+        raise ValueError('Statistics snapshot must be an object')
+    return record
+
+
+def structured_payload(stats):
+    """No fallback from a malformed canonical payload to a legacy alias."""
+    if 'performance' in stats:
+        return stats['performance']
+    return stats.get('performance_v0724')
+
+
+def requires_structured_snapshot(cfg, stats):
+    from okx_version import ENGINE_VERSION
+    return ('stats_v2' in stats or cfg.get('version')==ENGINE_VERSION
+            or stats.get('bot_version')==ENGINE_VERSION)
+
+
+def validate_financial_snapshot(root, instrument, stats, *, now=None):
+    """Validate a SINGLE already-read stats.json generation, including anchor.
+
+    The embedded anchor is authoritative. Legacy FULL publications may have a
+    separate anchor; they must match the same sample. No state or API writes.
+    """
+    now = time.time() if now is None else now
+    if (not isinstance(stats, dict) or type(stats.get('schema_version')) is not int
+            or stats['schema_version'] != 1 or stats.get('complete') is not True
+            or stats.get('instrument') != instrument or not instrument):
+        raise ValueError('Statistics identity/completeness invalid')
+    raw_stamp = stats.get('generated_at_unix')
+    generated = dec(raw_stamp)
+    if (type(raw_stamp) not in (int, float) or generated is None or generated <= 0
+            or generated > Decimal(str(now))):
+        raise ValueError('Financial statistics timestamp invalid')
+    payload = structured_payload(stats)
+    values = validate_performance(payload)
+    if 'financial_anchor' in stats:
+        anchor = stats['financial_anchor']
+        tolerance = Decimal(0)
+    else:
+        if 'stats_v2' in stats:
+            raise ValueError('Atomic StatsWorker financial anchor missing')
+        path = Path(root) / 'state' / 'stats_financial_anchor.json'
+        if path.is_symlink():
+            raise ValueError('Unsafe legacy financial anchor')
+        anchor = json.loads(path.read_text(encoding='utf-8'))
+        tolerance = Decimal('0.5')
+    if (not isinstance(anchor, dict) or type(anchor.get('schema')) is not int
+            or anchor['schema'] != 1 or anchor.get('instrument') != instrument):
+        raise ValueError('Invalid financial anchor')
+    stamp = dec(anchor.get('at'))
+    if (stamp is None or stamp <= 0 or abs(stamp - generated) > tolerance
+            or dec(anchor.get('bid')) != values['bid']
+            or dec(anchor.get('total_pnl_usdt')) != values['total_pnl']):
+        raise ValueError('Financial anchor mismatch')
+    return payload, values, generated
+
+
+def require_fresh_snapshot(generated, now, *, max_age=900):
+    """Current Telegram views only; verified historical money is still valid."""
+    if not 0 <= Decimal(str(now)) - generated <= max_age:
+        raise ValueError('Financial statistics stale')
 
 
 def format_stats(root, instrument, payload, *, bot_active=False,
@@ -151,22 +265,12 @@ def format_stats(root, instrument, payload, *, bot_active=False,
     """Render a verified schema-1 performance payload. Never mutates files."""
     root=Path(root)
     now=time.time() if now is None else float(now)
-    if not isinstance(payload,dict) or payload.get('schema')!=1:
-        raise ValueError('Unsupported performance snapshot schema')
     config=json.loads((root/'config.json').read_text(encoding='utf-8'))
     if config.get('instrument')!=instrument:raise ValueError('Instrument mismatch')
-    bid=dec(payload.get('bid'));base=dec(payload.get('open_base'))
-    total=dec(payload.get('total_pnl'));grid=dec(payload.get('grid_profit'))
-    floating=dec(payload.get('floating_pnl'));lim=dec(payload.get('limit_tp_net'))
-    market=dec(payload.get('market_tp_net'));partial=dec(payload.get('partial_exit_net'))
-    hidden=dec(payload.get('realized_open_components'))
-    if any(x is None for x in (bid,base,total,grid,floating,lim,market,partial,hidden)) or bid<=0 or base<0:
-        raise ValueError('Incomplete or invalid financial snapshot')
-    tolerance=Decimal('0.00000001')
-    if abs(lim+market-grid)>tolerance or abs(grid+partial+floating+hidden-total)>tolerance:
-        raise ValueError('PnL attribution not reconciling; report withheld')
-    nominal=dec(payload.get('open_nominal'))
-    if nominal!=base*bid:raise ValueError('Open nominal does not match exact BID')
+    v=validate_performance(payload)
+    bid,base,total,grid,floating,lim,market,partial,nominal=(v[k] for k in (
+        'bid','open_base','total_pnl','grid_profit','floating_pnl','limit_tp_net',
+        'market_tp_net','partial_exit_net','open_nominal'))
     if snapshot_at is not None and (snapshot_at>now+60 or now-snapshot_at>900):
         active=False
     else:
@@ -231,6 +335,7 @@ def format_stats(root, instrument, payload, *, bot_active=False,
         'LIMIT TP: '+signed(lim),
         'MARKET TP: '+signed(market),
         'Partial MARKET Exit: '+signed(partial),
+        'Realized Open: '+signed(v['realized_open_components']),
         '',
         f'Открытая позиция: {base_quantity(base,config)} {coin} ({usd(nominal)})',
         'Floating PnL: '+signed(floating),

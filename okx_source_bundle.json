@@ -26,7 +26,7 @@
   ],
   "engine_version": "0.7.88",
   "files": {
-    "engine_manifest.json": "e8ae6509bbfa5a8bf4fd223646b58ac1a769c50786fc670776e55c582ee98411",
+    "engine_manifest.json": "4490cd7ae4fb4e5744635bf594b392056670e9363f6159039a6203d247436dc4",
     "okx_accounting.py": "3773dffc5f70d88a7cf90e664807236fa35f322d8bb78668be4cef9594531d2c",
     "okx_api.py": "cf0dda4ee158d1cbb30ba1c537160b3cd4e5dfdf690284365aa69e1385e1a0ea",
     "okx_bot.py": "cf499d9dd0e859e3bd467ca90a484ef657f06f119a7acb6286abe01404fa9b15",
@@ -37,7 +37,7 @@
     "okx_idle_reconcile.py": "bcc30292ca972ad1f3a6f56c3328db7110a3482629913a392be725939dfc84a0",
     "okx_latency.py": "bc35caaec1b306953cc2e654e131742189697306083474e2acec9c6a1229c777",
     "okx_latency_rollup.py": "9bfe907c86cc47f78cc55248fc2b1918d071d50d790efad72aeca9a86e842cb8",
-    "okx_manager_version.py": "210e4d5664c1bddf87f1b7e58604969012f183bced2135e053522ae33afea269",
+    "okx_manager_version.py": "c5e08650625ce26b2027f5261848fe475a676876c254702e53707d2140cba2ef",
     "okx_position_reader_client.py": "14ef4c0b6ebc4b6153d9874c67c0982cefd89c18da84c6f12b2f74585f2f6704",
     "okx_position_reader_core.py": "a0a2c67913b6277981ad26b4348dc7be595c71015cfd076d3f59bc94aa2d21de",
     "okx_positions_fifo.py": "2349dcdbf2f99ed8ba11223f8daf84c3bb90146e5c2655150920277049c093b3",
@@ -54,11 +54,11 @@
     "okx_terminal_accounting.py": "0a1902ac323b1b3bc0ee7464fd7799d51ebf1df0dd77f1467085b078cf932753",
     "okx_tp_telemetry.py": "45c5324efd0cc67ec55dd7f30b52844e4b53f767d30ae2d615cd11398c346e1a",
     "okx_version.py": "f7ddabc94378e2da739a2eb3eaa405a547bf1ec1ef762b33c8bdcbab9603f084",
-    "okxbot.py": "bc75443bbebc5a70e52a315d330ec71924e36e36b86e52a8e37bf60c45290288",
+    "okxbot.py": "e995d348f9c5b61dca6ed53778c132f79c3e4b901b96b65ca5c97542ba071348",
     "requirements.txt": "769713e3bf1092a3392790b05318eca3e983605e503a700d47d9481c4cbb67d7"
   },
   "provenance": "v0.7.87 accepted audit revision (published code identity); dead code cleanup OFFLINE",
-  "release_version": "0.7.88",
+  "release_version": "0.7.89",
   "schema": 1,
   "scope": "unreachable engine code and obsolete stats modules only; original tests preserved; Reader, Funding, Telegram unchanged; OFFLINE only",
   "state_schema": 1

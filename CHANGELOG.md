@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.7.89 — 2026-11-27 UTC — Unified financial consumers (engine 0.7.88 unchanged)
+
+- R6/A8/A9: one local snapshot read, shared structured financial/anchor validation in Manager and both Telegram reports.
+- Preserve legacy and terminal read-only paths; invalid data withheld, Manager retains stale verified money with warning, Telegram retains prior TTL.
+- Use true structured floating PnL and exact snapshot upper BUY in `/full`; show Partial MARKET Exit and Realized Open, Manager adds Realized Open. Compact residual formula unchanged.
+- Common validation for freshness watcher, existing 1800 s alert threshold. SHA-pinned Telegram shadow retirement and isolated import preflight before restart; no restart on probe failure.
+- Remove obsolete snapshot utility, unused service imports/read, outdated BUY pacing text. Add eight SHA-pinned extra runtime retirement entries.
+- No engine, Reader, Funding, strategy, quota, state schema or timer changes.
+
+- OFFLINE: 1101 tests; independent audit 110/110 test files. LIVE shared and Telegram maintenance, 9/9 financial validation PASS. See [release notes](RELEASE_NOTES_V0789.md).
+
 ## v0.7.88 — 2026-11-26 UTC — Dead-code cleanup (engine 0.7.88)
 
 - Remove four unreachable engine functions and unused FULL cache branches; preserve active FULL and StatsWorker v2 calculations.

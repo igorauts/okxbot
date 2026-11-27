@@ -20,7 +20,7 @@ def allowed_package_member(name):
     if len(parts)==3 and parts[:2]==('tests','legacy') and parts[2] in ('__init__.py','single_transition_upgrader.py','okx_shared_runtime_deploy.py'):
         return True
     if len(parts)==2 and parts[0]=='tools' and parts[1] in (
-            'README.md','build_release_zip.py','okx_snapshot.py',
+            'README.md','build_release_zip.py',
             'okx_market_fill_audit.py','okx_reconcile_trigger_report.py',
             'okx_reader_230_plus1_readonly_audit.py','export_component.py'):
         return True

@@ -142,7 +142,7 @@ with tempfile.TemporaryDirectory() as d:
     okxbot.bot_path=lambda entry:p
     okxbot.describe=lambda entry:'ZEC-USDT-SWAP'
     okxbot.unit_name=lambda entry:'okx-grid-zec0710.service'
-    okxbot.read_stats_snapshot=lambda path,instrument:('HISTORICAL SNAPSHOT',0)
+    okxbot.read_stats_snapshot=lambda path,instrument,**kw:{'report':'HISTORICAL SNAPSHOT','generated_at_unix':0}
     okxbot.with_latest_bot_dd=lambda report,path,instrument:report
     try:
         text=okxbot.stats_text('zec0710')

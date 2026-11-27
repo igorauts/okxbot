@@ -80,9 +80,10 @@ class DiscoveryTest(unittest.TestCase):
         self.assertIn('END READ ONLY',result)
         self.assertNotIn('near0721',result)
 
-    def test_monitor_executes_source_sibling_not_versioned_srv_script(self):
+    def test_monitor_executes_canonical_shared_tool_not_versioned_srv_script(self):
         text=(BASE/'okx_telegram_monitor.py').read_text()
-        self.assertIn("with_name('okx_per_bot_speed_readonly.py')",text)
+        self.assertIn("_LATENCY_CLI_PATH = str(_SHARED_CODE / 'okx_per_bot_speed_readonly.py')",text)
+        self.assertNotIn("with_name('okx_per_bot_speed_readonly.py')",text)
         self.assertNotIn('okx_v0747_per_bot_speed_readonly.py',text)
 
 if __name__=='__main__':unittest.main(verbosity=2)

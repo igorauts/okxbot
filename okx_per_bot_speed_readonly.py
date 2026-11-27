@@ -240,7 +240,7 @@ def main():
         if scope!='FULL':
             print(f'  NOTE: raw {counts["batches"]} of rollup {n_rollup} batches; counts are LOWER BOUNDS (tail limited to 8 MiB).')
     print('\nNOTES: P50/P95/P99 are UPWARD histogram-bin ceilings, MAX exact from minute rollups.')
-    print('BUY batch includes intentional 50ms pacing between placed BUYs; counted even when placed=0.')
+    print('BUY batch includes configured pacing between placed BUYs; counted even when placed=0.')
     print('BUY POST measures call->API result (not market move->reposted BUY).')
     print('POST /trade/order includes BUY and SELL; cancel-order includes BUY and TP cancellations.')
     print('loop_pass records only completed normal trading-loop passes, not early continue paths.')

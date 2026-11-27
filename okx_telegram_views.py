@@ -7,15 +7,16 @@ import json
 from contextlib import closing
 import math
 import re
-import statistics
 import subprocess
 import time
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from okx_paths import state_file, pnl_db, fills_db, cycles_db, observer_dir
-from okx_stats_ui import tp_reserve_text
+from okx_stats_ui import (tp_reserve_text, validate_financial_snapshot, base_quantity,
+                          dec, read_drawdown, requires_structured_snapshot, read_stats_record,
+                          require_fresh_snapshot)
 
 LINE = '────────────────────────'
 COUNTS = re.compile(r'\bBUY\s+(\d+)/(\d+)\s*\|\s*TP\s+(\d+)\s*\(реальных\s+(\d+)\)')
@@ -162,69 +163,100 @@ def highest_open_filled_buy_price(root, cfg):
     return '$' + human_amount(max(prices), price_digits(cfg)) if prices else '—'
 
 
-def _full_verified_total(root, cfg, stats, generated, *, anchor=None):
-    """Verify the same financial snapshot used by the full report, no grid-state dependency."""
-    perf=stats.get('performance') or stats.get('performance_v0724')
-    if not isinstance(perf,dict) or perf.get('schema')!=1:
-        return None
-    def strict(raw):
-        if raw is None or isinstance(raw,bool):return None
-        try:
-            n=Decimal(str(raw))
-            return n if n.is_finite() else None
-        except (ValueError,TypeError,ArithmeticError):return None
-    fields=('total_pnl','grid_profit','limit_tp_net','market_tp_net',
-            'partial_exit_net','floating_pnl','realized_open_components')
-    v={k:strict(perf.get(k)) for k in fields}
-    if any(x is None for x in v.values()):return None
-    if (abs(v['limit_tp_net']+v['market_tp_net']-v['grid_profit'])>Decimal('0.00000001')
-        or abs(v['grid_profit']+v['partial_exit_net']+v['floating_pnl']+
-               v['realized_open_components']-v['total_pnl'])>Decimal('0.00000001')):
-        return None
-    a=snapshot_anchor(root,stats) if anchor is None else anchor
-    at=strict(a.get('at'))
-    if (a.get('schema')!=1 or a.get('instrument')!=cfg.get('instrument') or
-        at is None or abs(at-generated)>Decimal('0.5') or
-        strict(a.get('total_pnl_usdt'))!=v['total_pnl']):return None
-    if 'financial_anchor' in stats and strict(perf.get('bid'))!=strict(a.get('bid')):
-        return None
-    return v['total_pnl']
-
-
-def _full_funding_fields(root,cfg,stats,generated,subtotal,funding_loader,*,anchor=None):
+def _legacy_funding_fields(root,cfg,funding_loader):
+    """Text-only reports cannot prove a current account total."""
     from decimal import localcontext
-    # Terminal funding attribution is separate; preserve the previous archive
-    # presentation rather than treat a pre-termination snapshot as final money.
     if (root/'state/final_stats.json').exists():
         return 'н/д','н/д',None
     funding=None if funding_loader is None else funding_loader(cfg)
-    base=_full_verified_total(root,cfg,stats,generated,anchor=anchor)
     amount=Decimal(0) if funding is None else getattr(funding,'amount',funding)
     note=('пока нет данных' if funding is None else funding.note() if hasattr(funding,'note') else '')
     with localcontext() as ctx:
         ctx.prec=400
-        total=base+amount if base is not None else None
-        funding_text=('−' if amount<0 else '+')+'$'+f'{abs(amount).quantize(Decimal(".01"),rounding=ROUND_HALF_UP):,.2f}'
-        if note: funding_text+=' · '+note
-        if total is None:return funding_text,'н/д',None
-        # Preserve the original subtotal suffix; recompute its percent if shown.
-        # Do not add funding to an already rounded string or to an existing percent.
-        amount=money(total,sign=True)
-        m=re.search(r'[+−-]?\$?[\d,.]+',subtotal)
-        if m is None:return funding_text,amount,total
-        suffix=subtotal[m.end():]
-        if '%' in suffix:
-            perf=stats.get('performance') or stats.get('performance_v0724')
-            capital=number(perf.get('capital'))
-            pct=human_amount(total*100/capital,2,sign=True)+'%' if capital is not None and capital>0 else 'н/д'
-            suffix=re.sub(r'[+−-]?[\d,.]+%',lambda _:pct,suffix,count=1)
-        return funding_text,subtotal[:m.start()]+amount+suffix,total
+        text=('−' if amount<0 else '+')+'$'+f'{abs(amount).quantize(Decimal(".01"),rounding=ROUND_HALF_UP):,.2f}'
+    if note:text+=' · '+note
+    return text,'н/д',None
 
 
-def status_one(name, root, age_text='н/д', *, funding_loader=None, total_sink=None):
+def _structured_full(name,root,cfg,stats,age_text,funding_loader,total_sink):
+    """Display the same verified financial payload as Manager and /status."""
+    from decimal import localcontext
+    try:
+        now=time.time()
+        perf,v,generated=validate_financial_snapshot(root,cfg.get('instrument'),stats,now=now)
+        require_fresh_snapshot(generated,now)
+    except (OSError,ValueError,TypeError,ArithmeticError):
+        return ('<b>'+html.escape(name)+'</b>\n'
+                '⚠️ Финансовая статистика устарела или не подтверждена. PnL: н/д')
+    coin=cfg['instrument'].split('-',1)[0]
+    digits=price_digits(cfg)
+    ver=str(cfg.get('version') or stats.get('bot_version') or '?').lstrip('v')
+    first=', '.join([name,'v'+ver,age_text])
+    capital=dec(perf.get('capital'))
+    def rate(amount):
+        return (' ('+human_amount(amount*100/capital,2,sign=True)+'%)'
+                if amount is not None and capital is not None and capital>0 else '')
+    def monetary(key,sign=False,with_rate=False):
+        amount=dec(perf.get(key))
+        return money(amount,sign=sign)+(rate(amount) if with_rate else '')
+    upper=dec(perf.get('top_open_buy'))
+    bid=money(v['bid'],places=digits)
+    if upper is not None and upper>0:
+        up=money(upper,places=digits)
+        bid+=' ('+human_amount((v['bid']/upper-1)*100,2,sign=True)+'%)'
+    else:up='—'
+    if (root/'state/final_stats.json').exists():
+        funding_text='н/д';total=None
+    else:
+        funding=None if funding_loader is None else funding_loader(cfg)
+        amount=Decimal(0) if funding is None else getattr(funding,'amount',funding)
+        note=('пока нет данных' if funding is None else funding.note() if hasattr(funding,'note') else '')
+        with localcontext() as ctx:
+            ctx.prec=400
+            total=v['total_pnl']+amount
+            funding_text=('−' if amount<0 else '+')+'$'+f'{abs(amount).quantize(Decimal(".01"),rounding=ROUND_HALF_UP):,.2f}'
+        if note:funding_text+=' · '+note
+    subtotal=money(total,sign=True)+rate(total)
+    icon='⚪' if total is None else '🟢' if total>=0 else '🔴'
+    dd='н/д'
+    record=read_drawdown(root,cfg['instrument'],time.time())
+    if record is not None:
+        amount,_=record
+        dd='−$'+human_amount(amount,2)
+        if capital is not None and capital>0:dd+=' (−'+human_amount(amount*100/capital,2)+'%)'
+    main=[
+        'Верх сетки: '+up,'Текущий bid: '+bid,
+        'Закрытых циклов: '+str(perf['closed_count']),
+        'Грид профит: '+monetary('grid_profit',True),
+        'Торговый объём: '+monetary('volume'),
+        'Уплаченная комиссия: '+monetary('paid_fees'),
+        'Прибыль за последние 24ч: '+monetary('last_24h',True,True),
+        'Открытая позиция: '+base_quantity(v['open_base'],cfg)+' '+coin,
+        'Partial MARKET Exit: '+monetary('partial_exit_net',True),
+        'Realized Open: '+monetary('realized_open_components',True),
+        'Floating PnL: '+monetary('floating_pnl',True),
+        'Funding: '+funding_text,
+    ]
+    reserve=tp_reserve_text(root,cfg['instrument'],include_age=True)
+    if reserve is not None:main.append('⚠ TP reserve: '+reserve)
+    parts=['<b>'+html.escape(first)+'</b>', '\n'.join('<code>'+html.escape(line)+'</code>' for line in main),
+           '<b>'+icon+' Итоговый PnL: '+html.escape(subtotal)+' '+icon+'</b>',
+           '<code>'+html.escape('Максимальная просадка бота: '+dd)+'</code>']
+    if total_sink is not None:total_sink.append(total)
+    return '\n\n'.join(parts)
+
+
+def status_one(name, root, age_text='н/д', *, funding_loader=None, total_sink=None, stats=None):
     root = Path(root)
-    stats = read_json(root/'state/stats.json')
+    if stats is None:
+        try:stats=read_stats_record(root) or {}
+        except (OSError,ValueError,TypeError):
+            return '<b>'+html.escape(name)+'</b>\n⚠️ Финансовая статистика не подтверждена. PnL: н/д'
     cfg = read_json(root/'config.json')
+    if ('performance' in stats or 'performance_v0724' in stats
+            or requires_structured_snapshot(cfg,stats)):
+        return _structured_full(name,root,cfg,stats,age_text,funding_loader,total_sink)
+    # Legacy text-only report; never used as fallback for malformed structured data.
     if not stats.get('complete') or stats.get('instrument') != cfg.get('instrument'):
         return '<b>'+html.escape(name)+'</b>\nСтатистика недоступна/не подтверждена'
     # /full must not present old PnL as current merely because an old report
@@ -254,8 +286,7 @@ def status_one(name, root, age_text='н/д', *, funding_loader=None, total_sink=
     p = re.match(r'^\s*([+−-]?[\d,.]+)\s+(\S+)\s*$', pos)
     if p and number(p.group(1)) is not None:
         pos = format(number(p.group(1)), 'f').rstrip('0').rstrip('.') + ' ' + p.group(2) if '.' in format(number(p.group(1)), 'f') else format(number(p.group(1)), 'f') + ' ' + p.group(2)
-    subtotal = fmt_source(value(values,'ИТОГОВЫЙ PnL'))
-    funding_text,subtotal,sub_n = _full_funding_fields(root,cfg,stats,generated,subtotal,funding_loader,anchor=anchor)
+    funding_text,subtotal,sub_n = _legacy_funding_fields(root,cfg,funding_loader)
     icon = '⚪' if sub_n is None else '🟢' if sub_n >= 0 else '🔴'
     # Read the authoritative local 5s DD record, not a stale 10-minute report.
     # No exchange requests; schema/instrument checked before displaying.

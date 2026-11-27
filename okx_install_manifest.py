@@ -7,6 +7,7 @@ from pathlib import Path
 FILE = 'install_manifest.json'
 ROOT_FILE = re.compile(r'[A-Za-z][A-Za-z0-9_]*\.py|engine_manifest\.json|requirements\.txt|okx_source_bundle\.json|install_manifest\.json')
 SHA = re.compile(r'[0-9a-f]{64}')
+EXTRA_RETIRED_NAMES = frozenset({'BUNDLE_SHA256.json','run_checks.sh'})
 
 def regular(root, name):
     root=Path(root)
@@ -42,8 +43,19 @@ def load(root, engine_manifest, *, installed=False):
     if not {'okxbot.py','okx_setup.py','okx_source_attestation.py','okx_install_manifest.py','okx_manager_version.py','okx_live_upgrade.py'} <= shared:
         raise RuntimeError('Incomplete manager inventory')
     retired=m.get('retire_shared')
-    if not isinstance(retired,dict) or any(not ROOT_FILE.fullmatch(n) or n in shared or n in pins or not SHA.fullmatch(str(v)) for n,v in retired.items()):
+    if not isinstance(retired,dict) or any(
+            (not ROOT_FILE.fullmatch(n) and n not in EXTRA_RETIRED_NAMES)
+            or n in shared or (n in pins and n not in source_only)
+            or not SHA.fullmatch(str(v)) for n,v in retired.items()):
         raise RuntimeError('Invalid retired inventory')
+    shadows=m.get('retire_telegram_shadows',{})
+    if not isinstance(shadows,dict) or any(
+            n not in {'okx_reader_diagnostics.py','okx_per_bot_speed_readonly.py'}
+            or n not in shared or n in telegram or not isinstance(digests,list)
+            or not digests or len(set(digests))!=len(digests)
+            or any(not isinstance(v,str) or not SHA.fullmatch(v) for v in digests)
+            for n,digests in shadows.items()):
+        raise RuntimeError('Invalid Telegram shadow retirement inventory')
     component_pins=m.get('component_sha256')
     if not isinstance(component_pins,dict):raise RuntimeError('Missing component pins')
     component_sources=set()

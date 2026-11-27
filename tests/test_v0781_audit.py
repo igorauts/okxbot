@@ -80,8 +80,8 @@ class TelegramAudit(unittest.TestCase):
         self.root=Path(self.tmp.name);(self.root/'state').mkdir();self.now=time.time()-1
         self.cfg={'instrument':INST,'created_at':self.now-10,'tick_size':'0.00001','max_grids':200,'contract_value':'1','contract_lot':'1'}
         self.anchor={'schema':1,'instrument':INST,'at':self.now,'bid':'0.403129','total_pnl_usdt':'20'}
-        self.perf={'schema':1,'total_pnl':'20','grid_profit':'10','limit_tp_net':'7','market_tp_net':'3','partial_exit_net':'2','floating_pnl':'5','realized_open_components':'3','bid':'0.403129','open_base':'621','volume':'22806.3819','capital':'100'}
-        self.stats={'complete':True,'instrument':INST,'generated_at_unix':self.now,'financial_anchor':self.anchor,'performance':self.perf,'report':'ИТОГОВЫЙ PnL: +$20.00 (+20.00% от 1x)\nОткрытая позиция: 621 ENSO'}
+        self.perf={'schema':1,'total_pnl':'20','grid_profit':'10','limit_tp_net':'7','market_tp_net':'3','partial_exit_net':'2','floating_pnl':'5','realized_open_components':'3','bid':'0.403129','open_base':'621','open_nominal':'250.343109','closed_count':1,'volume':'22806.3819','capital':'100'}
+        self.stats={'schema_version':1,'complete':True,'instrument':INST,'generated_at_unix':self.now,'financial_anchor':self.anchor,'performance':self.perf,'report':'ИТОГОВЫЙ PnL: +$20.00 (+20.00% от 1x)\nОткрытая позиция: 621 ENSO'}
         (self.root/'config.json').write_text(json.dumps(self.cfg));self.write()
         (self.root/'state/bot_state.json').write_text(json.dumps({'instrument':INST,'cycles':{'x':{'state':'VIRTUAL_TP'}}}))
         (self.root/'state/stats_financial_anchor.json').write_text(json.dumps(dict(self.anchor,at=self.now-600,bid='999')))
@@ -113,7 +113,7 @@ class TelegramAudit(unittest.TestCase):
         (self.root/'state/final_stats.json').write_text('{}')
         out,sink=self.render(None);self.assertEqual(sink,[None]);self.assertIn('Funding: н/д',out)
     def test_bad_trading_total_not_masked_by_funding(self):
-        self.perf['total_pnl']='999';self.write();out,sink=self.render(None);self.assertEqual(sink,[None]);self.assertIn('Итоговый PnL: н/д',out)
+        self.perf['total_pnl']='999';self.write();out,sink=self.render(None);self.assertEqual(sink,[]);self.assertIn('PnL: н/д',out)
     def test_legacy_anchor_accepted_only_if_matching(self):
         del self.stats['financial_anchor'];self.write();out,sink=self.render(None);self.assertIn('PnL: н/д',out)
         (self.root/'state/stats_financial_anchor.json').write_text(json.dumps(self.anchor));self.assertEqual(self.render(None)[1],[D(20)])

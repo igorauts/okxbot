@@ -131,7 +131,7 @@ def allowed_package_member(name):
     if len(parts)==3 and parts[:2]==('tests','legacy') and parts[2] in ('__init__.py','single_transition_upgrader.py','okx_shared_runtime_deploy.py'):
         return True
     if len(parts)==2 and parts[0]=='tools' and parts[1] in (
-            'README.md','build_release_zip.py','okx_snapshot.py',
+            'README.md','build_release_zip.py',
             'okx_market_fill_audit.py','okx_reconcile_trigger_report.py',
             'okx_reader_230_plus1_readonly_audit.py','export_component.py'):
         return True
@@ -432,30 +432,90 @@ def install_shared():
     print('SHARED PASS:',len(to_copy),'files; changed:',len(changed),'retired:',len(retired),'backup:',dest)
 
 
+def telegram_shadow_plan(inventory):
+    """Only explicitly pinned duplicate files may be removed; refuse other shadows."""
+    names=set(inventory['telegram'])
+    planned=inventory.get('retire_telegram_shadows',{})
+    retired=[]
+    for name in sorted(set(inventory['shared'])-names):
+        if not name.endswith('.py'):continue
+        p=TELEGRAM_ROOT/name
+        if p.exists() or p.is_symlink():
+            if name not in planned or sha256(check_file(p)) not in planned[name]:
+                fail('Unexpected Telegram root shadow: '+name)
+            retired.append(name)
+        # A package or sourceless module can also override the shared module.
+        for alias in (TELEGRAM_ROOT/name[:-3], TELEGRAM_ROOT/(name+'c')):
+            if alias.exists() or alias.is_symlink():
+                fail('Unexpected Telegram import alias: '+str(alias))
+    return retired
+
+
+def telegram_import_preflight(inventory):
+    """Fresh isolated interpreter, actual installed roots; never execute main()."""
+    expected={name[:-3]:str((TELEGRAM_ROOT if name in inventory['telegram'] else SHARED)/name)
+              for name in inventory['shared'] if name.endswith('.py')}
+    code = r"""
+import importlib, importlib.machinery, json, pathlib, sys
+root,shared=sys.argv[1:3]
+expected=json.loads(sys.argv[3])
+sys.path[:0]=[root,shared]
+for name,want in expected.items():
+    spec=importlib.machinery.PathFinder.find_spec(name,[root,shared])
+    if spec is None or spec.origin!=want:
+        raise RuntimeError('Telegram import resolution mismatch: '+name)
+# Import monitor as a module, not as __main__: no Telegram or OKX calls.
+monitor=importlib.import_module('okx_telegram_monitor')
+for name,module in tuple(sys.modules.items()):
+    if name in expected and getattr(module,'__file__',None)!=expected[name]:
+        raise RuntimeError('Telegram loaded wrong module: '+name)
+if monitor._LATENCY_CLI_PATH!=str(pathlib.Path(shared)/'okx_per_bot_speed_readonly.py'):
+    raise RuntimeError('Telegram latency helper is not canonical')
+from okx_stats_ui import validate_financial_snapshot, require_fresh_snapshot
+print('TELEGRAM_IMPORT_PREFLIGHT_PASS')
+"""
+    result=run('/usr/bin/python3','-I','-B','-c',code,str(TELEGRAM_ROOT),str(SHARED),json.dumps(expected),timeout=30)
+    if 'TELEGRAM_IMPORT_PREFLIGHT_PASS' not in result.stdout:fail('Telegram import probe incomplete')
+    print('TELEGRAM_IMPORT_PREFLIGHT_PASS',flush=True)
+
+
 def install_telegram():
     """Separate shared Telegram-only patch. NO trading services are touched."""
     stage_check()
     if TELEGRAM_ROOT.is_symlink() or not TELEGRAM_ROOT.is_dir():
         fail('Unsafe Telegram root')
     from okx_install_manifest import load
-    names=load(STAGE,json_read(STAGE/'engine_manifest.json'))['telegram']
+    inventory=load(STAGE,json_read(STAGE/'engine_manifest.json'))
+    names=inventory['telegram']
     if len(names)<5:fail('Incomplete Telegram module set')
+    # The canonical shared release must already be installed, including tools.
+    for name in inventory['shared']:
+        if sha256(check_file(SHARED/name))!=sha256(check_file(STAGE/name)):
+            fail('Shared runtime not installed: '+name)
+    retired=telegram_shadow_plan(inventory)
     old=backup_dir('telegram')
     (old/'old').mkdir(mode=0o700)
     existed=[]
-    for name in names:
+    for name in names+retired:
         source=TELEGRAM_ROOT/name
-        if source.exists():
+        if source.exists() or source.is_symlink():
             shutil.copy2(check_file(source),old/'old'/name)
             existed.append(name)
     (old/'old_existing.json').write_text(json.dumps(existed))
+    restart_attempted=False
     try:
         for name in names:atomic_replace_file(STAGE/name,TELEGRAM_ROOT/name)
         for name in names:
             if sha256(STAGE/name)!=sha256(TELEGRAM_ROOT/name):
                 fail('Telegram content mismatch: '+name)
-        # This is NOT a trading bot restart. Telegram monitor must reload its
-        # Python modules to activate new alarms and the durable delivery fix.
+        for name in retired:
+            p=check_file(TELEGRAM_ROOT/name)
+            if sha256(p) not in inventory['retire_telegram_shadows'][name]:
+                fail('Telegram shadow changed during install: '+name)
+            p.unlink()
+        telegram_import_preflight(inventory)
+        # A failed pre-restart probe restores files without touching the process.
+        restart_attempted=True
         run('systemctl','restart',TELEGRAM_UNIT,timeout=60)
         status=run('systemctl','show',TELEGRAM_UNIT,
                    '-p','ActiveState','--value',timeout=15).stdout.strip()
@@ -465,16 +525,15 @@ def install_telegram():
         for name in names:
             if name not in existed and (TELEGRAM_ROOT/name).is_file():
                 (TELEGRAM_ROOT/name).unlink()
-        # Telegram has no trading authority. Restore old monitor once; never
-        # touch trading services. If recovery fails, report both failures.
-        try:
-            run('systemctl','restart',TELEGRAM_UNIT,timeout=60)
-        except Exception as rollback_exc:
-            print('TELEGRAM RESTORE RESTART FAILED:',str(rollback_exc)[:300],
-                  file=sys.stderr,flush=True)
+        if restart_attempted:
+            try:
+                run('systemctl','restart',TELEGRAM_UNIT,timeout=60)
+            except Exception as rollback_exc:
+                print('TELEGRAM RESTORE RESTART FAILED:',str(rollback_exc)[:300],
+                      file=sys.stderr,flush=True)
         raise
     (old/'complete').write_text('Telegram-only updated; bot engines untouched\n')
-    print('TELEGRAM PASS:',len(names),'files; monitor ACTIVE; backup:',old)
+    print('TELEGRAM PASS:',len(names),'files; retired:',len(retired),'monitor ACTIVE; backup:',old)
 
 
 def audit_output_complete(returncode, output, *, single_instance=False):
