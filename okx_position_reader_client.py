@@ -6,12 +6,11 @@ No TTL-based trading cache is supported: every call requires GET started at or
 later than its individual freshness barrier.
 """
 import json
-import os
 import socket
 import stat
 import time
 from pathlib import Path
-from okx_position_reader_core import Priority, SnapshotError, build_snapshot
+from okx_position_reader_core import Priority, SnapshotError
 
 MAX_IPC_BYTES = 65536
 READER_SYSTEMD_SOCKET = Path("/run/okx-position-reader/positions.sock")

@@ -7,7 +7,6 @@ No GitHub, VPS, network, credential, or trading actions.
 import argparse
 import ast
 import hashlib
-import os
 import stat
 import zipfile
 from pathlib import Path

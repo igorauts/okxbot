@@ -28,6 +28,7 @@ STAGE = None  # set via --stage
 SHARED = Path('/opt/okx-grid-live')
 BASE = Path('/root/okx')
 BACKUPS = Path('/srv/okxbot-live-backups')
+FUNDING_ROOT = Path('/opt/okx-funding')
 TELEGRAM_ROOT = Path('/root/okx')
 TELEGRAM_UNIT = 'okx-telegram-monitor.service'
 BOTS = ()  # assigned from --bot, never a hardcoded list
@@ -133,7 +134,7 @@ def allowed_package_member(name):
     if len(parts)==2 and parts[0]=='tools' and parts[1] in (
             'README.md','build_release_zip.py',
             'okx_market_fill_audit.py','okx_reconcile_trigger_report.py',
-            'okx_reader_230_plus1_readonly_audit.py','export_component.py'):
+            'export_component.py'):
         return True
     if len(parts)==3 and parts[:2]==('docs','history') and parts[2].endswith('.md'):
         return True
@@ -163,7 +164,8 @@ def allowed_package_member(name):
                  ('tests','fixtures','okx_bot_v0782_baseline.py.gz'),
                  ('tests','fixtures','okx_bot_v0783_baseline.py.gz'),
                  ('tests','fixtures','okx_bot_v0784_baseline.py.gz'),
-                 ('tests','fixtures','okx_bot_v0785_baseline.py.gz')):
+                 ('tests','fixtures','okx_bot_v0785_baseline.py.gz'),
+                 ('tests','fixtures','okx_positions_fifo_v0788.py.gz')):
         return True
     if (len(parts) == 5 and parts[:2] == ('tests','stats_v2_original')
         and parts[2] in ('stats_v2_release_work','stats_v2_prod_candidate')
@@ -358,6 +360,252 @@ def backup_instance(root,dest,engine_files):
     (dest/'backup_complete').write_text('config, state, code; no .env\n')
 
 
+def systemd_properties(unit, *keys):
+    args = [item for key in keys for item in ('-p',key)]
+    result = run('systemctl','show',unit,'--no-pager',*args,timeout=30).stdout
+    values = dict(line.split('=',1) for line in result.splitlines() if '=' in line)
+    if not set(keys)<=values.keys():fail('Incomplete systemd properties: '+unit)
+    return values
+
+
+def systemd_bus(method, signature, *args):
+    # busctl call wraps the method output arguments in an outer array.
+    raw = run('busctl','--system','--json=short','call',
+              'org.freedesktop.systemd1','/org/freedesktop/systemd1',
+              'org.freedesktop.systemd1.Manager',method,signature,*args,timeout=30).stdout
+    result=json.loads(raw)
+    data=result.get('data')
+    if not isinstance(data,list) or len(data)!=1:fail('Invalid systemd D-Bus reply: '+method)
+    return data[0]
+
+
+def quota_unit_inventory():
+    # Structured inventory: no glyphs, headings, column or quoting assumptions.
+    patterns=('okx-grid-*.service','okx-bot*.service')
+    files=systemd_bus('ListUnitFilesByPatterns','asas','0',str(len(patterns)),*patterns)
+    loaded=systemd_bus('ListUnitsByPatterns','asas','0',str(len(patterns)),*patterns)
+    import re
+    def valid(name):
+        if not isinstance(name,str) or not re.fullmatch(r'okx[-a-z0-9]+\.service',name):
+            fail('Unrecognized trading service in quota inventory')
+        return name
+    units={valid(Path(row[0]).name) for row in files}
+    # Unregistered, unloaded not-found placeholders are not actual consumers.
+    units.update(valid(row[0]) for row in loaded
+                 if row[2]!='not-found' or row[3] not in ('inactive','failed'))
+    registry=json_read(BASE/'.okxbot_registry.json')
+    entries={}
+    for entry in registry.values():
+        if not isinstance(entry,dict):fail('Malformed quota registry entry')
+        unit=valid(str(entry.get('service',''))+'.service')
+        if unit in entries:fail('Duplicate quota registry service: '+unit)
+        entries[unit]=entry
+    units.update(entries)
+    if not units:fail('No trading services in quota inventory')
+    return units,entries
+
+
+def unit_root(unit,entry,props):
+    root=Path(props['WorkingDirectory'])
+    if not root.is_absolute() or root.resolve()!=root or BASE not in root.parents:
+        fail('Unsafe quota consumer path: '+unit)
+    if entry is not None and Path(entry.get('path',''))!=root:
+        fail('Registry quota consumer path mismatch: '+unit)
+    return root
+
+
+def terminal_disabled(root,entry,props):
+    if props['ActiveState']!='inactive' or props['MainPID']!='0' or props['UnitFileState'] not in ('disabled','masked','masked-runtime'):
+        return False
+    # Durable terminal evidence, not merely a disabled/stopped RUN unit.
+    if entry and entry.get('retired') is True and entry.get('terminal_phase') in ('PANIC_DONE','RETIRED'):
+        return True
+    for name,key in (('state/bot_state.json','terminal_mode'),('state/control_ack.json','phase')):
+        path=root/name
+        if path.exists() or path.is_symlink():
+            if json_read(path).get(key) in ('PANIC_DONE','RETIRED'):return True
+    return False
+
+
+def boot_id():
+    import re
+    value=Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+    if not re.fullmatch(r'[0-9a-f-]{36}',value):fail('Invalid kernel boot identity')
+    return value
+
+
+def shared_activation(manifest_path):
+    # A successful, source-pinned shared transaction records a monotonic
+    # lower bound for consumers that have subsequently loaded its modules.
+    # No separate daemon or mutable runtime state is introduced.
+    expected=sha256(check_file(manifest_path))
+    current_boot=boot_id()
+    matches=[];attempts=[]
+    if BACKUPS.is_dir() and not BACKUPS.is_symlink():
+        for d in BACKUPS.glob('*-shared'):
+            p=d/'activation.json'
+            if not d.is_symlink() and (d/'attempt.json').exists():
+                attempt=json_read(d/'attempt.json')
+                if attempt.get('boot_id')==current_boot:
+                    stamp=attempt.get('monotonic_us')
+                    if type(stamp)!=int or stamp<=0:fail('Invalid shared attempt proof')
+                    attempts.append((stamp,d))
+            if d.is_symlink() or not (d/'complete').is_file() or (d/'complete').is_symlink():continue
+            if not p.exists() and not p.is_symlink():continue
+            receipt=json_read(p)
+            if receipt.get('manifest_sha256')!=expected:continue
+            stamp=receipt.get('monotonic_us')
+            if type(stamp)!=int or stamp<=0 or not isinstance(receipt.get('boot_id'),str) or len(receipt['boot_id'])!=36:
+                fail('Invalid shared activation proof')
+            matches.append(receipt)
+    if attempts:
+        _,latest=max(attempts,key=lambda row:row[0])
+        if (not (latest/'complete').is_file() or (latest/'complete').is_symlink() or
+                not (latest/'activation.json').is_file()):return None
+        r=json_read(latest/'activation.json')
+        if r.get('manifest_sha256')!=expected or r.get('boot_id')!=current_boot:return None
+    same_boot=[r for r in matches if r['boot_id']==current_boot]
+    if same_boot:return max(same_boot,key=lambda r:r['monotonic_us'])
+    return matches[0] if matches else None
+
+
+def started_after_shared(props, receipt):
+    if not receipt or props.get('ActiveState')!='active' or int(props.get('MainPID','0'))<=0:
+        return False
+    stamp=int(props.get('ExecMainStartTimestampMonotonic','0'))
+    return stamp>0 and (receipt['boot_id']!=boot_id() or stamp>receipt['monotonic_us'])
+
+
+def guarded_reader_running():
+    # If proof is absent (old Reader, interrupted install, old backup), keep
+    # the external barrier required rather than assume that disk bytes are live.
+    try:
+        path=SHARED/'engine_manifest.json'
+        manifest=json_read(path)
+        current=manifest['engines'][manifest['current_version']]
+        if current.get('quota_boot_guard_schema')!=1:return False
+        from okx_install_manifest import load
+        inventory=load(SHARED,manifest,installed=True)
+        for name in ('okx_positions_fifo.py','okx_positions_priority.py','okx_position_reader_service.py'):
+            if sha256(check_file(SHARED/name))!=manifest['source_modules_sha256'][name]:return False
+        for dest,src in inventory['reader'].items():
+            if sha256(check_file(SHARED/dest))!=inventory['component_sha256'][src]:return False
+        props=systemd_properties('okx-position-reader.service','ActiveState','MainPID','ExecMainStartTimestampMonotonic','WorkingDirectory','NeedDaemonReload')
+        if (props['WorkingDirectory']!=str(SHARED) or props['NeedDaemonReload']!='no'
+                or not started_after_shared(props,shared_activation(path))):return False
+        proc=Path('/proc')/props['MainPID']
+        argv=[os.fsdecode(a) for a in (proc/'cmdline').read_bytes().split(b'\0') if a]
+        return (Path(os.readlink(proc/'cwd')).resolve()==SHARED
+                and str(SHARED/'okx_position_reader_service.py') in argv[1:])
+    except (OSError,ValueError,KeyError,TypeError,RuntimeError,subprocess.SubprocessError):
+        return False
+
+
+def effective_boot_barrier(unit,dropin,raw,argv):
+    if (dropin.parent.is_symlink() or dropin.resolve()!=dropin
+            or check_file(dropin).read_bytes()!=raw):
+        fail('Quota boot barrier missing or drifted: '+unit)
+    props=systemd_properties(unit,'LoadState','NeedDaemonReload','DropInPaths')
+    if (props['LoadState']!='loaded' or props['NeedDaemonReload']!='no'
+            or str(dropin) not in props['DropInPaths'].split()):
+        fail('Quota boot barrier not effective: '+unit)
+    obj=systemd_bus('LoadUnit','s',unit)
+    # get-property returns the variant value directly, unlike call. ExecStartPre
+    # contains an argv array: a space inside the Python script stays in ONE arg.
+    reply=json.loads(run('busctl','--system','--json=short','get-property',
+                        'org.freedesktop.systemd1',obj,'org.freedesktop.systemd1.Service',
+                        'ExecStartPre',timeout=30).stdout)
+    rows=reply.get('data')
+    if reply.get('type')!='a(sasbttttuii)' or not isinstance(rows,list):
+        fail('Unrecognized effective ExecStartPre property: '+unit)
+    if sum(isinstance(row,list) and len(row)==10 and row[0]==argv[0]
+           and row[1]==argv and row[2] is False for row in rows)!=1:
+        fail('Quota boot barrier not effective: '+unit)
+
+
+def verify_quota_boot_barriers(unit_dir=Path('/etc/systemd/system')):
+    """Read-only mixed-version gate, with a single prefix drop-in for bots.
+
+    Disabled terminal units are excluded. Current/future guarded engines are
+    attested by their actual complete dependency bytes, not their labels.
+    Any unproven Reader still requires its one shared external barrier.
+    """
+    template=STAGE/'deploy/reader/05-quota-boot-safety.conf'
+    if not template.exists():return
+    raw=check_file(template).read_bytes()
+    import shlex
+    commands=[line.partition('=')[2] for line in raw.decode().splitlines() if line.startswith('ExecStartPre=')]
+    if len(commands)!=1:fail('Invalid quota boot barrier template')
+    argv=shlex.split(commands[0])
+    if argv[:4]!=['/usr/bin/python3','-I','-B','-c'] or len(argv)!=5:
+        fail('Invalid quota boot barrier command')
+    manifest=json_read(STAGE/'engine_manifest.json')
+    units,entries=quota_unit_inventory()
+    legacy=[];guarded=0;terminal=0
+    from okx_dependency_attestation import verify
+    for unit in sorted(units):
+        props=systemd_properties(unit,'LoadState','ActiveState','MainPID','UnitFileState','WorkingDirectory')
+        entry=entries.get(unit)
+        if props['LoadState']!='loaded':fail('Unverifiable registered/installed quota consumer: '+unit)
+        root=unit_root(unit,entry,props)
+        if terminal_disabled(root,entry,props):terminal+=1;continue
+        cfg=json_read(root/'config.json');state=json_read(root/'state/bot_state.json')
+        version=cfg.get('version')
+        if version!=state.get('version'):fail('Quota consumer metadata mismatch: '+unit)
+        info=manifest['engines'].get(version,{})
+        if info.get('quota_boot_guard_schema')==1:
+            verify(root,dict(manifest,current_version=version),bot_only=True)
+            from okx_ui import installed_engine_version
+            if (props['ActiveState']=='inactive' and props['MainPID']=='0' or
+                    props['ActiveState']=='active' and installed_engine_version(
+                        root,props,STAGE/'engine_manifest.json')=='v'+version):
+                guarded+=1;continue
+        if not unit.startswith('okx-grid-'):
+            fail('Legacy registry service outside quota prefix requires explicit migration: '+unit)
+        legacy.append(unit)
+    unit_dir=Path(unit_dir)
+    for unit in legacy:
+        effective_boot_barrier(unit,unit_dir/'okx-grid-.service.d'/template.name,raw,argv)
+    reader_guarded=guarded_reader_running()
+    if not reader_guarded:
+        unit='okx-position-reader.service'
+        effective_boot_barrier(unit,unit_dir/(unit+'.d')/template.name,raw,argv)
+    print('QUOTA_BOOT_BARRIERS=PASS', 'legacy='+str(len(legacy)), 'guarded='+str(guarded),
+          'terminal_skipped='+str(terminal),'reader_guarded='+str(reader_guarded),flush=True)
+
+
+def verify_telegram_after_shared():
+    """Gate G5 before a bot stop; no service restart here."""
+    manifest=json_read(STAGE/'engine_manifest.json')
+    if not manifest['engines'][manifest['current_version']].get('telegram_shared_reload_required'):return
+    from okx_install_manifest import load
+    inventory=load(STAGE,manifest)
+    for name in inventory['shared']:
+        if sha256(check_file(SHARED/name))!=sha256(check_file(STAGE/name)):
+            fail('Telegram gate: shared source mismatch: '+name)
+    for name in inventory['telegram']:
+        if sha256(check_file(TELEGRAM_ROOT/name))!=sha256(check_file(STAGE/name)):
+            fail('Telegram gate: local source mismatch: '+name)
+    if inventory.get('funding_view_previous_sha256') and sha256(check_file(FUNDING_ROOT/'okx_funding_view.py'))!=sha256(STAGE/'okx_funding_view.py'):
+        fail('Funding view must be synchronized before bot upgrade')
+    if telegram_shadow_plan(inventory):fail('Telegram gate: unretired shadow')
+    keys=('ActiveState','SubState','MainPID','InvocationID','ExecMainStartTimestampMonotonic','NeedDaemonReload')
+    props=systemd_properties(TELEGRAM_UNIT,*keys)
+    receipt=shared_activation(SHARED/'engine_manifest.json')
+    if (props['SubState']!='running' or props['NeedDaemonReload']!='no'
+            or not started_after_shared(props,receipt)):
+        fail('Telegram must load the installed shared release before bot upgrade')
+    import re
+    invocation=props['InvocationID']
+    if not re.fullmatch(r'[a-f0-9]{32}',invocation):fail('Invalid Telegram invocation')
+    logs=run('journalctl','_SYSTEMD_INVOCATION_ID='+invocation,'--no-pager','-o','cat',timeout=30).stdout
+    if 'OKX Telegram monitor running T1-T4' not in logs.splitlines() or any(x in logs for x in ('Traceback (most recent call last)','ImportError','ModuleNotFoundError')):
+        fail('Telegram startup proof absent or failed')
+    telegram_import_preflight(inventory)
+    if systemd_properties(TELEGRAM_UNIT,*keys)!=props:fail('Telegram changed during preflight')
+    print('TELEGRAM_SHARED_RELOAD=PASS',props['MainPID'],flush=True)
+
+
 def verify_staging():
     stage_check()
     if not SHARED.is_dir() or SHARED.is_symlink():fail('Bad shared runtime')
@@ -381,6 +629,8 @@ def install_shared():
     if not SHARED.is_dir() or SHARED.is_symlink():fail('Unsafe shared runtime')
     # Do not touch the trading services. Shared Python modules are imported on next process start.
     dest=backup_dir('shared')
+    (dest/'attempt.json').write_text(json.dumps({'boot_id':boot_id(),
+        'monotonic_us':time.monotonic_ns()//1000})+'\n')
     from okx_install_manifest import load
     inventory=load(STAGE,json_read(STAGE/'engine_manifest.json'))
     to_copy=inventory['shared']
@@ -423,6 +673,9 @@ def install_shared():
         verify(SHARED,json_read(SHARED/'engine_manifest.json'),installed_shared=True)
         if not os.access(SHARED/'okxbot.py',os.X_OK):
             fail('Manager executable bit lost; shared install requires rollback')
+        receipt={'manifest_sha256':sha256(SHARED/'engine_manifest.json'),
+                 'boot_id':boot_id(),'monotonic_us':time.monotonic_ns()//1000}
+        (dest/'activation.json').write_text(json.dumps(receipt)+'\n')
     except BaseException:
         for name in old_exists:atomic_replace_file(dest/'old'/name,SHARED/name)
         for name in changed:
@@ -430,6 +683,46 @@ def install_shared():
         raise
     (dest/'complete').write_text('Shared runtime updated, no trading services changed\n')
     print('SHARED PASS:',len(to_copy),'files; changed:',len(changed),'retired:',len(retired),'backup:',dest)
+
+
+def install_funding_view():
+    """Synchronize the duplicate read-only Funding view; no Collector restart."""
+    stage_check()
+    if FUNDING_ROOT.is_symlink() or not FUNDING_ROOT.is_dir():fail('Unsafe Funding root')
+    from okx_install_manifest import load
+    inventory=load(STAGE,json_read(STAGE/'engine_manifest.json'))
+    old_pin=inventory.get('funding_view_previous_sha256')
+    import re
+    if not isinstance(old_pin,str) or not re.fullmatch(r'[0-9a-f]{64}',old_pin):
+        fail('No reviewed Funding view migration pin')
+    name='okx_funding_view.py'
+    if inventory['funding'].get(name)!=name:fail('Unexpected Funding view mapping')
+    for dest,src in inventory['funding'].items():
+        if dest!=name and sha256(check_file(FUNDING_ROOT/dest))!=sha256(check_file(STAGE/src)):
+            fail('Funding collector component drift: '+dest)
+    source=check_file(STAGE/name)
+    target=check_file(FUNDING_ROOT/name)
+    new_pin=sha256(source)
+    if sha256(check_file(SHARED/name))!=new_pin:fail('Shared Funding view not yet installed')
+    if sha256(target)==new_pin:
+        print('FUNDING_VIEW=PASS already current; no restart',flush=True);return
+    if sha256(target)!=old_pin:fail('Unrecognized installed Funding view')
+    import stat
+    mode=stat.S_IMODE(target.stat().st_mode)
+    if mode & 0o022:fail('Writable Funding view by non-owner')
+    backup=backup_dir('funding-view')
+    old=backup/'old.py';new=backup/'candidate.py'
+    shutil.copy2(target,old);shutil.copy2(source,new);new.chmod(mode)
+    if sha256(target)!=old_pin:fail('Funding view changed during installation')
+    try:
+        atomic_replace_file(new,target)
+        if sha256(target)!=new_pin or stat.S_IMODE(target.stat().st_mode)!=mode:
+            fail('Funding view postflight mismatch')
+    except BaseException:
+        atomic_replace_file(old,target)
+        raise
+    (backup/'complete').write_text('Funding view synchronized; no service restart\n')
+    print('FUNDING_VIEW=PASS backup:',backup,'no restart',flush=True)
 
 
 def telegram_shadow_plan(inventory):
@@ -725,7 +1018,7 @@ def upgrade_bot(bot, *, single_instance=False):
 def main():
     if os.geteuid()!=0:fail('Run as root on VPS')
     ap=argparse.ArgumentParser(description='Pinned ZIP, single-bot LIVE upgrade; no implicit restarts')
-    ap.add_argument('action',choices=('preflight','shared','telegram','bot','status'))
+    ap.add_argument('action',choices=('preflight','shared','funding-view','telegram','bot','status'))
     ap.add_argument('--bot',required=True,help='Explicit individual instance name (one only)')
     ap.add_argument('--package',type=Path,required=True,help='Pre-reviewed candidate ZIP')
     ap.add_argument('--stage',type=Path,required=True,help='Already unpacked identical ZIP contents')
@@ -769,6 +1062,13 @@ def main():
     fd=os.open(LOCK,os.O_CREAT|os.O_RDWR,0o600)
     try:
         fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        if args.action=='bot' and not args.confirm_live_stop:
+            fail('Refuse to stop trading bot without --confirm-live-stop')
+        if RELEASE_KIND=='engine' and args.action in ('preflight','shared','bot'):
+            # Attest ZIP/stage before interpreting any new migration requirement.
+            stage_check()
+            verify_quota_boot_barriers()
+            if args.action=='bot':verify_telegram_after_shared()
         if args.action=='preflight':
             verify_staging()
             if args.single_instance:
@@ -777,10 +1077,9 @@ def main():
                 stop_safety_readonly(root,json_read(root/'state/bot_state.json'))
                 print('SINGLE INSTANCE PREFLIGHT PASS; NO SHARED WRITES')
         elif args.action=='shared':install_shared()
+        elif args.action=='funding-view':install_funding_view()
         elif args.action=='telegram':install_telegram()
         elif args.action=='bot':
-            if not args.confirm_live_stop:
-                fail('Refuse to stop trading bot without --confirm-live-stop')
             upgrade_bot(args.bot,single_instance=args.single_instance)
         else:
             _,_,kv=unit_check(args.bot,need_active=False)

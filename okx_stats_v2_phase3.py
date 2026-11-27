@@ -14,10 +14,7 @@ from pathlib import Path
 import sqlite3
 import uuid
 
-from okx_stats_v2_contract import (
-    Drift, NotReady, TableSnapshot, SCHEMAS, stable_state, digest, json_compact,
-    component_orders, pnl_identity,
-)
+from okx_stats_v2_contract import Drift, NotReady, TableSnapshot, stable_state, json_compact, component_orders, pnl_identity
 from okx_stats_v2_money import (
     FrozenTotals, verified_frozen_chunk,
 )
@@ -370,7 +367,6 @@ class DurableStager:
         """Return bounded totals; check Decimal fields and checkpoint shape."""
         from okx_stats_v2_money import MONEY_FIELDS, COUNT_FIELDS
         from okx_stats_v2_contract import money
-        from decimal import Decimal
         t = FrozenTotals(now_ms=int(snapshot['as_of_ms']))
         t.money = {k: money(snapshot['money'][k]) for k in MONEY_FIELDS}
         t.counts = {k: int(snapshot['counts'][k]) for k in COUNT_FIELDS}
@@ -514,7 +510,6 @@ class DurableStager:
         events crossing the moving 24h boundary, not every event in the day.
         Retention deletes MUST occur strictly after this advance.
         """
-        from decimal import Decimal
         from okx_stats_v2_contract import money
         row=self.db.execute('SELECT as_of_ms,total FROM rolling_24h WHERE id=1').fetchone()
         if not row: raise Drift('Missing rolling 24h checkpoint')

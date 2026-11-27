@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.7.90 — 2026-11-27 UTC — Ephemeral governor and Reader cleanup
+
+- Remove synchronous fsync only from the common ephemeral quota/FIFO writer; preserve flock, paths, schema, shared quotas and durable trading state. Boot-time quarantine guards valid stale persisted quota; mixed legacy deployment requires two shared, verified prefix/Reader early-boot barriers (no per-instance drop-ins).
+- Clean up Reader pacing names/diagnostics, align recovery template/default with the verified LIVE priority configuration and explicit ACK. Keep legacy mode pending separate inventory.
+- Remove dead API wrappers, retired prototypes/tests and reviewed unused imports/locals. Preserve independent FULL oracle, current production financial suites and all published engine records.
+- Manager checks pinned engine/dependency bytes; controlling PTY regression. R6 requires structured data for current and historical StatsWorker producers independently of the consumer version. Telegram local modules, trading policy and limits unchanged. G5 requires proof of Telegram reload after shared install before bot upgrade. Final PANIC Funding report deadline 75→90 s; synchronize the read-only Funding view without Collector restart; settlement/timer unchanged.
+
+- OFFLINE: 1003 checks; independent per-file 111/111. LIVE: boot barriers, NES canary, Reader, sequential fleet (BTC last), 9/9 post-start financial snapshots and G5 passed. 24h performance comparison pending. See [release notes](RELEASE_NOTES_V0790.md).
+
 ## v0.7.89 — 2026-11-27 UTC — Unified financial consumers (engine 0.7.88 unchanged)
 
 - R6/A8/A9: one local snapshot read, shared structured financial/anchor validation in Manager and both Telegram reports.

@@ -167,6 +167,34 @@ class UnifiedFinance(unittest.TestCase):
                 self.assertIn('PnL: н/д',views.status_one('dood',self.root))
                 with self.assertRaises((OSError,ValueError)):self.compact()
         self.assertEqual(foreign.read_text(),raw)
+    def test_mixed_engine_rollout_never_downgrades_structured_producer(self):
+        manifest=json.loads((Path(__file__).parents[1]/'engine_manifest.json').read_text())
+        current=manifest['current_version']
+        previous=max((v for v,e in manifest['engines'].items()
+            if v!=current and 'okx_stats_v2_production.py' in e.get('dependencies',[])),
+            key=lambda v:tuple(map(int,v.split('.'))))
+        self.stats.pop('performance')
+        self.stats.pop('stats_v2',None)
+        for consumer,producer in ((previous,current),(current,previous)):
+            with self.subTest(consumer=consumer,producer=producer), \
+                 patch('okx_version.ENGINE_VERSION',consumer):
+                self.cfg['version']=producer
+                self.stats['bot_version']=producer
+                (self.root/'config.json').write_text(json.dumps(self.cfg));self.write()
+                self.assertTrue(ui.requires_structured_snapshot(self.cfg,self.stats))
+                self.assertIn('PnL: н/д',self.manager())
+                full,sink=self.full()
+                self.assertIn('PnL: н/д',full)
+                self.assertNotIn('$999999',full)
+                self.assertEqual(sink,[])
+                with self.assertRaises((OSError,ValueError)):self.compact()
+        # Known pre-StatsWorker historical producers keep their legacy path.
+        old=next(v for v,e in manifest['engines'].items()
+            if 'okx_stats_v2_production.py' not in e.get('dependencies',[]))
+        self.assertFalse(ui.requires_structured_snapshot({'version':old},{'bot_version':old}))
+        with patch.object(ui,'__file__',str(self.root/'missing'/'okx_stats_ui.py')):
+            self.assertTrue(ui.requires_structured_snapshot({'version':old},{}))
+
     def test_v2_missing_atomic_anchor_is_not_rescued_by_legacy(self):
         self.stats['stats_v2']={'generation':1}
         self.stats.pop('financial_anchor');self.write()

@@ -50,6 +50,7 @@ python3 -B tests/test_telegram_terminal_health.py
 # Reader tests run as isolated processes to prevent async/multiprocess test
 # cleanup from leaking between unrelated modules. No checks are skipped.
 python3 -B -m unittest tests.test_position_reader -q
+python3 -B -m unittest tests.test_ephemeral_governor_v0790 -v
 python3 -B -m unittest tests.test_position_reader_integration -q
 python3 -B -m unittest tests.test_reader_manager_cap -q
 python3 -B -m unittest tests.test_position_priority_rc4 -q

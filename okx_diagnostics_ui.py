@@ -2,13 +2,12 @@
 
 No trading imports, API calls, file writes, or guesses about missing telemetry.
 """
-import json
 import math
 from collections import Counter
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from okx_latency_ui import _records, _percentile
-from okx_latency_rollup import distribution, fresh_rows, read_rollups
+from okx_latency_rollup import distribution, read_rollups
 from okx_pnl_diagnostics import inspect as pnl_inspect
 
 

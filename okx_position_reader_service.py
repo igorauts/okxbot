@@ -88,9 +88,8 @@ class DiagPriorityPositionsFIFO(PriorityPositionsFIFO):
         finally:
             record = getattr(self._wait_trace, 'record', None)
             if record is not None:
-                # Original _write includes truncate, write and fsync; we never
-                # call it an isolated fsync measurement.
-                record['file_write_including_fsync_ms'] += (time.monotonic_ns() - started) / 1e6
+                # Aggregate truncate/write duration; no synchronous disk flush.
+                record['file_write_ms'] += (time.monotonic_ns() - started) / 1e6
                 record['write_calls'] += 1
 
     def _sort_queue(self, queue, now):
@@ -111,7 +110,7 @@ class DiagPriorityPositionsFIFO(PriorityPositionsFIFO):
             quota_full_visits=0, quota_advised_max_ms=0.0,
             queue_max_ahead=0, queue_not_head_visits=0,
             read_calls=0, file_read_ms=0.0, write_calls=0,
-            file_write_including_fsync_ms=0.0, recovery_count=0,
+            file_write_ms=0.0, recovery_count=0,
             gate_errors=0)
 
     def trace_finish(self):
@@ -119,9 +118,8 @@ class DiagPriorityPositionsFIFO(PriorityPositionsFIFO):
         self._wait_trace.record = None
         return record
 
-# OKX_READER_PACING_230_PLUS_ONE_BEGIN
-class _ReaderPacer230PlusOne:
-    """Reader-local two-permit bucket, 1/230ms; existing account gate remains authoritative."""
+class _ReaderPacer:
+    """Reader-local two-permit bucket; 260 ms refill, account gate remains authoritative."""
     GAP = 0.260
     CAPACITY = 2.0
     def __init__(self):
@@ -145,7 +143,6 @@ class _ReaderPacer230PlusOne:
                 return
             delayed = True
             await asyncio.sleep(min(.050, (1.0-self._tokens)*self.GAP))
-# OKX_READER_PACING_230_PLUS_ONE_END
 class SharedOriginalQuota:
     """Exactly ONE account quota file and FIFO queue in either scheduling mode.
 
@@ -156,7 +153,7 @@ class SharedOriginalQuota:
     have been verified as priority-aware. Neither mode creates a second quota.
     """
     def __init__(self,path, *, scheduling='mixed-fifo'):
-        self._reader_pacer = _ReaderPacer230PlusOne()
+        self._reader_pacer = _ReaderPacer()
         if scheduling not in ('mixed-fifo','priority'):
             raise ValueError('Invalid Reader FIFO scheduling mode')
         self.scheduling=scheduling
@@ -209,8 +206,8 @@ class SharedOriginalQuota:
                         'flock_ms': round(detail.get('flock_ms',0),2),
                         'lock_calls': detail.get('lock_calls'),
                         'file_read_ms': round(detail.get('file_read_ms',0),2),
-                        'file_write_including_fsync_ms':
-                            round(detail.get('file_write_including_fsync_ms',0),2),
+                        'file_write_ms':
+                            round(detail.get('file_write_ms',0),2),
                         'recovery_count': detail.get('recovery_count'),
                         'gate_errors': detail.get('gate_errors')}
                     try:
@@ -469,8 +466,8 @@ async def main():
     p.add_argument('--socket',required=True)
     p.add_argument('--read-only-ack',required=True,choices=['POSITIONS_GET_ONLY'])
     p.add_argument('--quota-scheduling', choices=['mixed-fifo','priority'],
-                   default='mixed-fifo',
-                   help='mixed-fifo is mandatory during rolling upgrade with old engines')
+                   default='priority',
+                   help='priority requires verified fleet ACK; use mixed-fifo explicitly for legacy migration')
     p.add_argument('--priority-ready-ack',choices=['ALL_BOTS_PRIORITY_AWARE'])
     args=p.parse_args()
     if (args.quota_scheduling=='priority' and

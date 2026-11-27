@@ -84,6 +84,15 @@ class EnginePatchTest(unittest.TestCase):
         # Verify every changed candidate hunk against the reviewed digest, undo
         # only those exact hunks, and retain the historical oracle for all else.
         import gzip, hashlib
+        # v0.7.90: reverse only reviewed unused imports and dangling comment. The exact
+        # previous published engine digest must be recovered before any older
+        # differential contract runs. No permission to change trading paths.
+        v90_lines=new.splitlines(keepends=True)
+        for j1,j2,old_text,digest in reversed([(7, 7, 'import http.client\nimport ssl\nimport socket\n', 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'), (13, 13, 'import shutil\n', 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'), (16, 16, 'import urllib.error\nimport urllib.parse\nimport urllib.request\n', 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'), (17, 18, 'from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP, ROUND_CEILING\n', '1bee5b0579bd99b8d5543689251f6ea6b887778a5774fa633e55fd7fadd142aa'), (23, 24, 'from okx_version import ENGINE_VERSION as VER, STATE_SCHEMA\n', 'b7c6cf53b371bcc1aa9a530e64ea2499c438e33510b52312f16f45e98d9ba448'), (25, 26, 'from okx_contracts import base_coin, validate_spec\n', 'a60a560a15dd8dc4e8d9035b309e3581c2c6b28ec682f53a394f0e3cc5506195'), (1208, 1208, '\n\n        # verify_existing already checked tracked cycles.\n', 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'), (4293, 4294, '    from okx_idle_reconcile import (audit_jitter_seconds, aligned_idle_audit_wait,\n                                    wait_for_idle_reconcile, idle_deadline, wait_error_backoff,\n                                    b1_shadow_probe)\n', '45aaf377656798af50ccffa40ecbee352b9d802d292fef0a4fd31c6e91109b3c')]):
+            self.assertEqual(hashlib.sha256(''.join(v90_lines[j1:j2]).encode()).hexdigest(),digest)
+            v90_lines[j1:j2]=old_text.splitlines(keepends=True)
+        new=''.join(v90_lines)
+        self.assertEqual(hashlib.sha256(new.encode()).hexdigest(),'cf499d9dd0e859e3bd467ca90a484ef657f06f119a7acb6286abe01404fa9b15')
         # v0.7.88: reverse exact dead-code-only hunks before the original checks.
         v85=gzip.decompress((DIR/'okx_bot_v0785_baseline.py.gz').read_bytes())
         self.assertEqual(hashlib.sha256(v85).hexdigest(), 'c68f370655cb7c59a0741d3089c6a5a17f87e3e67e7f6e96f9481c13dc1302cb')

@@ -2,6 +2,13 @@
 import ast
 import io
 import pathlib
+import errno
+import os
+import pty
+import select
+import signal
+import sys
+import time
 import unittest
 from unittest import mock
 import okxbot as m
@@ -55,6 +62,43 @@ class Confirmation(unittest.TestCase):
         with (mock.patch.object(m.sys,'stdin',io.StringIO()),
               mock.patch('builtins.input',return_value='NOT START')):
             self.assertFalse(m._read_start_confirmation('mmt-test'))
+
+    def test_real_controlling_pty_exact_utf8_and_invalid_bytes(self):
+        for raw, expected in ((b'START mmt-test\n',True),
+                              (b'START other\n',False),
+                              (b'\xd1START mmt-test\n',False),
+                              (b'START mmt-test\xd1\n',False)):
+            with self.subTest(raw=raw):
+                pid,fd=pty.fork()
+                if pid==0:
+                    os.chdir(ROOT)
+                    os.execv(sys.executable,[sys.executable,'-B','-u','-c',
+                        "import okxbot; print('RESULT='+str(okxbot._read_start_confirmation('mmt-test')),flush=True)"])
+                done=False
+                try:
+                    output=bytearray(); sent=False;deadline=time.monotonic()+8
+                    while time.monotonic()<deadline:
+                        readable,_,_=select.select([fd],[],[],.1)
+                        if readable:
+                            try: chunk=os.read(fd,4096)
+                            except OSError as exc:
+                                if exc.errno==errno.EIO:break
+                                raise
+                            if not chunk:break
+                            output.extend(chunk)
+                            if not sent and b'START mmt-test: ' in output:
+                                os.write(fd,raw);sent=True
+                        if b'RESULT=' in output:break
+                    self.assertTrue(sent,bytes(output))
+                    self.assertIn(b'RESULT='+str(expected).encode(),output)
+                    _,status=os.waitpid(pid,0);done=True
+                    self.assertEqual(os.waitstatus_to_exitcode(status),0)
+                finally:
+                    os.close(fd)
+                    if not done:
+                        try:os.kill(pid,signal.SIGKILL)
+                        except ProcessLookupError:pass
+                        os.waitpid(pid,0)
 
     def test_start_uses_helper_after_audit_before_second_reader_gate(self):
         tree=ast.parse((ROOT/'okxbot.py').read_text())

@@ -14,8 +14,8 @@ import unittest
 from pathlib import Path
 
 from okx_stats_v2_contract import (
-    Drift, TableSnapshot, connected_components, freeze_readiness,
-    pnl_identity, source_snapshots,
+    Drift, TableSnapshot, freeze_readiness,
+    pnl_identity, stable_state,
 )
 
 
@@ -46,37 +46,48 @@ class V2Contracts(unittest.TestCase):
             else:
                 db.execute('INSERT INTO fills VALUES (?,?,?,?)', (params['ordId'],params['billId'],params['fillSz'],json.dumps(params)))
 
+    def cursors(self, prior=None):
+        # Exercise the active TableSnapshot cursor directly, not a retired
+        # production wrapper. Each SQLite source is opened read-only.
+        out = {}
+        for kind, filename in (('cycles','cycles.sqlite'),
+                               ('accounted','pnl.sqlite'),
+                               ('fills','fills.sqlite')):
+            with TableSnapshot(self.root/'state'/filename, kind) as source:
+                out[kind] = source.incremental_cursor((prior or {}).get(kind))
+        return out
+
     def test_append_increment_only(self):
-        first = source_snapshots(self.root)['cursors']
+        first = self.cursors()
         self.add('cycles', {'cycleId':'A','state':'CLOSED'})
-        second = source_snapshots(self.root, first)['cursors']
+        second = self.cursors(first)
         self.assertEqual(second['cycles']['new'], 1)
         self.assertEqual(second['fills']['new'], 0)
-        third = source_snapshots(self.root, second)['cursors']
+        third = self.cursors(second)
         self.assertEqual(third['cycles']['new'], 0)
         self.assertEqual(third['cycles']['chain_sha256'], second['cycles']['chain_sha256'])
 
     def test_anchor_change_fails_closed(self):
         self.add('cycles', {'cycleId':'A','state':'CLOSED'})
-        prev = source_snapshots(self.root)['cursors']
+        prev = self.cursors()
         with write_db(self.root/'state/cycles.sqlite') as db:
             db.execute('UPDATE cycles SET data=? WHERE id=?', ('{"cycleId":"A","state":"EXITED"}', 'A'))
         with self.assertRaisesRegex(Drift, 'anchor'):
-            source_snapshots(self.root, prev)
+            self.cursors(prev)
 
     def test_delete_and_append_detected_by_count(self):
         self.add('cycles', {'cycleId':'A','state':'CLOSED'})
         self.add('cycles', {'cycleId':'B','state':'CLOSED'})
-        prev = source_snapshots(self.root)['cursors']
+        prev = self.cursors()
         with write_db(self.root/'state/cycles.sqlite') as db:
             db.execute('DELETE FROM cycles WHERE id=?', ('A',))
             db.execute('INSERT INTO cycles VALUES (?,?)', ('C','{"cycleId":"C"}'))
         with self.assertRaisesRegex(Drift, 'count'):
-            source_snapshots(self.root, prev)
+            self.cursors(prev)
 
     def test_swapped_db_detected_by_inode(self):
         self.add('cycles', {'cycleId':'A','state':'CLOSED'})
-        prev = source_snapshots(self.root)['cursors']
+        prev = self.cursors()
         old = self.root/'state/cycles.sqlite'
         replacement = self.root/'state/cycles.new'
         with write_db(replacement) as db:
@@ -84,7 +95,7 @@ class V2Contracts(unittest.TestCase):
             db.execute('INSERT INTO cycles VALUES (?,?)', ('A','{"cycleId":"A"}'))
         replacement.replace(old)
         with self.assertRaisesRegex(Drift, 'identity'):
-            source_snapshots(self.root, prev)
+            self.cursors(prev)
 
     def test_future_state_wins(self):
         c = {'cycleId':'A','state':'CLOSED','ordId':'buyA','tpOrdId':'sellA',
@@ -112,7 +123,6 @@ class V2Contracts(unittest.TestCase):
              'tpOrders':[{'ordId':'marketM','filled':'1','source':'aggregate_exit','aggregatePlan':plan}]}
         b = {'cycleId':'B','state':'CLOSED','ordId':'buyB','filledBuy':'1','filledTP':'1',
              'tpOrders':[{'ordId':'marketM','filled':'1','source':'aggregate_exit','aggregatePlan':plan}]}
-        self.assertEqual(len(connected_components([a,b])), 1)
         self.assertEqual(freeze_readiness([a], {'A'}, set(), {}, {})[1], 'accounted_missing_or_wrong_kind')
         ledger = {'buyA:marketM':{'kind':'CLOSED','net':'1'},'buyB:marketM':{'kind':'CLOSED','net':'1'}}
         self.assertEqual(freeze_readiness([a], {'A'}, set(), {}, ledger)[1], 'aggregate_plan_incomplete')
@@ -133,7 +143,8 @@ class V2Contracts(unittest.TestCase):
 
     def test_no_source_writes(self):
         before = [p.stat().st_mtime_ns for p in sorted((self.root/'state').iterdir())]
-        source_snapshots(self.root)
+        stable_state(self.root/'state/bot_state.json')
+        self.cursors()
         after = [p.stat().st_mtime_ns for p in sorted((self.root/'state').iterdir())]
         self.assertEqual(before, after)
 

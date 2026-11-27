@@ -6,7 +6,7 @@ and the independently calculated 10-minute stats publish asynchronously.
 import json
 import sqlite3
 import time
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from pathlib import Path
 
 

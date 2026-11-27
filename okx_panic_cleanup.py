@@ -5,7 +5,6 @@ import json
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 from okx_paths import state_file
 from okx_version import STATE_SCHEMA

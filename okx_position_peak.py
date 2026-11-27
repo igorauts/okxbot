@@ -6,7 +6,6 @@ local fills archive; if unavailable, return a visible unavailable status.
 """
 from __future__ import annotations
 import json
-import math
 import os
 import sqlite3
 import tempfile

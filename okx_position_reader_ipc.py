@@ -229,30 +229,3 @@ class ReaderIPCServer:
                 await writer.wait_closed()
             except OSError:
                 pass
-
-
-async def ipc_request(socket_path: Path, instrument: str, priority: Priority,
-                      *, not_before_ns: int | None = None, trace_id: str = "",
-                      account_uid: str) -> dict:
-    if not_before_ns is None:
-        not_before_ns = __import__('time').monotonic_ns()
-    reader, writer = await asyncio.wait_for(
-        asyncio.open_unix_connection(str(socket_path)), 3.0)
-    try:
-        message = {
-            "schema": WIRE_SCHEMA, "op": "positions", "instrument": instrument,
-            "priority": int(priority), "not_before_mono_ns": not_before_ns,
-            "trace_id": trace_id[:128], "account_uid": account_uid,
-        }
-        writer.write((json.dumps(message, separators=(',', ':'))+'\n').encode())
-        await writer.drain()
-        response = await asyncio.wait_for(reader.readline(), 5.0)
-        if not response or len(response) > 64*1024:
-            raise ReaderError('IPC response missing/oversized')
-        decoded = json.loads(response)
-        if not isinstance(decoded, dict) or decoded.get('ok') is not True:
-            raise ReaderError('IPC request rejected')
-        return decoded['data']
-    finally:
-        writer.close()
-        await writer.wait_closed()

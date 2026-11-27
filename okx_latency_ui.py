@@ -3,7 +3,7 @@ import json
 import math
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from okx_latency_rollup import distribution, fresh_rows, read_rollups
+from okx_latency_rollup import distribution, read_rollups
 
 
 def _percentile(xs,p):

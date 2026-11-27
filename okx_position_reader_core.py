@@ -79,12 +79,6 @@ def validate_registrations(entries: list[Registration]) -> tuple[Registration, .
     return tuple(active)
 
 
-def assert_can_create(entries: list[Registration], proposed: Registration) -> None:
-    if not isinstance(proposed, Registration) or proposed.verified_archived:
-        raise RegistryError('Proposed bot is invalid/archived')
-    validate_registrations(entries + [proposed])
-
-
 class Quota(Protocol):
     async def take(self, priority_supplier) -> None: ...
 

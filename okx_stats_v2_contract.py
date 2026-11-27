@@ -5,10 +5,8 @@ Do not publish incremental statistics from it. Python standard library only.
 """
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
-import os
 from pathlib import Path
 import sqlite3
 from decimal import Decimal
@@ -171,28 +169,6 @@ class TableSnapshot:
         }
 
 
-def source_snapshots(root: Path, prior: dict | None = None, consumers=None) -> dict:
-    """Order: state -> cycles -> accounted -> fills. All source reads read-only.
-
-    Sources do NOT share an atomic transaction; state must be revalidated by
-    the caller before it authorizes checkpoint/publishing.
-    """
-    root = Path(root)
-    state, identity = stable_state(root / 'state' / 'bot_state.json')
-    observed = {}
-    paths = {
-        'cycles': root / 'state' / 'cycles.sqlite',
-        'accounted': root / 'state' / 'pnl.sqlite',
-        'fills': root / 'state' / 'fills.sqlite',
-    }
-    for kind in ('cycles', 'accounted', 'fills'):
-        with TableSnapshot(paths[kind], kind) as snapshot:
-            observed[kind] = snapshot.incremental_cursor(
-                (prior or {}).get(kind), (consumers or {}).get(kind)
-            )
-    return {'state': state, 'state_identity': identity, 'cursors': observed}
-
-
 def pnl_identity(cycle: dict) -> str | None:
     """Matches PnLLedger.identity in published v0.7.61."""
     buy = cycle.get('ordId')
@@ -212,50 +188,6 @@ def component_orders(cycle: dict) -> set[str]:
     ids = {str(cycle.get('ordId') or ''), str(cycle.get('tpOrdId') or '')}
     ids.update(str(leg.get('ordId') or '') for leg in cycle.get('tpOrders', []))
     return ids - {''}
-
-
-def connected_components(cycles: list[dict]) -> list[list[dict]]:
-    """Input is ONLY the new/deferred/hot bounded workset, never all history."""
-    owner = {}
-    parent = list(range(len(cycles)))
-
-    def root(i):
-        while parent[i] != i:
-            parent[i] = parent[parent[i]]
-            i = parent[i]
-        return i
-
-    def join(i, j):
-        pi, pj = root(i), root(j)
-        if pi != pj:
-            parent[pi] = pj
-
-    by_id = {}
-    for i, cycle in enumerate(cycles):
-        cid = str(cycle.get('cycleId') or '')
-        if not cid or cid in by_id:
-            raise Drift('Duplicate/missing cycleId in component workset')
-        by_id[cid] = i
-        for oid in component_orders(cycle):
-            if oid in owner:
-                join(i, owner[oid])
-            else:
-                owner[oid] = i
-    for i, cycle in enumerate(cycles):
-        for leg in cycle.get('tpOrders', []):
-            if leg.get('source') != 'aggregate_exit':
-                continue
-            plan = leg.get('aggregatePlan')
-            if not isinstance(plan, list) or not plan:
-                raise Drift('Missing aggregate MARKET plan')
-            for item in plan:
-                target = str(item.get('cycleId') or '')
-                if target in by_id:
-                    join(i, by_id[target])
-    groups = {}
-    for i, cycle in enumerate(cycles):
-        groups.setdefault(root(i), []).append(cycle)
-    return list(groups.values())
 
 
 def freeze_readiness(component: list[dict], archive_ids: set[str], state_ids: set[str],

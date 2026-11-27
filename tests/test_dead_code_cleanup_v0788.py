@@ -67,10 +67,24 @@ class SpecializeNoneCaches(ast.NodeTransformer):
         if any(isinstance(t,ast.Name) and t.id in ('cached_past24','finance_mode') for t in n.targets):return None
         return self.generic_visit(n)
 
+
+class RemoveApprovedUnusedImports(ast.NodeTransformer):
+    """Only the individually reviewed v0.7.90 import bindings may disappear."""
+    plain={'http.client','ssl','socket','shutil','urllib.error','urllib.parse','urllib.request'}
+    by_module={'decimal':{'ROUND_FLOOR','ROUND_CEILING'},
+               'okx_version':{'STATE_SCHEMA'},'okx_contracts':{'validate_spec'},
+               'okx_idle_reconcile':{'aligned_idle_audit_wait'}}
+    def visit_Import(self,n):
+        n.names=[a for a in n.names if a.name not in self.plain]
+        return n if n.names else None
+    def visit_ImportFrom(self,n):
+        n.names=[a for a in n.names if a.name not in self.by_module.get(n.module,set())]
+        return n if n.names else None
+
 class CleanupContracts(unittest.TestCase):
     def test_only_approved_engine_nodes_changed(self):
         self.assertEqual(digest(OLD_ENGINE),OLD_SHA)
-        before=ast.parse(OLD_ENGINE); after=ast.parse((ROOT/'okx_bot.py').read_bytes())
+        before=RemoveApprovedUnusedImports().visit(ast.parse(OLD_ENGINE)); after=ast.parse((ROOT/'okx_bot.py').read_bytes())
         def keep(n):return not(isinstance(n,ast.FunctionDef) and n.name in REMOVED_FUNCTIONS|{'print_full_stats'})
         self.assertEqual([dump(n) for n in before.body if keep(n)],[dump(n) for n in after.body if keep(n)])
         self.assertFalse(any(isinstance(n,ast.Name) and n.id in REMOVED_FUNCTIONS for n in ast.walk(after)))
@@ -89,43 +103,55 @@ class CleanupContracts(unittest.TestCase):
             for node in ast.walk(ast.parse(path.read_bytes())):
                 mods=([n.name for n in node.names] if isinstance(node,ast.Import) else [node.module] if isinstance(node,ast.ImportFrom) and node.module else [])
                 for module in mods:self.assertNotIn(module.split('.')[0]+'.py',REMOVED,(path,module))
-    def test_retired_prototypes_are_exact_historical_bytes(self):
+    def test_retired_prototype_pins_are_frozen_in_history(self):
         old=MANIFEST['engines'][old_version()]
         for name in PROTOTYPES:
-            h=digest((ROOT/'historical'/name).read_bytes())
-            self.assertEqual(h,old['dependency_sha256'][name]);self.assertEqual(h,INSTALL['retire_shared'][name])
-    def test_current_dependency_changes_are_only_identity_and_retirement(self):
-        old=MANIFEST['engines'][old_version()];new=MANIFEST['engines'][MANIFEST['current_version']]
+            self.assertFalse((ROOT/'historical'/name).exists())
+            self.assertEqual(old['dependency_sha256'][name],INSTALL['retire_shared'][name])
+
+    def test_published_0788_dependency_changes_were_only_identity_and_retirement(self):
+        old=MANIFEST['engines'][old_version()];new=MANIFEST['engines']['0.7.88']
         self.assertEqual(set(old['dependencies'])-set(new['dependencies']),PROTOTYPES)
         self.assertEqual(set(new['dependencies'])-set(old['dependencies']),set())
         for name in new['dependencies']:
             if name!='okx_version.py':self.assertEqual(new['dependency_sha256'][name],old['dependency_sha256'][name],name)
+
     def test_real_canary_preflight_allows_exact_retired_set_only(self):
-        oldid=old_version();newid=MANIFEST['current_version'];old=MANIFEST['engines'][oldid]
+        # Test the still-active installer contract with synthetic bytes rather
+        # than shipping obsolete executable prototypes as test dependencies.
+        oldid='1.0.0';newid='1.0.1'
         with tempfile.TemporaryDirectory() as td:
-            root=Path(td)
-            for name in old['dependencies']:
-                if name in PROTOTYPES:shutil.copyfile(ROOT/'historical'/name,root/name)
-                elif name=='okx_version.py':
-                    data=(ROOT/name).read_text().replace("RELEASE_VERSION = %r"%newid,"RELEASE_VERSION = %r"%oldid).replace("ENGINE_VERSION = %r"%newid,"ENGINE_VERSION = %r"%oldid)
-                    (root/name).write_text(data)
-                else:shutil.copyfile(ROOT/name,root/name)
-                self.assertEqual(digest((root/name).read_bytes()),old['dependency_sha256'][name])
-            with patch.object(upgrade,'STAGE',ROOT),patch.object(upgrade,'OLD_VERSION',oldid),patch.object(upgrade,'NEW_VERSION',newid):
-                self.assertTrue(upgrade.verify_single_instance_sources(root))
-                invalid=copy.deepcopy(INSTALL);invalid['retire_shared'].pop(sorted(PROTOTYPES)[0])
-                with patch('okx_install_manifest.load',return_value=invalid):
+            root=Path(td)/'bot';root.mkdir();stage=Path(td)/'stage';stage.mkdir()
+            oldfiles={'okx_version.py':b'old identity','retired.py':b'old retired','keep.py':b'same'}
+            newfiles={'okx_version.py':b'new identity','keep.py':b'same','okx_bot.py':b'new engine'}
+            for name,raw in oldfiles.items():(root/name).write_bytes(raw)
+            for name,raw in newfiles.items():(stage/name).write_bytes(raw)
+            oldpins={n:digest(raw) for n,raw in oldfiles.items()}
+            newpins={n:digest(raw) for n,raw in newfiles.items() if n!='okx_bot.py'}
+            manifest={'current_version':newid,'engines':{
+                oldid:{'dependencies':list(oldpins),'dependency_sha256':oldpins},
+                newid:{'file':'okx_bot.py','sha256':digest(newfiles['okx_bot.py']),
+                       'dependencies':list(newpins),'dependency_sha256':newpins}},
+                'source_modules_sha256':{n:digest(raw) for n,raw in newfiles.items()}}
+            (stage/'engine_manifest.json').write_text(json.dumps(manifest))
+            with patch.object(upgrade,'STAGE',stage),patch.object(upgrade,'OLD_VERSION',oldid),patch.object(upgrade,'NEW_VERSION',newid):
+                with patch('okx_install_manifest.load',return_value={'retire_shared':{'retired.py':oldpins['retired.py']}}):
+                    self.assertTrue(upgrade.verify_single_instance_sources(root))
+                    (root/'retired.py').write_text('tampered')
+                    with self.assertRaisesRegex(RuntimeError,'Installed dependency drift'):upgrade.verify_single_instance_sources(root)
+                (root/'retired.py').write_bytes(oldfiles['retired.py'])
+                with patch('okx_install_manifest.load',return_value={'retire_shared':{}}):
                     with self.assertRaisesRegex(RuntimeError,'removal not pinned'):upgrade.verify_single_instance_sources(root)
-                (root/sorted(PROTOTYPES)[0]).write_text('tampered')
-                with self.assertRaisesRegex(RuntimeError,'Installed dependency drift'):upgrade.verify_single_instance_sources(root)
+
     def test_shared_retirement_does_not_touch_unrecognized_bytes(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td)/'shared';root.mkdir();backup=Path(td)/'backup';backup.mkdir()
             names=sorted(PROTOTYPES); exact=names[0];unknown=names[1]
-            shutil.copyfile(ROOT/'historical'/exact,root/exact);(root/unknown).write_text('operator custom')
-            with patch.object(upgrade,'STAGE',ROOT),patch.object(upgrade,'SHARED',root),patch.object(upgrade,'stage_check'),patch.object(upgrade,'backup_dir',return_value=backup),patch.object(upgrade,'run',side_effect=AssertionError('systemd forbidden')):
+            old=b'known synthetic retired bytes';(root/exact).write_bytes(old);(root/unknown).write_text('operator custom')
+            inventory=copy.deepcopy(INSTALL);inventory['retire_shared'][exact]=digest(old)
+            with patch.object(upgrade,'STAGE',ROOT),patch.object(upgrade,'SHARED',root),patch.object(upgrade,'stage_check'),patch.object(upgrade,'backup_dir',return_value=backup),patch.object(upgrade,'run',side_effect=AssertionError('systemd forbidden')),patch('okx_install_manifest.load',return_value=inventory):
                 upgrade.install_shared()
             self.assertFalse((root/exact).exists());self.assertEqual((root/unknown).read_text(),'operator custom')
-            self.assertEqual(digest((backup/'old'/exact).read_bytes()),INSTALL['retire_shared'][exact])
+            self.assertEqual((backup/'old'/exact).read_bytes(),old)
 
 if __name__=='__main__':unittest.main()

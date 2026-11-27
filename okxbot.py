@@ -28,6 +28,7 @@ from okx_archive_reader import state_file
 from okx_version import ENGINE_VERSION, STATE_SCHEMA
 from okx_manager_version import RELEASE_VERSION, validate_manager_version
 from okx_source_attestation import verify_bundle, verify_instance
+from okx_position_reader_core import MAX_ACCOUNT_BOTS
 
 import okx_setup as wizard
 from okx_observers import provision_observers
@@ -379,7 +380,7 @@ def require_account_capacity(entries, *, proposed_instrument=None, proposed_name
         if proposed_instrument in instruments:
             raise RuntimeError('Only one nonterminal bot per NET instrument')
         active.append(proposed_name or proposed_instrument)
-    if len(active)>10:
+    if len(active)>MAX_ACCOUNT_BOTS:
         raise RuntimeError('Account limit: maximum ten nonterminal bots')
     return len(active)
 
@@ -578,7 +579,7 @@ def cmd_new(env_file):
     entries = load_registry()
     require_account_capacity(entries)  # includes malformed registry fail-closed
     if sum(not instance_terminal(e) or service_running(unit_name(e))
-           for e in entries.values())>=10:
+           for e in entries.values())>=MAX_ACCOUNT_BOTS:
         raise RuntimeError('Account limit: maximum ten nonterminal bots')
     env, raw = validated_newbot_env(env_file)
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
@@ -1057,7 +1058,6 @@ def cmd_panic_all():
         raise RuntimeError('Состав ботов/PID/режим изменился; ни одной команды не отправлено')
     sent=[];failed=[]
     from okx_panic_all import survey
-    expected_names={row[0] for row in plan}
     for name,instrument,service,pid,mode in plan:
         try:
             # Verify the live universe again, but account for previously

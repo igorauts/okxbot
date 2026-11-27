@@ -3,8 +3,8 @@
     "funding/okx_funding_backup.py": "f02b43e1d04fd2ebabbc2d9224733d17ce87e18f8ebed6f1929a800d8c59d52c",
     "funding/okx_funding_collector.py": "7c56f0baf2482eb07a6330ad9d43b5ea180a68a09297a55135cdcb060758a0c0",
     "okx_funding_ledger.py": "0ba1df641aadab6c503b3f3fac9fa13142e974974dfb925861ad9a0e5a0c17a2",
-    "okx_funding_view.py": "57adf0b27695cd632e03e95887e3badea71fb3aebca2bd7353f09cbb9797ea6b",
-    "okx_position_reader_service.py": "86c525a77a101d09a0818954ac3fef4d2622778377c0449eb5da4acb854913e5",
+    "okx_funding_view.py": "70841848cb5d099034227b5c46b9a8f6d91d5ca95bd23697e5b6a0b4f9598b6f",
+    "okx_position_reader_service.py": "de243d26720730a6f3965f1ec8f8b4451af9b9969ecf8f12f57be3fe173a6d47",
     "okx_position_reader_watchdog.py": "e504f60c01575327be521185d20d4dfc72bffbdca8151ffab78354cd80852ee6"
   },
   "engine": [
@@ -33,13 +33,14 @@
     "okx_tp_telemetry.py",
     "okx_version.py"
   ],
-  "engine_version": "0.7.88",
+  "engine_version": "0.7.90",
   "funding": {
     "okx_funding_backup.py": "funding/okx_funding_backup.py",
     "okx_funding_collector.py": "funding/okx_funding_collector.py",
     "okx_funding_ledger.py": "okx_funding_ledger.py",
     "okx_funding_view.py": "okx_funding_view.py"
   },
+  "funding_view_previous_sha256": "57adf0b27695cd632e03e95887e3badea71fb3aebca2bd7353f09cbb9797ea6b",
   "operator_paths_preserved": [
     "collect_okx_diagnostics_24h.py",
     "okx_tp_trace_report.py",
@@ -51,7 +52,7 @@
     "okx_position_reader_service.py": "okx_position_reader_service.py",
     "okx_position_reader_watchdog.py": "okx_position_reader_watchdog.py"
   },
-  "release_version": "0.7.89",
+  "release_version": "0.7.90",
   "retire_shared": {
     "BUNDLE_SHA256.json": "ee3b19907ef9810f75f3a05480f4a90b2416a733b0cf264c0c02b84fa5ef20fa",
     "build_release_zip.py": "51dd3cb3a35c2797a8bc526ffc793a4c72f2c0e5bb73b42016ea572b3042d6ac",
@@ -69,6 +70,15 @@
     "okx_stats_v2_checkpoint.py": "c9ba79ba5872e198a90942b3d8b2b5d935b24743486a222ec77f777c54de54e6",
     "okx_stats_v2_phase4.py": "e59739225e99affcbf6565b118d34d57a81a4e739722ce4000d6d5bf58944e81",
     "run_checks.sh": "9cb140399405ffdfcae1ee4f40501f983116551ca0bff6e38ae20d3268e6e620"
+  },
+  "retire_telegram_shadows": {
+    "okx_per_bot_speed_readonly.py": [
+      "f055cd8a4177636d415f0faaad1776a6f42ebfc80fec1b170d8eebd149166bd9",
+      "86a964991d8227414b3c3bbd2b9e5e9f1a1b5d0efd040545b3d13b817db6caf9"
+    ],
+    "okx_reader_diagnostics.py": [
+      "cd9cc336c3dd5cbb6459d02c48e4725616fa78b8595f6802e197ca8a1d413ea5"
+    ]
   },
   "schema": 1,
   "shared": [
@@ -168,16 +178,6 @@
     "tools/build_release_zip.py",
     "tools/okx_market_fill_audit.py",
     "tools/okx_reconcile_trigger_report.py",
-    "tools/okx_reader_230_plus1_readonly_audit.py",
     "tools/export_component.py"
-  ],
-  "retire_telegram_shadows": {
-    "okx_reader_diagnostics.py": [
-      "cd9cc336c3dd5cbb6459d02c48e4725616fa78b8595f6802e197ca8a1d413ea5"
-    ],
-    "okx_per_bot_speed_readonly.py": [
-      "f055cd8a4177636d415f0faaad1776a6f42ebfc80fec1b170d8eebd149166bd9",
-      "86a964991d8227414b3c3bbd2b9e5e9f1a1b5d0efd040545b3d13b817db6caf9"
-    ]
-  }
+  ]
 }

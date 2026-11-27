@@ -22,7 +22,7 @@ def allowed_package_member(name):
     if len(parts)==2 and parts[0]=='tools' and parts[1] in (
             'README.md','build_release_zip.py',
             'okx_market_fill_audit.py','okx_reconcile_trigger_report.py',
-            'okx_reader_230_plus1_readonly_audit.py','export_component.py'):
+            'export_component.py'):
         return True
     if len(parts)==3 and parts[:2]==('docs','history') and parts[2].endswith('.md'):
         return True
@@ -52,7 +52,8 @@ def allowed_package_member(name):
                  ('tests','fixtures','okx_bot_v0782_baseline.py.gz'),
                  ('tests','fixtures','okx_bot_v0783_baseline.py.gz'),
                  ('tests','fixtures','okx_bot_v0784_baseline.py.gz'),
-                 ('tests','fixtures','okx_bot_v0785_baseline.py.gz')):
+                 ('tests','fixtures','okx_bot_v0785_baseline.py.gz'),
+                 ('tests','fixtures','okx_positions_fifo_v0788.py.gz')):
         return True
     if (len(parts)==5 and parts[:2]==('tests','stats_v2_original')
         and parts[2] in ('stats_v2_release_work','stats_v2_prod_candidate')

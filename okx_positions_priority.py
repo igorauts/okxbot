@@ -4,7 +4,6 @@ Shared schema-1 queue and SAME quota/lock files. Legacy FIFO clients safely read
 extra fields and follow the reordered queue. Never creates a second quota.
 No claim of strict emergency preemption when a legacy client already holds quota.
 """
-import math
 import threading
 from okx_positions_fifo import AccountPositionsFIFO, GateUnavailable
 

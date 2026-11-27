@@ -7,7 +7,6 @@ under the original flock inode, conservatively refilling the quota window.
 Real I/O failures and lock failure remain GateUnavailable; engine must provide
 a separately bounded/verified emergency HARD/PANIC GET path before LIVE rollout.
 """
-import errno
 import fcntl
 import json
 import math
@@ -97,7 +96,8 @@ class AccountPositionsFIFO:
         os.ftruncate(fd, 0)
         if os.write(fd, packed) != len(packed):
             raise GateUnavailable('short shared-gate write')
-        os.fsync(fd)
+        # Quota/FIFO state is ephemeral and shared through the page cache.
+        # Keep the original inode and flock; no synchronous disk flush here.
 
     @staticmethod
     def _pid_alive(pid):
@@ -138,7 +138,24 @@ class AccountPositionsFIFO:
             out.append(row)
         return out
 
+    def _boot_quarantine_remaining(self):
+        # A host crash may restore a VALID but older quota JSON after the
+        # asynchronous write. A whole window since kernel boot guarantees
+        # that all pre-crash reservations have expired, even in that case.
+        # Do not use wall time here (NTP / RTC jumps). Linux CLOCK_BOOTTIME
+        # measures elapsed time since boot, including suspended time.
+        try:
+            uptime = time.clock_gettime(time.CLOCK_BOOTTIME)
+        except (AttributeError, OSError, ValueError, OverflowError) as exc:
+            raise GateUnavailable('cannot verify kernel boot age') from exc
+        if not math.isfinite(uptime) or uptime < 0:
+            raise GateUnavailable('invalid kernel boot age')
+        return max(0.0, self.WINDOW - uptime)
+
     def _reserve_if_available(self, now):
+        boot_delay = self._boot_quarantine_remaining()
+        if boot_delay > 0:
+            return False, boot_delay
         fd = self._open(self.path)
         try:
             self._lock(fd, time.monotonic() + self.LOCK_TIMEOUT)
@@ -212,8 +229,11 @@ class AccountPositionsFIFO:
             dirty = loaded is None or queue != loaded.get('waiters', [])
             found = next((w for w in queue if w['id'] == ticket), None)
             if cancel:
-                queue = [w for w in queue if w['id'] != ticket]
-                self._write(fd, {'schema': 1, 'waiters': queue})
+                if found is not None:
+                    queue = [w for w in queue if w['id'] != ticket]
+                    dirty = True
+                if dirty:
+                    self._write(fd, {'schema': 1, 'waiters': queue})
                 return False, 0.0
             if found is None:
                 # Only register once. If already present but pruned (e.g. long

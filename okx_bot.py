@@ -5,32 +5,25 @@ import hashlib
 import hmac
 import json
 import sqlite3
-import http.client
-import ssl
-import socket
 import os
 import copy
 import contextlib
 import secrets
 import sys
 import fcntl
-import shutil
 import threading
 import queue
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_FLOOR, ROUND_HALF_UP, ROUND_CEILING
+from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
 
 import websocket
 from okx_latency import LatencyJournal
 from okx_position_reader_client import PositionReaderPreempted
-from okx_version import ENGINE_VERSION as VER, STATE_SCHEMA
+from okx_version import ENGINE_VERSION as VER
 from okx_state import validate as validate_state, empty as empty_state
-from okx_contracts import base_coin, validate_spec
+from okx_contracts import base_coin
 
 ROOT = Path(__file__).resolve().parent
 CFG = json.loads((ROOT / 'config.json').read_text())
@@ -1213,9 +1206,6 @@ def control_ack(mode, phase, **details):
             return
     atomic_json(CONTROL_ACK,record)
     log('CONTROL_STATE',mode=mode,phase=phase,**details)
-
-
-        # verify_existing already checked tracked cycles.
 
 
 def panic_executions(st):
@@ -4301,9 +4291,7 @@ def live_loop(st,watcher,market,pnl,pnl_worker,dd_worker=None):
     last_full_reconcile_mono=None
     last_b1_shadow=0.0  # Diagnostics sampled at most once/30s per bot.
     # Stable per-bot offset keeps different bots' background audits staggered.
-    from okx_idle_reconcile import (audit_jitter_seconds, aligned_idle_audit_wait,
-                                    wait_for_idle_reconcile, idle_deadline, wait_error_backoff,
-                                    b1_shadow_probe)
+    from okx_idle_reconcile import audit_jitter_seconds, wait_for_idle_reconcile, idle_deadline, wait_error_backoff, b1_shadow_probe
     # OFFLINE candidate: do not change LIVE cadence without separate rollout.
     # Explicit opt-in only, no new REST call or trading decision.
     sync_idle_audits = bool(globals().get('SYNC_IDLE_AUDITS_EXPERIMENT', False))

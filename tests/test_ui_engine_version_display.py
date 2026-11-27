@@ -2,6 +2,7 @@
 import ast
 import hashlib
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -27,6 +28,9 @@ class UiVersionDisplay(unittest.TestCase):
         (self.root/'okx_version.py').write_bytes(self.raw)
         self.ver=release_engine_version()
         self.man=ROOT/'engine_manifest.json'
+        entry=json.loads(self.man.read_text())['engines'][self.ver]
+        for name in [entry['file']]+entry['dependencies']:
+            shutil.copyfile(ROOT/name,self.root/name)
         self.cfg={
             'instrument':'TEST-USDT-SWAP','version':'0.0.0',
             'grid_step':'0.01','take_profit':'0.01','order_size':'1',
@@ -45,6 +49,25 @@ class UiVersionDisplay(unittest.TestCase):
         self.assertEqual(okx_ui.installed_engine_version(self.root,{'ActiveState':'inactive'},self.man),'не определена')
         (self.root/'okx_version.py').unlink()
         self.assertEqual(okx_ui.installed_engine_version(self.root,{'ActiveState':'inactive'},self.man),'не определена')
+
+    def test_tampered_engine_or_dependency_is_unknown(self):
+        for name in ('okx_bot.py','okx_positions_fifo.py','okx_stats_v2_contract.py'):
+            with self.subTest(name=name):
+                p=self.root/name
+                raw=p.read_bytes()
+                p.write_bytes(raw+b'\n# drift\n')
+                self.assertEqual(okx_ui.installed_engine_version(self.root,{'ActiveState':'inactive'},self.man),'не определена')
+                p.write_bytes(raw)
+        p=self.root/'okx_positions_fifo.py'
+        p.unlink()
+        p.symlink_to(ROOT/p.name)
+        self.assertEqual(okx_ui.installed_engine_version(self.root,{'ActiveState':'inactive'},self.man),'не определена')
+
+    def test_incomplete_dependency_manifest_is_unknown(self):
+        manifest=json.loads(self.man.read_text())
+        manifest['engines'][self.ver]['dependency_sha256'].pop('okx_positions_fifo.py')
+        path=self.root/'manifest.json';path.write_text(json.dumps(manifest))
+        self.assertEqual(okx_ui.installed_engine_version(self.root,{'ActiveState':'inactive'},path),'не определена')
 
     def test_active_requires_matching_process_not_merely_disk_file(self):
         self.assertEqual(okx_ui.installed_engine_version(self.root,{'ActiveState':'active','MainPID':'0'},self.man),'не определена')

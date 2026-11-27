@@ -7,7 +7,7 @@ or private fills SQLite. Never touches LIVE files or processes.
 import argparse
 import collections
 from array import array
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 import hashlib
 import heapq
 import json
@@ -15,9 +15,7 @@ import math
 import os
 from pathlib import Path
 import re
-import statistics
 import subprocess
-import sys
 import time
 import zipfile
 
@@ -147,7 +145,7 @@ class Collector:
         hourly=collections.defaultdict(lambda:array('f'))
         intervals=collections.defaultdict(lambda:array('f'))
         counts=collections.Counter(); reasons=collections.Counter(); routes=collections.Counter()
-        min_ts=None;max_ts=None; samples=0;slow=[];first_last={}
+        min_ts=None;max_ts=None; samples=0;slow=[]
         for fp in file_collection(root/'logs','latency.jsonl'):
             for r,ts in ndjson_scan(fp,root,self.start,self.end,stats):
                 try:
@@ -262,7 +260,7 @@ class Collector:
             self.add(f'bots/{bot}/observer_{kind}_{filename}', ''.join(json.dumps(x,ensure_ascii=False)+'\n' for x in buf))
             self.json(f'bots/{bot}/observer_{kind}_{filename}.meta.json',{'records_found_24h':total,'records_exported':len(buf),**warnings})
     def snapshot(self,bot):
-        root=BASE/bot;now=time.time()
+        root=BASE/bot
         meta={'bot':bot}
         for name,rel,keys in (
             ('config','config.json',('version','instrument','active_buy_orders','grid_step','take_profit_step','max_grids')),
@@ -289,7 +287,7 @@ class Collector:
         proc=None
         try:
             proc=subprocess.Popen(['journalctl','-u',unit,'--since',start,'--until',end,'-o','json','--no-pager'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL)
-            summaries=collections.Counter();alerts=collections.deque(maxlen=1700);recent=collections.deque(maxlen=500);count=0;filtered=0
+            summaries=collections.Counter();alerts=collections.deque(maxlen=1700);recent=collections.deque(maxlen=500);count=0
             for raw in proc.stdout:
                 count+=1
                 try:r=json.loads(raw)

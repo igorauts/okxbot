@@ -180,8 +180,8 @@ def table_row(label,value):return f'  {label:<26} {value}'
 def installed_engine_version(root, info=None, manifest_path=None):
     """Installed engine metadata, SHA-pinned to manager manifest; never config.version.
 
-    For active services, additionally ensure the live PID belongs to this bot
-    root, executes okx_bot.py, and started after the metadata was installed.
+    Verify the engine and every pinned dependency, not just its version file.
+    For active services, also verify the live PID, command and installation times.
     Nothing is imported from the bot root or executed on the exchange.
     """
     try:
@@ -208,8 +208,25 @@ def installed_engine_version(root, info=None, manifest_path=None):
         entry = (manifest or {}).get('engines', {}).get(ver)
         if not isinstance(entry, dict):
             return 'не определена'
-        if entry.get('dependency_sha256', {}).get('okx_version.py') != hashlib.sha256(raw).hexdigest():
+        deps = entry.get('dependencies')
+        pins = entry.get('dependency_sha256')
+        if (entry.get('file') != 'okx_bot.py' or not isinstance(deps,list)
+                or not isinstance(pins,dict) or not all(
+                    isinstance(n,str) and re.fullmatch(r'[A-Za-z][A-Za-z0-9_]*\.py',n)
+                    for n in deps)
+                or len(set(deps)) != len(deps) or set(deps) != set(pins)
+                or 'okx_version.py' not in pins or 'okx_bot.py' in pins
+                or pins['okx_version.py'] != hashlib.sha256(raw).hexdigest()
+                or not all(isinstance(h,str) and re.fullmatch(r'[0-9a-f]{64}',h)
+                           for h in [entry.get('sha256'),*pins.values()])):
             return 'не определена'
+        if root.is_symlink() or not root.is_dir():
+            return 'не определена'
+        from okx_dependency_attestation import verify
+        # Verify the selected historical engine entry, not the manager's current
+        # engine. Old engines without a complete pinned dependency list are unknown.
+        verify(root, {'current_version':ver,'engines':{ver:entry}}, bot_only=True)
+        sources = [root/'okx_bot.py'] + [root/n for n in deps]
         if info is not None and info.get('ActiveState') == 'active':
             pid = int(info.get('MainPID') or 0)
             if pid <= 0:
@@ -217,7 +234,8 @@ def installed_engine_version(root, info=None, manifest_path=None):
             proc = Path('/proc') / str(pid)
             if Path(os.readlink(proc / 'cwd')).resolve() != root.resolve():
                 return 'не определена'
-            if b'okx_bot.py' not in (proc / 'cmdline').read_bytes():
+            argv = [os.fsdecode(a) for a in (proc/'cmdline').read_bytes().split(b'\0') if a]
+            if not any(Path(a).name == 'okx_bot.py' and (root/Path(a)).resolve() == (root/'okx_bot.py').resolve() for a in argv[1:]):
                 return 'не определена'
             # Linux starttime (field 22) is relative to system boot.
             rest = (proc / 'stat').read_text().rsplit(')', 1)[1].split()
@@ -226,10 +244,10 @@ def installed_engine_version(root, info=None, manifest_path=None):
                 boot_seconds = next(int(x.split()[1]) for x in f if x.startswith('btime '))
             process_start = boot_seconds + start_ticks / os.sysconf('SC_CLK_TCK')
             # A later on-disk patch must never be mistaken for a running version.
-            if source.stat().st_mtime > process_start + 2.0:
+            if any(p.stat().st_mtime > process_start + 2.0 for p in sources):
                 return 'не определена'
         return 'v' + ver
-    except (OSError, ValueError, TypeError, SyntaxError, KeyError, StopIteration, AttributeError, OverflowError):
+    except (OSError, ValueError, TypeError, SyntaxError, KeyError, StopIteration, AttributeError, OverflowError, RuntimeError):
         return 'не определена'
 
 
@@ -239,7 +257,6 @@ def settings(name,root,unit):
     info=systemd_info(unit);ver=installed_engine_version(root, info)
     buy=int(cfg.get('active_buy_orders',25));real_tp=int(cfg.get('real_tp_target',min(25,int(cfg.get('active_tp_orders',25)))))
     buy_buffer = 5
-    tp_buffer = buy+5
     protect = 5
     coin=str(cfg.get('instrument','')).split('-')[0]
     qty=dec(cfg.get('order_size'));contract=dec(cfg.get('contract_value'))
@@ -308,7 +325,6 @@ def status(name,root,unit):
     counters=read_local_orders(state)
     buy=int(cfg.get('active_buy_orders',25));real_tp=int(cfg.get('real_tp_target',min(25,int(cfg.get('active_tp_orders',25)))))
     buy_buffer = 5
-    tp_buffer = buy+5
     max_tp=150
     mon=read_monitor(root)
     bid=mon.get('bid') if mon and mon.get('bid') else last_local_bid(unit)

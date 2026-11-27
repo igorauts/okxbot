@@ -9,10 +9,11 @@ from pathlib import Path
 
 from okx_position_reader_core import (
     MAX_ACCOUNT_BOTS, Priority, Registration, RegistryError, ReaderError,
-    SharedReaderCore, SnapshotError, assert_can_create, build_snapshot,
+    SharedReaderCore, SnapshotError, build_snapshot,
     validate_registrations,
 )
-from okx_position_reader_ipc import ReaderIPCServer, ipc_request
+from okx_position_reader_ipc import ReaderIPCServer
+from okx_position_reader_client import read_positions
 
 
 def sample(n=5):
@@ -50,7 +51,7 @@ class RegistryTests(unittest.TestCase):
         x=sample(MAX_ACCOUNT_BOTS)
         self.assertEqual(len(validate_registrations(x)),MAX_ACCOUNT_BOTS)
         with self.assertRaises(RegistryError):
-            assert_can_create(x,Registration('eleventh','ELEVENTH-USDT-SWAP'))
+            validate_registrations(x+[Registration('eleventh','ELEVENTH-USDT-SWAP')])
     def test_archived_does_not_occupy_slot(self):
         x=sample(MAX_ACCOUNT_BOTS)+[Registration('old','OLD-USDT-SWAP',verified_archived=True)]
         self.assertEqual(len(validate_registrations(x)),MAX_ACCOUNT_BOTS)
@@ -169,9 +170,9 @@ class IPCTests(unittest.IsolatedAsyncioTestCase):
             await ipc.start()
             try:
                 self.assertEqual(stat.S_IMODE(socket.stat().st_mode),0o600)
-                data=await ipc_request(socket,'ASSET0-USDT-SWAP',Priority.NORMAL,account_uid='TEST_UID')
-                self.assertEqual(data['instrument'],'ASSET0-USDT-SWAP')
-                self.assertEqual({r['instId'] for r in data['rows']},{'ASSET0-USDT-SWAP'})
+                rows=await asyncio.to_thread(read_positions,socket,'ASSET0-USDT-SWAP',account_uid='TEST_UID')
+                self.assertEqual(len(rows),1)
+                self.assertEqual({r['instId'] for r in rows},{'ASSET0-USDT-SWAP'})
             finally:
                 await ipc.close()
             self.assertFalse(socket.exists())

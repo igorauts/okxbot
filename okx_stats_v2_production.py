@@ -344,7 +344,7 @@ class SingleAuthorityStats:
             if (str(exc)!='HOT PnL ledger row not committed'
                     or self.pnl_ledger is None):
                 raise
-            inserted=self.pnl_ledger.ingest_history(hot_state,fills)
+            self.pnl_ledger.ingest_history(hot_state,fills)
             # The persisted accounted cursor predates any new ledger rows.
             # Even when another PnL worker won the race, re-pin next time.
             raise NotReady('HOT PnL ledger repair attempted; next pin required') from exc

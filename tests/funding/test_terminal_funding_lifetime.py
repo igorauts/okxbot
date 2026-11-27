@@ -244,14 +244,29 @@ class EndToEndTerminal(unittest.TestCase):
         st=self.monitor_state();outgoing=[];self.scan(st,outgoing)
         self.assertEqual(len(outgoing),1);self.assertIn('FUNDING: $0.00000000',outgoing[0][1])
         r,c=self.collect(T+1000);self.assertEqual(c.requests,0);self.assertEqual(read_terminal_snapshot(self.db,ident)[0],'0')
+    def test_late_funding_proof_at_80_seconds_has_one_confirmed_report(self):
+        self.end=T+3*60000
+        self.collect(T-HOUR+5*60000);self.retire()
+        st=self.monitor_state();outgoing=[]
+        self.scan(st,outgoing,now=self.end+76000);self.assertEqual(outgoing,[])
+        self.assertEqual(terminal_wait(self.root,path=self.db,now_ms=self.end+79999)[0],True)
+        r,c=self.collect(self.end+80000);self.assertEqual(r['terminal_published'],1)
+        self.scan(st,outgoing,now=self.end+81000)
+        self.assertEqual(len(outgoing),1);self.assertIn('FUNDING: +$16.53985103',outgoing[0][1])
+        self.scan(json.loads(json.dumps(st)),outgoing,now=self.end+91000);self.assertEqual(len(outgoing),1)
+
     def test_no_collection_cannot_silence_forever(self):
         self.end=T+3*60000
         self.collect(T-HOUR+5*60000);self.retire()
         st=self.monitor_state();outgoing=[]
         self.scan(st,outgoing,now=self.end+76000)
+        self.assertEqual(outgoing,[])
+        self.scan(st,outgoing,now=self.end+89999)
+        self.assertEqual(outgoing,[])
+        self.scan(st,outgoing,now=self.end+90000)
         self.assertEqual(len(outgoing),1);self.assertIn('INCOMPLETE_HISTORY_OR_COLLECTION_TIMEOUT',outgoing[0][1])
-        self.collect(self.end+77000)
-        self.scan(json.loads(json.dumps(st)),outgoing,now=self.end+78000)
+        self.collect(self.end+91000)
+        self.scan(json.loads(json.dumps(st)),outgoing,now=self.end+92000)
         self.assertEqual(len(outgoing),1)
     def test_all_bots_terminal_and_hard_open(self):
         self.collect(T+5*60000);self.retire('RETIRED','3')

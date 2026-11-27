@@ -206,10 +206,13 @@ def terminal_funding(root, *, path=None):
         return None
 
 
+TERMINAL_REPORT_DEADLINE_MS = 90_000
+
+
 def terminal_wait(root, *, path=None, now_ms=None):
     """Return (wait, reason) for a single final PANIC financial report.
 
-    At most one minute tick plus a bounded transport allowance after PANIC,
+    At most one minute tick plus a 30-second allowance after PANIC,
     including any remaining settlement minute. Never block Telegram on Funding I/O or retry forever.
     """
     db=TERMINAL_DB if path is None else path
@@ -222,7 +225,7 @@ def terminal_wait(root, *, path=None, now_ms=None):
         if reason:
             return False,reason
         now=int(time.time()*1000) if now_ms is None else integer_ms(now_ms)
-        deadline=ident[3]+75000
+        deadline=ident[3]+TERMINAL_REPORT_DEADLINE_MS
         return now<deadline,'INCOMPLETE_HISTORY_OR_COLLECTION_TIMEOUT'
     except (OSError,sqlite3.Error,ValueError,TypeError,KeyError,ArithmeticError) as exc:
         reason=str(exc)

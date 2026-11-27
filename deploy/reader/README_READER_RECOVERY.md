@@ -35,14 +35,55 @@ Source of account credentials already used by the manager: `/root/okx/.okxbot_ac
 Existing bot code parses `<bot>/.env` directly; its systemd unit does **not** use
 `EnvironmentFile=` for this Reader configuration. Therefore adding a bot
 `Environment=` drop-in would not change the bot's internally parsed `ENV`.
-The two non-secret options below document the existing format. Preserve all
+The non-secret options below document the verified priority-mode LIVE configuration. Preserve all
 other credentials and parameters, never replace entire `.env` files:
 
 ```dotenv
 OKX_POSITION_READER_SOCKET=/run/okx-position-reader/positions.sock
-OKX_POSITION_READER_QUOTA_SCHEDULING=mixed-fifo
+OKX_POSITION_READER_QUOTA_SCHEDULING=priority
+OKX_POSITION_READER_PRIORITY_ACK=ALL_BOTS_PRIORITY_AWARE
 ```
 
-No `priority` ack. Every new bot must be validated against the actual Reader
+The ACK is permitted only after verifying the entire active fleet is priority-aware.
+Use explicit `mixed-fifo` without ACK only for a separately verified legacy migration.
+Every new bot must be validated against the actual Reader
 registry and shared quota gate independently. Do not apply opt-ins to terminal
 archives for the sake of compatibility.
+
+## Host-crash quota safety (no-fsync migration)
+
+The new FIFO refuses reservations during the first full quota window after
+kernel boot (`CLOCK_BOOTTIME`, 2.05 s for positions and 2.10 s for fills).
+This protects even a VALID but stale persisted quota restored after a host
+crash. The file paths, inodes, schema and rate limits remain unchanged.
+
+**Before the first no-fsync consumer is deployed**, install the exact reviewed
+`05-quota-boot-safety.conf` in these two directories under `/etc/systemd/system`:
+
+- `okx-grid-.service.d/` (systemd dash-prefix inheritance covers all existing and future grid services)
+- `okx-position-reader.service.d/`
+
+Preserve all existing Reader/bot drop-ins. Reload systemd without restarting
+services. Never start stopped or terminal bots for this check. The pinned
+installer inventories services using structured systemd D-Bus replies and the
+registry, excludes disabled inactive bots with durable terminal evidence,
+requires the prefix barrier for all startable legacy bots (including stopped
+nonterminal), and checks the exact effective non-ignoring `ExecStartPre` argv
+and `NeedDaemonReload=no`. An unexpected legacy service outside the prefix
+blocks deployment for explicit investigation. The new in-code guard capability
+is recorded in the engine manifest and verified against actual dependency bytes.
+Reader requires the external barrier until its guarded installed source and
+post-shared process identity are proven. Keep the two drop-ins through mixed
+operation and any legacy rollback; no per-bot files are needed. When all
+consumers are attested as guarded, these external barriers are not required for
+that verified fleet. Missing runtime evidence conservatively requires the
+external barrier again. Never bypass systemd to launch a legacy consumer during
+early boot. No unit mutation or reboot is authorized by this OFFLINE package.
+
+The exact D-Bus reply format and effective prefix inheritance must be checked
+on the actual VPS before the first mutation/upgrade.
+
+The normal service template uses the reviewed priority configuration. Any
+other effective recovery drop-ins must be inventoried on the actual host;
+this template alone is not proof of full recovery parity. Do not remove
+legacy mixed-fifo support based solely on the currently running fleet.

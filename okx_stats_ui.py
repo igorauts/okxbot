@@ -208,9 +208,41 @@ def structured_payload(stats):
 
 
 def requires_structured_snapshot(cfg, stats):
-    from okx_version import ENGINE_VERSION
-    return ('stats_v2' in stats or cfg.get('version')==ENGINE_VERSION
-            or stats.get('bot_version')==ENGINE_VERSION)
+    """Do not downgrade an attested structured producer to legacy text.
+
+    A consumer's imported ENGINE_VERSION can differ from the producer during
+    a staged rollout. Only this fallback decision reads the local manifest;
+    normal structured validation never needs that extra read. Historical
+    engines with the production StatsWorker dependency are also structured.
+    """
+    if 'stats_v2' in stats:
+        return True
+    try:
+        path = Path(__file__).resolve().with_name('engine_manifest.json')
+        if path.is_symlink() or not path.is_file():
+            return True  # cannot establish legacy compatibility
+        manifest = json.loads(path.read_text(encoding='utf-8'))
+        engines = manifest['engines']
+        current = manifest['current_version']
+        if not isinstance(engines, dict) or current not in engines:
+            return True
+        for version in (cfg.get('version'), stats.get('bot_version')):
+            if version == current:
+                return True
+            if version is None:
+                continue
+            if not isinstance(version, str):
+                return True
+            entry = engines.get(version)
+            if entry is not None:
+                deps = entry.get('dependencies')
+                if not isinstance(deps, list):
+                    return True
+                if 'okx_stats_v2_production.py' in deps:
+                    return True
+        return False
+    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+        return True
 
 
 def validate_financial_snapshot(root, instrument, stats, *, now=None):
